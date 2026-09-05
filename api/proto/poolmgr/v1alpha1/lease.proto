@@ -4,6 +4,7 @@ package poolmgr.v1alpha1;
 
 import "google/protobuf/empty.proto";
 import "google/protobuf/timestamp.proto";
+import "poolmgr/v1alpha1/types.proto";
 import "types/microvm.proto";
 
 option go_package = "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1;poolmgrv1alpha1";
@@ -19,7 +20,7 @@ service Lease {
 }
 
 message ClaimVMRequest {
-  string pool_name = 1;
+  PoolRef pool = 1;
 }
 
 message ClaimVMResponse {

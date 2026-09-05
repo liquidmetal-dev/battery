@@ -21,16 +21,17 @@ message CreatePoolRequest {
 }
 
 message UpdatePoolRequest {
-  string name = 1;
-  PoolSpec spec = 2;
+  // Spec identifies the pool to update via spec.name/spec.namespace (the same identifier
+  // CreatePoolRequest uses) and carries the new desired spec.
+  PoolSpec spec = 1;
 }
 
 message DeletePoolRequest {
-  string name = 1;
+  PoolRef ref = 1;
 }
 
 message GetPoolRequest {
-  string name = 1;
+  PoolRef ref = 1;
 }
 
 message ListPoolsRequest {

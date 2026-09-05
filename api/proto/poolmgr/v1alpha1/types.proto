@@ -10,13 +10,17 @@ option go_package = "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alph
 
 // ReplenishmentStrategyType names the strategy a pool uses to keep itself topped up.
 enum ReplenishmentStrategyType {
+  // REPLENISHMENT_STRATEGY_TYPE_UNSPECIFIED is the zero value. It is never a valid choice for
+  // a pool spec, so the server can reject a request that omits the field instead of silently
+  // defaulting to a real strategy.
+  REPLENISHMENT_STRATEGY_TYPE_UNSPECIFIED = 0;
   // IMMEDIATE_ON_LEASE starts provisioning one new VM on every successful claim.
-  IMMEDIATE_ON_LEASE = 0;
+  IMMEDIATE_ON_LEASE = 1;
   // MIN_SIZE_THRESHOLD provisions up to the pool's target size whenever the available
   // count drops below min_size.
-  MIN_SIZE_THRESHOLD = 1;
+  MIN_SIZE_THRESHOLD = 2;
   // REPLACE_ON_DELETE provisions exactly one replacement on every VM deletion.
-  REPLACE_ON_DELETE = 2;
+  REPLACE_ON_DELETE = 3;
 }
 
 // ReplenishmentStrategy configures a pool's single replenishment strategy plus its
@@ -31,10 +35,21 @@ message ReplenishmentStrategy {
 
 // HookFailurePolicy decides what happens to a VM whose create or pre-lease hook fails.
 enum HookFailurePolicy {
+  // HOOK_FAILURE_POLICY_UNSPECIFIED is the zero value. It is never a valid choice for a pool
+  // spec, so the server can reject a request that omits the field instead of silently
+  // defaulting to a real policy.
+  HOOK_FAILURE_POLICY_UNSPECIFIED = 0;
   // DELETE_AND_REPLACE deletes the VM and lets replenishment provision a replacement.
-  DELETE_AND_REPLACE = 0;
+  DELETE_AND_REPLACE = 1;
   // QUARANTINE marks the VM unhealthy and retains it for operator inspection.
-  QUARANTINE = 1;
+  QUARANTINE = 2;
+}
+
+// PoolRef unambiguously identifies a pool by its name and namespace. Used wherever a request
+// needs to reference an existing pool without also carrying its (mutable) spec.
+message PoolRef {
+  string name = 1;
+  string namespace = 2;
 }
 
 // PoolSpec is the admin-managed specification of a warm pool.
