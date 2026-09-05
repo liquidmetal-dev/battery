@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package poolmgr.v1alpha1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+import "poolmgr/v1alpha1/types.proto";
+import "types/microvm.proto";
+
+option go_package = "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1;poolmgrv1alpha1";
+
+// Lease lets a consumer claim a VM from a pool and manage its lease.
+service Lease {
+  // ClaimVM atomically picks an AVAILABLE VM from the named pool. Fails with
+  // RESOURCE_EXHAUSTED when no VM is AVAILABLE.
+  rpc ClaimVM(ClaimVMRequest) returns (ClaimVMResponse);
+  // Heartbeat is keyed by lease_id and extends the lease's expiry.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc ReleaseVM(ReleaseVMRequest) returns (google.protobuf.Empty);
+}
+
+message ClaimVMRequest {
+  PoolRef pool = 1;
+}
+
+message ClaimVMResponse {
+  // LeaseId is the opaque token to present on every subsequent Heartbeat/ReleaseVM call.
+  string lease_id = 1;
+  string vm_uid = 2;
+
+  // NetworkInterfaces is copied from flintlock's MicroVMStatus.network_interfaces so the
+  // consumer can reach the VM.
+  map<string, flintlock.types.NetworkInterfaceStatus> network_interfaces = 3;
+}
+
+message HeartbeatRequest {
+  string lease_id = 1;
+}
+
+message HeartbeatResponse {
+  google.protobuf.Timestamp expires_at = 1;
+}
+
+message ReleaseVMRequest {
+  string lease_id = 1;
+}
