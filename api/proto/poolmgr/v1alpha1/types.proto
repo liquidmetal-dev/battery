@@ -109,6 +109,9 @@ message VMRecord {
   optional string lease_id = 5;
   google.protobuf.Timestamp created_at = 6;
   google.protobuf.Timestamp updated_at = 7;
+  // PoolNamespace is the namespace of the pool identified by pool_name (together they form
+  // the pool's PoolRef identity).
+  string pool_namespace = 8;
 }
 
 // LeaseRecord is the pool manager's record of an outstanding claim on a VM. Named
@@ -121,6 +124,9 @@ message LeaseRecord {
   google.protobuf.Timestamp claimed_at = 4;
   google.protobuf.Timestamp last_heartbeat_at = 5;
   google.protobuf.Timestamp expires_at = 6;
+  // PoolNamespace is the namespace of the pool identified by pool_name (together they form
+  // the pool's PoolRef identity).
+  string pool_namespace = 7;
 }
 
 // EventType names the kind of change an Event describes.
@@ -152,6 +158,10 @@ message Event {
   // a oneof per event type; can be replaced with a typed oneof later without changing the
   // Event's RPC shape.
   string payload_json = 6;
+
+  // PoolNamespace is the namespace of the pool identified by pool_name (together they form
+  // the pool's PoolRef identity).
+  string pool_namespace = 7;
 }
 
 // PoolStatus is the live health of a pool, alongside its PoolSpec.
