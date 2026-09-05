@@ -25,8 +25,8 @@ battery is made up of two binaries:
   - `Lease` — claim a VM from a pool, heartbeat it, and release it back.
   - `Events` — a server-streaming subscription for pool/VM/lease lifecycle events.
 
-  It reconciles a fleet of flintlock hosts against each pool's desired state, replenishing
-  VMs using a per-pool strategy, and persists state to an embedded SQLite database.
+  It's designed to reconcile a fleet of flintlock hosts against each pool's desired state, replenishing
+  VMs using a per-pool strategy, and, once implemented, persist state (e.g., in an embedded SQLite database).
 
 - **`poolmgr-hostagent`** (`cmd/poolmgr-hostagent`) — a sidecar that runs alongside each
   flintlock host. Flintlock's guest-agent is only reachable over a host-local vsock socket,
