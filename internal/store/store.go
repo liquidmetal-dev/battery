@@ -29,13 +29,13 @@ type Store interface {
 
 	CreateVM(ctx context.Context, v *poolmgrv1alpha1.VMRecord) error
 	GetVM(ctx context.Context, uid string) (*poolmgrv1alpha1.VMRecord, error)
-	ListVMsByPool(ctx context.Context, poolName string, phase *poolmgrv1alpha1.VMPhase) ([]*poolmgrv1alpha1.VMRecord, error)
+	ListVMsByPool(ctx context.Context, poolName, poolNamespace string, phase *poolmgrv1alpha1.VMPhase) ([]*poolmgrv1alpha1.VMRecord, error)
 	UpdateVM(ctx context.Context, v *poolmgrv1alpha1.VMRecord) error
 	DeleteVM(ctx context.Context, uid string) error
-	// ClaimAvailableVM atomically selects one AVAILABLE VM in poolName and
-	// marks it LEASED, returning the updated record. Returns ErrNoAvailableVM
-	// if no VM in the pool is currently AVAILABLE.
-	ClaimAvailableVM(ctx context.Context, poolName string) (*poolmgrv1alpha1.VMRecord, error)
+	// ClaimAvailableVM atomically selects one AVAILABLE VM in the pool identified by
+	// (poolName, poolNamespace) and marks it LEASED, returning the updated record.
+	// Returns ErrNoAvailableVM if no VM in the pool is currently AVAILABLE.
+	ClaimAvailableVM(ctx context.Context, poolName, poolNamespace string) (*poolmgrv1alpha1.VMRecord, error)
 
 	CreateLease(ctx context.Context, l *poolmgrv1alpha1.LeaseRecord) error
 	GetLease(ctx context.Context, leaseID string) (*poolmgrv1alpha1.LeaseRecord, error)
@@ -44,7 +44,7 @@ type Store interface {
 	ListExpiredLeases(ctx context.Context, now time.Time) ([]*poolmgrv1alpha1.LeaseRecord, error)
 
 	AppendEvent(ctx context.Context, e *poolmgrv1alpha1.Event) error
-	ListEventsSince(ctx context.Context, poolName string, sinceID int64) ([]*poolmgrv1alpha1.Event, error)
+	ListEventsSince(ctx context.Context, poolName, poolNamespace string, sinceID int64) ([]*poolmgrv1alpha1.Event, error)
 
 	Close() error
 }

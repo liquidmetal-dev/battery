@@ -109,10 +109,22 @@ func rowToPool(row poolRow) (*poolmgrv1alpha1.PoolSpec, error) {
 	}, nil
 }
 
+// requireTimestamp rejects a nil timestamp instead of letting AsTime() silently return the
+// Unix epoch: (*timestamppb.Timestamp)(nil).AsTime() does not panic (its Get* accessors are
+// nil-safe), so a caller that forgets to set a required timestamp would otherwise get no
+// error and a row permanently persisted with a 1970-01-01 value.
+func requireTimestamp(field string, ts *timestamppb.Timestamp) (time.Time, error) {
+	if ts == nil {
+		return time.Time{}, fmt.Errorf("store: %s is required", field)
+	}
+	return ts.AsTime(), nil
+}
+
 // vmRow is the flat column representation of a vms table row.
 type vmRow struct {
 	uid           string
 	poolName      string
+	poolNamespace string
 	flintlockHost string
 	phase         int32
 	leaseID       sql.NullString
@@ -120,25 +132,36 @@ type vmRow struct {
 	updatedAt     int64
 }
 
-func vmToRow(v *poolmgrv1alpha1.VMRecord) vmRow {
+func vmToRow(v *poolmgrv1alpha1.VMRecord) (vmRow, error) {
+	createdAt, err := requireTimestamp("created_at", v.GetCreatedAt())
+	if err != nil {
+		return vmRow{}, err
+	}
+	updatedAt, err := requireTimestamp("updated_at", v.GetUpdatedAt())
+	if err != nil {
+		return vmRow{}, err
+	}
+
 	row := vmRow{
 		uid:           v.GetUid(),
 		poolName:      v.GetPoolName(),
+		poolNamespace: v.GetPoolNamespace(),
 		flintlockHost: v.GetFlintlockHost(),
 		phase:         int32(v.GetPhase()),
-		createdAt:     v.GetCreatedAt().AsTime().UnixNano(),
-		updatedAt:     v.GetUpdatedAt().AsTime().UnixNano(),
+		createdAt:     createdAt.UnixNano(),
+		updatedAt:     updatedAt.UnixNano(),
 	}
 	if v.LeaseId != nil {
 		row.leaseID = sql.NullString{String: *v.LeaseId, Valid: true}
 	}
-	return row
+	return row, nil
 }
 
 func rowToVM(row vmRow) *poolmgrv1alpha1.VMRecord {
 	v := &poolmgrv1alpha1.VMRecord{
 		Uid:           row.uid,
 		PoolName:      row.poolName,
+		PoolNamespace: row.poolNamespace,
 		FlintlockHost: row.flintlockHost,
 		Phase:         poolmgrv1alpha1.VMPhase(row.phase),
 		CreatedAt:     timestamppb.New(time.Unix(0, row.createdAt)),
@@ -156,20 +179,35 @@ type leaseRow struct {
 	leaseID         string
 	vmUID           string
 	poolName        string
+	poolNamespace   string
 	claimedAt       int64
 	lastHeartbeatAt int64
 	expiresAt       int64
 }
 
-func leaseToRow(l *poolmgrv1alpha1.LeaseRecord) leaseRow {
+func leaseToRow(l *poolmgrv1alpha1.LeaseRecord) (leaseRow, error) {
+	claimedAt, err := requireTimestamp("claimed_at", l.GetClaimedAt())
+	if err != nil {
+		return leaseRow{}, err
+	}
+	lastHeartbeatAt, err := requireTimestamp("last_heartbeat_at", l.GetLastHeartbeatAt())
+	if err != nil {
+		return leaseRow{}, err
+	}
+	expiresAt, err := requireTimestamp("expires_at", l.GetExpiresAt())
+	if err != nil {
+		return leaseRow{}, err
+	}
+
 	return leaseRow{
 		leaseID:         l.GetLeaseId(),
 		vmUID:           l.GetVmUid(),
 		poolName:        l.GetPoolName(),
-		claimedAt:       l.GetClaimedAt().AsTime().UnixNano(),
-		lastHeartbeatAt: l.GetLastHeartbeatAt().AsTime().UnixNano(),
-		expiresAt:       l.GetExpiresAt().AsTime().UnixNano(),
-	}
+		poolNamespace:   l.GetPoolNamespace(),
+		claimedAt:       claimedAt.UnixNano(),
+		lastHeartbeatAt: lastHeartbeatAt.UnixNano(),
+		expiresAt:       expiresAt.UnixNano(),
+	}, nil
 }
 
 func rowToLease(row leaseRow) *poolmgrv1alpha1.LeaseRecord {
@@ -177,6 +215,7 @@ func rowToLease(row leaseRow) *poolmgrv1alpha1.LeaseRecord {
 		LeaseId:         row.leaseID,
 		VmUid:           row.vmUID,
 		PoolName:        row.poolName,
+		PoolNamespace:   row.poolNamespace,
 		ClaimedAt:       timestamppb.New(time.Unix(0, row.claimedAt)),
 		LastHeartbeatAt: timestamppb.New(time.Unix(0, row.lastHeartbeatAt)),
 		ExpiresAt:       timestamppb.New(time.Unix(0, row.expiresAt)),

@@ -148,16 +148,18 @@ without changing the external API.
 
 **VMRecord** (per-VM state owned by the pool manager, cross-referenced with flintlock's own
 `MicroVMStatus` by UID):
-- `uid` (flintlock UID), `pool_name`, `flintlock_host`
+- `uid` (flintlock UID), `pool_name`, `pool_namespace` (together identify the owning pool, as
+  `PoolRef` does), `flintlock_host`
 - `phase`: `PROVISIONING → CREATE_HOOK_RUNNING → AVAILABLE → LEASED → PRE_LEASE_HOOK_RUNNING
   (transient, before handing to consumer) → DELETING` / `QUARANTINED` / `FAILED`
 - `lease_id` (nullable), timestamps
 
 **Lease**:
-- `lease_id` (opaque token, returned from `ClaimVM`), `vm_uid`, `pool_name`
+- `lease_id` (opaque token, returned from `ClaimVM`), `vm_uid`, `pool_name`, `pool_namespace`
 - `claimed_at`, `last_heartbeat_at`, `expires_at` (computed from pool's threshold)
 
-**Event** (outbox row): `id`, `pool_name`, `vm_uid`, `type`, `payload`, `created_at`.
+**Event** (outbox row): `id`, `pool_name`, `pool_namespace`, `vm_uid`, `type`, `payload`,
+`created_at`.
 Event types: `VMProvisioned`, `VMAvailable`, `VMClaimed`, `VMReleased`,
 `VMExpiringSoon` (optional pre-warning), `VMDeletedDueToExpiry`, `VMDeletedOnRelease`,
 `VMHookFailed`, `PoolReplenishing`, `PoolSizeBelowTarget`.

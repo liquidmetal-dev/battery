@@ -160,11 +160,15 @@ func (s *sqliteStore) DeletePool(ctx context.Context, name, namespace string) er
 }
 
 func (s *sqliteStore) CreateVM(ctx context.Context, v *poolmgrv1alpha1.VMRecord) error {
-	row := vmToRow(v)
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO vms (uid, pool_name, flintlock_host, phase, lease_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		row.uid, row.poolName, row.flintlockHost, row.phase, row.leaseID, row.createdAt, row.updatedAt,
+	row, err := vmToRow(v)
+	if err != nil {
+		return fmt.Errorf("store: marshal vm: %w", err)
+	}
+
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO vms (uid, pool_name, pool_namespace, flintlock_host, phase, lease_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		row.uid, row.poolName, row.poolNamespace, row.flintlockHost, row.phase, row.leaseID, row.createdAt, row.updatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("store: insert vm: %w", err)
@@ -174,11 +178,11 @@ func (s *sqliteStore) CreateVM(ctx context.Context, v *poolmgrv1alpha1.VMRecord)
 
 func (s *sqliteStore) GetVM(ctx context.Context, uid string) (*poolmgrv1alpha1.VMRecord, error) {
 	r := s.db.QueryRowContext(ctx, `
-		SELECT uid, pool_name, flintlock_host, phase, lease_id, created_at, updated_at
+		SELECT uid, pool_name, pool_namespace, flintlock_host, phase, lease_id, created_at, updated_at
 		FROM vms WHERE uid = ?`, uid)
 
 	var row vmRow
-	err := r.Scan(&row.uid, &row.poolName, &row.flintlockHost, &row.phase, &row.leaseID, &row.createdAt, &row.updatedAt)
+	err := r.Scan(&row.uid, &row.poolName, &row.poolNamespace, &row.flintlockHost, &row.phase, &row.leaseID, &row.createdAt, &row.updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -188,10 +192,10 @@ func (s *sqliteStore) GetVM(ctx context.Context, uid string) (*poolmgrv1alpha1.V
 	return rowToVM(row), nil
 }
 
-func (s *sqliteStore) ListVMsByPool(ctx context.Context, poolName string, phase *poolmgrv1alpha1.VMPhase) ([]*poolmgrv1alpha1.VMRecord, error) {
-	query := `SELECT uid, pool_name, flintlock_host, phase, lease_id, created_at, updated_at
-		FROM vms WHERE pool_name = ?`
-	args := []any{poolName}
+func (s *sqliteStore) ListVMsByPool(ctx context.Context, poolName, poolNamespace string, phase *poolmgrv1alpha1.VMPhase) ([]*poolmgrv1alpha1.VMRecord, error) {
+	query := `SELECT uid, pool_name, pool_namespace, flintlock_host, phase, lease_id, created_at, updated_at
+		FROM vms WHERE pool_name = ? AND pool_namespace = ?`
+	args := []any{poolName, poolNamespace}
 	if phase != nil {
 		query += ` AND phase = ?`
 		args = append(args, int32(*phase))
@@ -207,7 +211,7 @@ func (s *sqliteStore) ListVMsByPool(ctx context.Context, poolName string, phase 
 	var vms []*poolmgrv1alpha1.VMRecord
 	for rows.Next() {
 		var row vmRow
-		if err := rows.Scan(&row.uid, &row.poolName, &row.flintlockHost, &row.phase, &row.leaseID, &row.createdAt, &row.updatedAt); err != nil {
+		if err := rows.Scan(&row.uid, &row.poolName, &row.poolNamespace, &row.flintlockHost, &row.phase, &row.leaseID, &row.createdAt, &row.updatedAt); err != nil {
 			return nil, fmt.Errorf("store: scan vm: %w", err)
 		}
 		vms = append(vms, rowToVM(row))
@@ -219,11 +223,15 @@ func (s *sqliteStore) ListVMsByPool(ctx context.Context, poolName string, phase 
 }
 
 func (s *sqliteStore) UpdateVM(ctx context.Context, v *poolmgrv1alpha1.VMRecord) error {
-	row := vmToRow(v)
+	row, err := vmToRow(v)
+	if err != nil {
+		return fmt.Errorf("store: marshal vm: %w", err)
+	}
+
 	res, err := s.db.ExecContext(ctx, `
-		UPDATE vms SET pool_name = ?, flintlock_host = ?, phase = ?, lease_id = ?, updated_at = ?
+		UPDATE vms SET pool_name = ?, pool_namespace = ?, flintlock_host = ?, phase = ?, lease_id = ?, updated_at = ?
 		WHERE uid = ?`,
-		row.poolName, row.flintlockHost, row.phase, row.leaseID, row.updatedAt, row.uid,
+		row.poolName, row.poolNamespace, row.flintlockHost, row.phase, row.leaseID, row.updatedAt, row.uid,
 	)
 	if err != nil {
 		return fmt.Errorf("store: update vm: %w", err)
@@ -239,7 +247,7 @@ func (s *sqliteStore) DeleteVM(ctx context.Context, uid string) error {
 	return checkRowsAffected(res)
 }
 
-func (s *sqliteStore) ClaimAvailableVM(ctx context.Context, poolName string) (*poolmgrv1alpha1.VMRecord, error) {
+func (s *sqliteStore) ClaimAvailableVM(ctx context.Context, poolName, poolNamespace string) (*poolmgrv1alpha1.VMRecord, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("store: begin claim tx: %w", err)
@@ -248,8 +256,8 @@ func (s *sqliteStore) ClaimAvailableVM(ctx context.Context, poolName string) (*p
 
 	var uid string
 	err = tx.QueryRowContext(ctx, `
-		SELECT uid FROM vms WHERE pool_name = ? AND phase = ? LIMIT 1`,
-		poolName, int32(poolmgrv1alpha1.VMPhase_AVAILABLE),
+		SELECT uid FROM vms WHERE pool_name = ? AND pool_namespace = ? AND phase = ? LIMIT 1`,
+		poolName, poolNamespace, int32(poolmgrv1alpha1.VMPhase_AVAILABLE),
 	).Scan(&uid)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNoAvailableVM
@@ -258,19 +266,30 @@ func (s *sqliteStore) ClaimAvailableVM(ctx context.Context, poolName string) (*p
 		return nil, fmt.Errorf("store: select available vm: %w", err)
 	}
 
+	// Guard the UPDATE with "AND phase = AVAILABLE" and check rows affected, rather than
+	// trusting the SELECT above: if some other writer claimed this uid between the SELECT
+	// and here, this UPDATE must not silently re-claim it too.
 	now := time.Now().UnixNano()
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE vms SET phase = ?, updated_at = ? WHERE uid = ?`,
-		int32(poolmgrv1alpha1.VMPhase_LEASED), now, uid,
-	); err != nil {
+	res, err := tx.ExecContext(ctx, `
+		UPDATE vms SET phase = ?, updated_at = ? WHERE uid = ? AND phase = ?`,
+		int32(poolmgrv1alpha1.VMPhase_LEASED), now, uid, int32(poolmgrv1alpha1.VMPhase_AVAILABLE),
+	)
+	if err != nil {
 		return nil, fmt.Errorf("store: claim vm: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("store: claim vm rows affected: %w", err)
+	}
+	if n == 0 {
+		return nil, ErrNoAvailableVM
 	}
 
 	var row vmRow
 	err = tx.QueryRowContext(ctx, `
-		SELECT uid, pool_name, flintlock_host, phase, lease_id, created_at, updated_at
+		SELECT uid, pool_name, pool_namespace, flintlock_host, phase, lease_id, created_at, updated_at
 		FROM vms WHERE uid = ?`, uid,
-	).Scan(&row.uid, &row.poolName, &row.flintlockHost, &row.phase, &row.leaseID, &row.createdAt, &row.updatedAt)
+	).Scan(&row.uid, &row.poolName, &row.poolNamespace, &row.flintlockHost, &row.phase, &row.leaseID, &row.createdAt, &row.updatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("store: reload claimed vm: %w", err)
 	}
@@ -283,11 +302,15 @@ func (s *sqliteStore) ClaimAvailableVM(ctx context.Context, poolName string) (*p
 }
 
 func (s *sqliteStore) CreateLease(ctx context.Context, l *poolmgrv1alpha1.LeaseRecord) error {
-	row := leaseToRow(l)
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO leases (lease_id, vm_uid, pool_name, claimed_at, last_heartbeat_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		row.leaseID, row.vmUID, row.poolName, row.claimedAt, row.lastHeartbeatAt, row.expiresAt,
+	row, err := leaseToRow(l)
+	if err != nil {
+		return fmt.Errorf("store: marshal lease: %w", err)
+	}
+
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO leases (lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		row.leaseID, row.vmUID, row.poolName, row.poolNamespace, row.claimedAt, row.lastHeartbeatAt, row.expiresAt,
 	)
 	if err != nil {
 		return fmt.Errorf("store: insert lease: %w", err)
@@ -297,11 +320,11 @@ func (s *sqliteStore) CreateLease(ctx context.Context, l *poolmgrv1alpha1.LeaseR
 
 func (s *sqliteStore) GetLease(ctx context.Context, leaseID string) (*poolmgrv1alpha1.LeaseRecord, error) {
 	r := s.db.QueryRowContext(ctx, `
-		SELECT lease_id, vm_uid, pool_name, claimed_at, last_heartbeat_at, expires_at
+		SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at
 		FROM leases WHERE lease_id = ?`, leaseID)
 
 	var row leaseRow
-	err := r.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt)
+	err := r.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -332,7 +355,7 @@ func (s *sqliteStore) DeleteLease(ctx context.Context, leaseID string) error {
 
 func (s *sqliteStore) ListExpiredLeases(ctx context.Context, now time.Time) ([]*poolmgrv1alpha1.LeaseRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT lease_id, vm_uid, pool_name, claimed_at, last_heartbeat_at, expires_at
+		SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at
 		FROM leases WHERE expires_at <= ? ORDER BY expires_at`, now.UnixNano())
 	if err != nil {
 		return nil, fmt.Errorf("store: query expired leases: %w", err)
@@ -342,7 +365,7 @@ func (s *sqliteStore) ListExpiredLeases(ctx context.Context, now time.Time) ([]*
 	var leases []*poolmgrv1alpha1.LeaseRecord
 	for rows.Next() {
 		var row leaseRow
-		if err := rows.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt); err != nil {
+		if err := rows.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt); err != nil {
 			return nil, fmt.Errorf("store: scan lease: %w", err)
 		}
 		leases = append(leases, rowToLease(row))
@@ -354,10 +377,15 @@ func (s *sqliteStore) ListExpiredLeases(ctx context.Context, now time.Time) ([]*
 }
 
 func (s *sqliteStore) AppendEvent(ctx context.Context, e *poolmgrv1alpha1.Event) error {
+	createdAt, err := requireTimestamp("created_at", e.GetCreatedAt())
+	if err != nil {
+		return fmt.Errorf("store: marshal event: %w", err)
+	}
+
 	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO events (pool_name, vm_uid, type, created_at, payload_json)
-		VALUES (?, ?, ?, ?, ?)`,
-		e.GetPoolName(), e.GetVmUid(), int32(e.GetType()), e.GetCreatedAt().AsTime().UnixNano(), e.GetPayloadJson(),
+		INSERT INTO events (pool_name, pool_namespace, vm_uid, type, created_at, payload_json)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		e.GetPoolName(), e.GetPoolNamespace(), e.GetVmUid(), int32(e.GetType()), createdAt.UnixNano(), e.GetPayloadJson(),
 	)
 	if err != nil {
 		return fmt.Errorf("store: insert event: %w", err)
@@ -370,10 +398,10 @@ func (s *sqliteStore) AppendEvent(ctx context.Context, e *poolmgrv1alpha1.Event)
 	return nil
 }
 
-func (s *sqliteStore) ListEventsSince(ctx context.Context, poolName string, sinceID int64) ([]*poolmgrv1alpha1.Event, error) {
+func (s *sqliteStore) ListEventsSince(ctx context.Context, poolName, poolNamespace string, sinceID int64) ([]*poolmgrv1alpha1.Event, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, pool_name, vm_uid, type, created_at, payload_json
-		FROM events WHERE pool_name = ? AND id > ? ORDER BY id`, poolName, sinceID)
+		SELECT id, pool_name, pool_namespace, vm_uid, type, created_at, payload_json
+		FROM events WHERE pool_name = ? AND pool_namespace = ? AND id > ? ORDER BY id`, poolName, poolNamespace, sinceID)
 	if err != nil {
 		return nil, fmt.Errorf("store: query events: %w", err)
 	}
@@ -382,22 +410,23 @@ func (s *sqliteStore) ListEventsSince(ctx context.Context, poolName string, sinc
 	var events []*poolmgrv1alpha1.Event
 	for rows.Next() {
 		var (
-			id        int64
-			pn, vmUID string
-			typ       int32
-			createdAt int64
-			payload   string
+			id            int64
+			pn, ns, vmUID string
+			typ           int32
+			createdAt     int64
+			payload       string
 		)
-		if err := rows.Scan(&id, &pn, &vmUID, &typ, &createdAt, &payload); err != nil {
+		if err := rows.Scan(&id, &pn, &ns, &vmUID, &typ, &createdAt, &payload); err != nil {
 			return nil, fmt.Errorf("store: scan event: %w", err)
 		}
 		events = append(events, &poolmgrv1alpha1.Event{
-			Id:          id,
-			PoolName:    pn,
-			VmUid:       vmUID,
-			Type:        poolmgrv1alpha1.EventType(typ),
-			CreatedAt:   timestamppb.New(time.Unix(0, createdAt)),
-			PayloadJson: payload,
+			Id:            id,
+			PoolName:      pn,
+			PoolNamespace: ns,
+			VmUid:         vmUID,
+			Type:          poolmgrv1alpha1.EventType(typ),
+			CreatedAt:     timestamppb.New(time.Unix(0, createdAt)),
+			PayloadJson:   payload,
 		})
 	}
 	if err := rows.Err(); err != nil {

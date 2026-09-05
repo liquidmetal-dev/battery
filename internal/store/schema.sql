@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS pools (
 CREATE TABLE IF NOT EXISTS vms (
     uid            TEXT PRIMARY KEY,
     pool_name      TEXT NOT NULL,
+    pool_namespace TEXT NOT NULL,
     flintlock_host TEXT NOT NULL,
     phase          INTEGER NOT NULL,
     lease_id       TEXT,
@@ -23,12 +24,13 @@ CREATE TABLE IF NOT EXISTS vms (
     updated_at     INTEGER NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_vms_pool_phase ON vms (pool_name, phase);
+CREATE INDEX IF NOT EXISTS idx_vms_pool_phase ON vms (pool_namespace, pool_name, phase);
 
 CREATE TABLE IF NOT EXISTS leases (
     lease_id           TEXT PRIMARY KEY,
     vm_uid             TEXT NOT NULL,
     pool_name          TEXT NOT NULL,
+    pool_namespace     TEXT NOT NULL,
     claimed_at         INTEGER NOT NULL,
     last_heartbeat_at  INTEGER NOT NULL,
     expires_at         INTEGER NOT NULL
@@ -37,12 +39,13 @@ CREATE TABLE IF NOT EXISTS leases (
 CREATE INDEX IF NOT EXISTS idx_leases_expires_at ON leases (expires_at);
 
 CREATE TABLE IF NOT EXISTS events (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    pool_name    TEXT NOT NULL,
-    vm_uid       TEXT NOT NULL,
-    type         INTEGER NOT NULL,
-    created_at   INTEGER NOT NULL,
-    payload_json TEXT NOT NULL
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    pool_name      TEXT NOT NULL,
+    pool_namespace TEXT NOT NULL,
+    vm_uid         TEXT NOT NULL,
+    type           INTEGER NOT NULL,
+    created_at     INTEGER NOT NULL,
+    payload_json   TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_events_pool_id ON events (pool_name, id);
+CREATE INDEX IF NOT EXISTS idx_events_pool_id ON events (pool_namespace, pool_name, id);

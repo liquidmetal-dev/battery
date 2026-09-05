@@ -174,11 +174,12 @@ func TestDeletePoolNotFound(t *testing.T) {
 	}
 }
 
-func sampleVMRecord(uid, poolName string, phase poolmgrv1alpha1.VMPhase) *poolmgrv1alpha1.VMRecord {
+func sampleVMRecord(uid, poolName, poolNamespace string, phase poolmgrv1alpha1.VMPhase) *poolmgrv1alpha1.VMRecord {
 	now := timestamppb.New(time.Unix(1_700_000_000, 0))
 	return &poolmgrv1alpha1.VMRecord{
 		Uid:           uid,
 		PoolName:      poolName,
+		PoolNamespace: poolNamespace,
 		FlintlockHost: "host-a",
 		Phase:         phase,
 		CreatedAt:     now,
@@ -190,7 +191,7 @@ func TestCreateAndGetVM(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
-	want := sampleVMRecord("vm-1", "pool-a", poolmgrv1alpha1.VMPhase_PROVISIONING)
+	want := sampleVMRecord("vm-1", "pool-a", "default", poolmgrv1alpha1.VMPhase_PROVISIONING)
 	if err := s.CreateVM(ctx, want); err != nil {
 		t.Fatalf("CreateVM() error = %v", err)
 	}
@@ -217,7 +218,7 @@ func TestCreateVMWithLeaseID(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
-	want := sampleVMRecord("vm-1", "pool-a", poolmgrv1alpha1.VMPhase_LEASED)
+	want := sampleVMRecord("vm-1", "pool-a", "default", poolmgrv1alpha1.VMPhase_LEASED)
 	leaseID := "lease-1"
 	want.LeaseId = &leaseID
 	if err := s.CreateVM(ctx, want); err != nil {
@@ -233,6 +234,28 @@ func TestCreateVMWithLeaseID(t *testing.T) {
 	}
 }
 
+func TestCreateVMNilCreatedAt(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	v := sampleVMRecord("vm-1", "pool-a", "default", poolmgrv1alpha1.VMPhase_PROVISIONING)
+	v.CreatedAt = nil
+	if err := s.CreateVM(ctx, v); err == nil {
+		t.Fatal("CreateVM() with nil CreatedAt error = nil, want error")
+	}
+}
+
+func TestCreateVMNilUpdatedAt(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	v := sampleVMRecord("vm-1", "pool-a", "default", poolmgrv1alpha1.VMPhase_PROVISIONING)
+	v.UpdatedAt = nil
+	if err := s.CreateVM(ctx, v); err == nil {
+		t.Fatal("CreateVM() with nil UpdatedAt error = nil, want error")
+	}
+}
+
 func TestListVMsByPool(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -243,25 +266,47 @@ func TestListVMsByPool(t *testing.T) {
 			t.Fatalf("setup error = %v", err)
 		}
 	}
-	must(s.CreateVM(ctx, sampleVMRecord("vm-1", "pool-a", poolmgrv1alpha1.VMPhase_AVAILABLE)))
-	must(s.CreateVM(ctx, sampleVMRecord("vm-2", "pool-a", poolmgrv1alpha1.VMPhase_LEASED)))
-	must(s.CreateVM(ctx, sampleVMRecord("vm-3", "pool-b", poolmgrv1alpha1.VMPhase_AVAILABLE)))
+	must(s.CreateVM(ctx, sampleVMRecord("vm-1", "pool-a", "default", poolmgrv1alpha1.VMPhase_AVAILABLE)))
+	must(s.CreateVM(ctx, sampleVMRecord("vm-2", "pool-a", "default", poolmgrv1alpha1.VMPhase_LEASED)))
+	must(s.CreateVM(ctx, sampleVMRecord("vm-3", "pool-b", "default", poolmgrv1alpha1.VMPhase_AVAILABLE)))
 
-	all, err := s.ListVMsByPool(ctx, "pool-a", nil)
+	all, err := s.ListVMsByPool(ctx, "pool-a", "default", nil)
 	if err != nil {
 		t.Fatalf("ListVMsByPool() error = %v", err)
 	}
 	if len(all) != 2 {
-		t.Fatalf("ListVMsByPool(pool-a, nil) returned %d vms, want 2", len(all))
+		t.Fatalf("ListVMsByPool(pool-a, default, nil) returned %d vms, want 2", len(all))
 	}
 
 	available := poolmgrv1alpha1.VMPhase_AVAILABLE
-	filtered, err := s.ListVMsByPool(ctx, "pool-a", &available)
+	filtered, err := s.ListVMsByPool(ctx, "pool-a", "default", &available)
 	if err != nil {
 		t.Fatalf("ListVMsByPool() error = %v", err)
 	}
 	if len(filtered) != 1 || filtered[0].Uid != "vm-1" {
-		t.Fatalf("ListVMsByPool(pool-a, AVAILABLE) = %+v, want [vm-1]", filtered)
+		t.Fatalf("ListVMsByPool(pool-a, default, AVAILABLE) = %+v, want [vm-1]", filtered)
+	}
+}
+
+func TestListVMsByPoolNamespaceIsolation(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup error = %v", err)
+		}
+	}
+	must(s.CreateVM(ctx, sampleVMRecord("vm-ns1", "pool-a", "ns-1", poolmgrv1alpha1.VMPhase_AVAILABLE)))
+	must(s.CreateVM(ctx, sampleVMRecord("vm-ns2", "pool-a", "ns-2", poolmgrv1alpha1.VMPhase_AVAILABLE)))
+
+	got, err := s.ListVMsByPool(ctx, "pool-a", "ns-1", nil)
+	if err != nil {
+		t.Fatalf("ListVMsByPool() error = %v", err)
+	}
+	if len(got) != 1 || got[0].Uid != "vm-ns1" {
+		t.Fatalf("ListVMsByPool(pool-a, ns-1, nil) = %+v, want [vm-ns1]", got)
 	}
 }
 
@@ -269,7 +314,7 @@ func TestUpdateVM(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
-	v := sampleVMRecord("vm-1", "pool-a", poolmgrv1alpha1.VMPhase_PROVISIONING)
+	v := sampleVMRecord("vm-1", "pool-a", "default", poolmgrv1alpha1.VMPhase_PROVISIONING)
 	if err := s.CreateVM(ctx, v); err != nil {
 		t.Fatalf("CreateVM() error = %v", err)
 	}
@@ -292,7 +337,7 @@ func TestUpdateVMNotFound(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
-	if err := s.UpdateVM(ctx, sampleVMRecord("missing", "pool-a", poolmgrv1alpha1.VMPhase_AVAILABLE)); err != ErrNotFound {
+	if err := s.UpdateVM(ctx, sampleVMRecord("missing", "pool-a", "default", poolmgrv1alpha1.VMPhase_AVAILABLE)); err != ErrNotFound {
 		t.Errorf("UpdateVM() error = %v, want ErrNotFound", err)
 	}
 }
@@ -301,7 +346,7 @@ func TestDeleteVM(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
-	if err := s.CreateVM(ctx, sampleVMRecord("vm-1", "pool-a", poolmgrv1alpha1.VMPhase_AVAILABLE)); err != nil {
+	if err := s.CreateVM(ctx, sampleVMRecord("vm-1", "pool-a", "default", poolmgrv1alpha1.VMPhase_AVAILABLE)); err != nil {
 		t.Fatalf("CreateVM() error = %v", err)
 	}
 	if err := s.DeleteVM(ctx, "vm-1"); err != nil {
@@ -325,14 +370,14 @@ func TestClaimAvailableVM(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
-	if err := s.CreateVM(ctx, sampleVMRecord("vm-1", "pool-a", poolmgrv1alpha1.VMPhase_LEASED)); err != nil {
+	if err := s.CreateVM(ctx, sampleVMRecord("vm-1", "pool-a", "default", poolmgrv1alpha1.VMPhase_LEASED)); err != nil {
 		t.Fatalf("CreateVM() error = %v", err)
 	}
-	if err := s.CreateVM(ctx, sampleVMRecord("vm-2", "pool-a", poolmgrv1alpha1.VMPhase_AVAILABLE)); err != nil {
+	if err := s.CreateVM(ctx, sampleVMRecord("vm-2", "pool-a", "default", poolmgrv1alpha1.VMPhase_AVAILABLE)); err != nil {
 		t.Fatalf("CreateVM() error = %v", err)
 	}
 
-	claimed, err := s.ClaimAvailableVM(ctx, "pool-a")
+	claimed, err := s.ClaimAvailableVM(ctx, "pool-a", "default")
 	if err != nil {
 		t.Fatalf("ClaimAvailableVM() error = %v", err)
 	}
@@ -356,12 +401,59 @@ func TestClaimAvailableVMNoneAvailable(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
-	if err := s.CreateVM(ctx, sampleVMRecord("vm-1", "pool-a", poolmgrv1alpha1.VMPhase_LEASED)); err != nil {
+	if err := s.CreateVM(ctx, sampleVMRecord("vm-1", "pool-a", "default", poolmgrv1alpha1.VMPhase_LEASED)); err != nil {
 		t.Fatalf("CreateVM() error = %v", err)
 	}
 
-	if _, err := s.ClaimAvailableVM(ctx, "pool-a"); err != ErrNoAvailableVM {
+	if _, err := s.ClaimAvailableVM(ctx, "pool-a", "default"); err != ErrNoAvailableVM {
 		t.Errorf("ClaimAvailableVM() error = %v, want ErrNoAvailableVM", err)
+	}
+}
+
+func TestClaimAvailableVMNamespaceIsolation(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if err := s.CreateVM(ctx, sampleVMRecord("vm-ns1", "pool-a", "ns-1", poolmgrv1alpha1.VMPhase_AVAILABLE)); err != nil {
+		t.Fatalf("CreateVM() error = %v", err)
+	}
+	if err := s.CreateVM(ctx, sampleVMRecord("vm-ns2", "pool-a", "ns-2", poolmgrv1alpha1.VMPhase_AVAILABLE)); err != nil {
+		t.Fatalf("CreateVM() error = %v", err)
+	}
+
+	claimed, err := s.ClaimAvailableVM(ctx, "pool-a", "ns-1")
+	if err != nil {
+		t.Fatalf("ClaimAvailableVM() error = %v", err)
+	}
+	if claimed.Uid != "vm-ns1" {
+		t.Fatalf("ClaimAvailableVM(pool-a, ns-1) claimed %q, want vm-ns1", claimed.Uid)
+	}
+
+	untouched, err := s.GetVM(ctx, "vm-ns2")
+	if err != nil {
+		t.Fatalf("GetVM() error = %v", err)
+	}
+	if untouched.Phase != poolmgrv1alpha1.VMPhase_AVAILABLE {
+		t.Errorf("GetVM(vm-ns2) phase = %v, want AVAILABLE (unaffected by claim in ns-1)", untouched.Phase)
+	}
+}
+
+func TestClaimAvailableVMLostRaceReturnsErr(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if err := s.CreateVM(ctx, sampleVMRecord("vm-1", "pool-a", "default", poolmgrv1alpha1.VMPhase_AVAILABLE)); err != nil {
+		t.Fatalf("CreateVM() error = %v", err)
+	}
+
+	if _, err := s.ClaimAvailableVM(ctx, "pool-a", "default"); err != nil {
+		t.Fatalf("first ClaimAvailableVM() error = %v", err)
+	}
+
+	// The only VM in the pool is now LEASED; a second claim must not silently
+	// re-claim it (the UPDATE's phase=AVAILABLE guard must reject 0 rows affected).
+	if _, err := s.ClaimAvailableVM(ctx, "pool-a", "default"); err != ErrNoAvailableVM {
+		t.Errorf("second ClaimAvailableVM() error = %v, want ErrNoAvailableVM", err)
 	}
 }
 
@@ -373,7 +465,7 @@ func TestClaimAvailableVMConcurrent(t *testing.T) {
 	const attempts = 20
 	for i := 0; i < available; i++ {
 		uid := "vm-" + string(rune('a'+i))
-		if err := s.CreateVM(ctx, sampleVMRecord(uid, "pool-a", poolmgrv1alpha1.VMPhase_AVAILABLE)); err != nil {
+		if err := s.CreateVM(ctx, sampleVMRecord(uid, "pool-a", "default", poolmgrv1alpha1.VMPhase_AVAILABLE)); err != nil {
 			t.Fatalf("CreateVM() error = %v", err)
 		}
 	}
@@ -382,7 +474,7 @@ func TestClaimAvailableVMConcurrent(t *testing.T) {
 	claimedUIDs := make(chan string, attempts)
 	for i := 0; i < attempts; i++ {
 		go func() {
-			vm, err := s.ClaimAvailableVM(ctx, "pool-a")
+			vm, err := s.ClaimAvailableVM(ctx, "pool-a", "default")
 			if err != nil {
 				results <- err
 				claimedUIDs <- ""
@@ -416,12 +508,13 @@ func TestClaimAvailableVMConcurrent(t *testing.T) {
 	}
 }
 
-func sampleLeaseRecord(leaseID, vmUID, poolName string, expiresAt time.Time) *poolmgrv1alpha1.LeaseRecord {
+func sampleLeaseRecord(leaseID, vmUID, poolName, poolNamespace string, expiresAt time.Time) *poolmgrv1alpha1.LeaseRecord {
 	claimedAt := time.Unix(1_700_000_000, 0)
 	return &poolmgrv1alpha1.LeaseRecord{
 		LeaseId:         leaseID,
 		VmUid:           vmUID,
 		PoolName:        poolName,
+		PoolNamespace:   poolNamespace,
 		ClaimedAt:       timestamppb.New(claimedAt),
 		LastHeartbeatAt: timestamppb.New(claimedAt),
 		ExpiresAt:       timestamppb.New(expiresAt),
@@ -432,7 +525,7 @@ func TestCreateAndGetLease(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
-	want := sampleLeaseRecord("lease-1", "vm-1", "pool-a", time.Unix(1_700_001_000, 0))
+	want := sampleLeaseRecord("lease-1", "vm-1", "pool-a", "default", time.Unix(1_700_001_000, 0))
 	if err := s.CreateLease(ctx, want); err != nil {
 		t.Fatalf("CreateLease() error = %v", err)
 	}
@@ -455,11 +548,34 @@ func TestGetLeaseNotFound(t *testing.T) {
 	}
 }
 
+func TestCreateLeaseNilTimestamp(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*poolmgrv1alpha1.LeaseRecord)
+	}{
+		{"nil ClaimedAt", func(l *poolmgrv1alpha1.LeaseRecord) { l.ClaimedAt = nil }},
+		{"nil LastHeartbeatAt", func(l *poolmgrv1alpha1.LeaseRecord) { l.LastHeartbeatAt = nil }},
+		{"nil ExpiresAt", func(l *poolmgrv1alpha1.LeaseRecord) { l.ExpiresAt = nil }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := openTestStore(t)
+			ctx := context.Background()
+
+			l := sampleLeaseRecord("lease-1", "vm-1", "pool-a", "default", time.Unix(1_700_001_000, 0))
+			tt.mutate(l)
+			if err := s.CreateLease(ctx, l); err == nil {
+				t.Fatalf("CreateLease() with %s error = nil, want error", tt.name)
+			}
+		})
+	}
+}
+
 func TestUpdateLeaseHeartbeat(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
-	l := sampleLeaseRecord("lease-1", "vm-1", "pool-a", time.Unix(1_700_001_000, 0))
+	l := sampleLeaseRecord("lease-1", "vm-1", "pool-a", "default", time.Unix(1_700_001_000, 0))
 	if err := s.CreateLease(ctx, l); err != nil {
 		t.Fatalf("CreateLease() error = %v", err)
 	}
@@ -491,7 +607,7 @@ func TestDeleteLease(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
-	l := sampleLeaseRecord("lease-1", "vm-1", "pool-a", time.Unix(1_700_001_000, 0))
+	l := sampleLeaseRecord("lease-1", "vm-1", "pool-a", "default", time.Unix(1_700_001_000, 0))
 	if err := s.CreateLease(ctx, l); err != nil {
 		t.Fatalf("CreateLease() error = %v", err)
 	}
@@ -522,8 +638,8 @@ func TestListExpiredLeases(t *testing.T) {
 			t.Fatalf("setup error = %v", err)
 		}
 	}
-	must(s.CreateLease(ctx, sampleLeaseRecord("lease-expired", "vm-1", "pool-a", time.Unix(1_700_000_000, 0))))
-	must(s.CreateLease(ctx, sampleLeaseRecord("lease-active", "vm-2", "pool-a", time.Unix(1_800_000_000, 0))))
+	must(s.CreateLease(ctx, sampleLeaseRecord("lease-expired", "vm-1", "pool-a", "default", time.Unix(1_700_000_000, 0))))
+	must(s.CreateLease(ctx, sampleLeaseRecord("lease-active", "vm-2", "pool-a", "default", time.Unix(1_800_000_000, 0))))
 
 	now := time.Unix(1_750_000_000, 0)
 	expired, err := s.ListExpiredLeases(ctx, now)
@@ -535,13 +651,14 @@ func TestListExpiredLeases(t *testing.T) {
 	}
 }
 
-func sampleEvent(poolName, vmUID string, eventType poolmgrv1alpha1.EventType) *poolmgrv1alpha1.Event {
+func sampleEvent(poolName, poolNamespace, vmUID string, eventType poolmgrv1alpha1.EventType) *poolmgrv1alpha1.Event {
 	return &poolmgrv1alpha1.Event{
-		PoolName:    poolName,
-		VmUid:       vmUID,
-		Type:        eventType,
-		CreatedAt:   timestamppb.New(time.Unix(1_700_000_000, 0)),
-		PayloadJson: `{"foo":"bar"}`,
+		PoolName:      poolName,
+		PoolNamespace: poolNamespace,
+		VmUid:         vmUID,
+		Type:          eventType,
+		CreatedAt:     timestamppb.New(time.Unix(1_700_000_000, 0)),
+		PayloadJson:   `{"foo":"bar"}`,
 	}
 }
 
@@ -549,12 +666,31 @@ func TestAppendEventAssignsID(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
-	e := sampleEvent("pool-a", "vm-1", poolmgrv1alpha1.EventType_VM_PROVISIONED)
+	e := sampleEvent("pool-a", "default", "vm-1", poolmgrv1alpha1.EventType_VM_PROVISIONED)
 	if err := s.AppendEvent(ctx, e); err != nil {
 		t.Fatalf("AppendEvent() error = %v", err)
 	}
 	if e.Id == 0 {
 		t.Errorf("AppendEvent() did not assign an id")
+	}
+}
+
+func TestAppendEventNilCreatedAt(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	e := sampleEvent("pool-a", "default", "vm-1", poolmgrv1alpha1.EventType_VM_PROVISIONED)
+	e.CreatedAt = nil
+	if err := s.AppendEvent(ctx, e); err == nil {
+		t.Fatal("AppendEvent() with nil CreatedAt error = nil, want error")
+	}
+
+	got, err := s.ListEventsSince(ctx, "pool-a", "default", 0)
+	if err != nil {
+		t.Fatalf("ListEventsSince() error = %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("ListEventsSince() after rejected AppendEvent = %+v, want no rows inserted", got)
 	}
 }
 
@@ -568,19 +704,19 @@ func TestListEventsSince(t *testing.T) {
 			t.Fatalf("setup error = %v", err)
 		}
 	}
-	e1 := sampleEvent("pool-a", "vm-1", poolmgrv1alpha1.EventType_VM_PROVISIONED)
+	e1 := sampleEvent("pool-a", "default", "vm-1", poolmgrv1alpha1.EventType_VM_PROVISIONED)
 	must(s.AppendEvent(ctx, e1))
-	e2 := sampleEvent("pool-a", "vm-1", poolmgrv1alpha1.EventType_VM_AVAILABLE)
+	e2 := sampleEvent("pool-a", "default", "vm-1", poolmgrv1alpha1.EventType_VM_AVAILABLE)
 	must(s.AppendEvent(ctx, e2))
-	e3 := sampleEvent("pool-b", "vm-2", poolmgrv1alpha1.EventType_VM_PROVISIONED)
+	e3 := sampleEvent("pool-b", "default", "vm-2", poolmgrv1alpha1.EventType_VM_PROVISIONED)
 	must(s.AppendEvent(ctx, e3))
 
-	got, err := s.ListEventsSince(ctx, "pool-a", e1.Id)
+	got, err := s.ListEventsSince(ctx, "pool-a", "default", e1.Id)
 	if err != nil {
 		t.Fatalf("ListEventsSince() error = %v", err)
 	}
 	if len(got) != 1 || got[0].Id != e2.Id {
-		t.Fatalf("ListEventsSince(pool-a, %d) = %+v, want [event id %d]", e1.Id, got, e2.Id)
+		t.Fatalf("ListEventsSince(pool-a, default, %d) = %+v, want [event id %d]", e1.Id, got, e2.Id)
 	}
 	if got[0].PayloadJson != `{"foo":"bar"}` {
 		t.Errorf("ListEventsSince() payload_json = %q, want %q", got[0].PayloadJson, `{"foo":"bar"}`)
@@ -597,14 +733,36 @@ func TestListEventsSinceZeroReturnsAll(t *testing.T) {
 			t.Fatalf("setup error = %v", err)
 		}
 	}
-	must(s.AppendEvent(ctx, sampleEvent("pool-a", "vm-1", poolmgrv1alpha1.EventType_VM_PROVISIONED)))
-	must(s.AppendEvent(ctx, sampleEvent("pool-a", "vm-1", poolmgrv1alpha1.EventType_VM_AVAILABLE)))
+	must(s.AppendEvent(ctx, sampleEvent("pool-a", "default", "vm-1", poolmgrv1alpha1.EventType_VM_PROVISIONED)))
+	must(s.AppendEvent(ctx, sampleEvent("pool-a", "default", "vm-1", poolmgrv1alpha1.EventType_VM_AVAILABLE)))
 
-	got, err := s.ListEventsSince(ctx, "pool-a", 0)
+	got, err := s.ListEventsSince(ctx, "pool-a", "default", 0)
 	if err != nil {
 		t.Fatalf("ListEventsSince() error = %v", err)
 	}
 	if len(got) != 2 {
-		t.Fatalf("ListEventsSince(pool-a, 0) returned %d events, want 2", len(got))
+		t.Fatalf("ListEventsSince(pool-a, default, 0) returned %d events, want 2", len(got))
+	}
+}
+
+func TestListEventsSinceNamespaceIsolation(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup error = %v", err)
+		}
+	}
+	must(s.AppendEvent(ctx, sampleEvent("pool-a", "ns-1", "vm-1", poolmgrv1alpha1.EventType_VM_PROVISIONED)))
+	must(s.AppendEvent(ctx, sampleEvent("pool-a", "ns-2", "vm-2", poolmgrv1alpha1.EventType_VM_PROVISIONED)))
+
+	got, err := s.ListEventsSince(ctx, "pool-a", "ns-1", 0)
+	if err != nil {
+		t.Fatalf("ListEventsSince() error = %v", err)
+	}
+	if len(got) != 1 || got[0].VmUid != "vm-1" {
+		t.Fatalf("ListEventsSince(pool-a, ns-1, 0) = %+v, want [vm-1's event]", got)
 	}
 }
