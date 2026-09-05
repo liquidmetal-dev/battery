@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package poolmgr.v1alpha1;
+
+import "google/protobuf/empty.proto";
+import "poolmgr/v1alpha1/types.proto";
+
+option go_package = "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1;poolmgrv1alpha1";
+
+// PoolAdmin manages the CRUD lifecycle of pool definitions.
+service PoolAdmin {
+  rpc CreatePool(CreatePoolRequest) returns (Pool);
+  rpc UpdatePool(UpdatePoolRequest) returns (Pool);
+  rpc DeletePool(DeletePoolRequest) returns (google.protobuf.Empty);
+  rpc GetPool(GetPoolRequest) returns (Pool);
+  rpc ListPools(ListPoolsRequest) returns (ListPoolsResponse);
+}
+
+message CreatePoolRequest {
+  PoolSpec spec = 1;
+}
+
+message UpdatePoolRequest {
+  string name = 1;
+  PoolSpec spec = 2;
+}
+
+message DeletePoolRequest {
+  string name = 1;
+}
+
+message GetPoolRequest {
+  string name = 1;
+}
+
+message ListPoolsRequest {
+  optional string namespace = 1;
+}
+
+message ListPoolsResponse {
+  repeated Pool pools = 1;
+}

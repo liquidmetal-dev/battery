@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package poolmgr.v1alpha1;
+
+import "poolmgr/v1alpha1/types.proto";
+
+option go_package = "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1;poolmgrv1alpha1";
+
+// Events streams pool/VM/lease lifecycle events to subscribers.
+service Events {
+  // Subscribe streams events, optionally filtered to a single pool. New subscribers may be
+  // replayed recent events from the outbox before live events resume.
+  rpc Subscribe(SubscribeRequest) returns (stream Event);
+}
+
+message SubscribeRequest {
+  optional string pool_name = 1;
+}

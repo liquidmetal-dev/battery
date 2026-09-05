@@ -1,0 +1,154 @@
+syntax = "proto3";
+
+package poolmgr.v1alpha1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "types/microvm.proto";
+
+option go_package = "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1;poolmgrv1alpha1";
+
+// ReplenishmentStrategyType names the strategy a pool uses to keep itself topped up.
+enum ReplenishmentStrategyType {
+  // IMMEDIATE_ON_LEASE starts provisioning one new VM on every successful claim.
+  IMMEDIATE_ON_LEASE = 0;
+  // MIN_SIZE_THRESHOLD provisions up to the pool's target size whenever the available
+  // count drops below min_size.
+  MIN_SIZE_THRESHOLD = 1;
+  // REPLACE_ON_DELETE provisions exactly one replacement on every VM deletion.
+  REPLACE_ON_DELETE = 2;
+}
+
+// ReplenishmentStrategy configures a pool's single replenishment strategy plus its
+// strategy-specific parameters.
+message ReplenishmentStrategy {
+  ReplenishmentStrategyType type = 1;
+
+  // MinSize is the available-count threshold that triggers replenishment. Only meaningful
+  // when type is MIN_SIZE_THRESHOLD.
+  optional int32 min_size = 2;
+}
+
+// HookFailurePolicy decides what happens to a VM whose create or pre-lease hook fails.
+enum HookFailurePolicy {
+  // DELETE_AND_REPLACE deletes the VM and lets replenishment provision a replacement.
+  DELETE_AND_REPLACE = 0;
+  // QUARANTINE marks the VM unhealthy and retains it for operator inspection.
+  QUARANTINE = 1;
+}
+
+// PoolSpec is the admin-managed specification of a warm pool.
+message PoolSpec {
+  string name = 1;
+  string namespace = 2;
+
+  // MicroVMTemplate is the flintlock MicroVM spec used to provision every VM in the pool.
+  // allow_guest_agent is always forced true server-side, regardless of what's set here.
+  flintlock.types.MicroVMSpec microvm_template = 3;
+
+  // Size is the target pool size.
+  int32 size = 4;
+
+  // FlintlockHosts lists the flintlock host identifiers this pool is allowed to place VMs on.
+  repeated string flintlock_hosts = 5;
+
+  ReplenishmentStrategy replenishment_strategy = 6;
+
+  // CreateCommands run once per VM, after boot and guest-agent readiness.
+  repeated string create_commands = 7;
+
+  // PreLeaseCommands run immediately before a claim is handed to a consumer.
+  repeated string pre_lease_commands = 8;
+
+  HookFailurePolicy hook_failure_policy = 9;
+
+  // HeartbeatInterval is the expected interval between consumer Heartbeat calls.
+  google.protobuf.Duration heartbeat_interval = 10;
+
+  // HeartbeatExpiryThreshold is how long without a heartbeat before a lease is considered
+  // expired.
+  google.protobuf.Duration heartbeat_expiry_threshold = 11;
+}
+
+// VMPhase is the lifecycle phase of a pool-managed VM.
+enum VMPhase {
+  PROVISIONING = 0;
+  CREATE_HOOK_RUNNING = 1;
+  AVAILABLE = 2;
+  LEASED = 3;
+  // PRE_LEASE_HOOK_RUNNING is a transient phase before a VM is handed to a consumer.
+  PRE_LEASE_HOOK_RUNNING = 4;
+  DELETING = 5;
+  QUARANTINED = 6;
+  FAILED = 7;
+}
+
+// VMRecord is the pool manager's own per-VM state, cross-referenced with flintlock's
+// MicroVMStatus by uid.
+message VMRecord {
+  // Uid is the flintlock-assigned UID of the microvm.
+  string uid = 1;
+  string pool_name = 2;
+  string flintlock_host = 3;
+  VMPhase phase = 4;
+  optional string lease_id = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+// LeaseRecord is the pool manager's record of an outstanding claim on a VM. Named
+// LeaseRecord (rather than Lease) to avoid colliding with the Lease service name.
+message LeaseRecord {
+  // LeaseId is the opaque token returned from ClaimVM.
+  string lease_id = 1;
+  string vm_uid = 2;
+  string pool_name = 3;
+  google.protobuf.Timestamp claimed_at = 4;
+  google.protobuf.Timestamp last_heartbeat_at = 5;
+  google.protobuf.Timestamp expires_at = 6;
+}
+
+// EventType names the kind of change an Event describes.
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+  VM_PROVISIONED = 1;
+  VM_AVAILABLE = 2;
+  VM_CLAIMED = 3;
+  VM_RELEASED = 4;
+  // VM_EXPIRING_SOON is an optional pre-warning fired once, before a lease's deadline.
+  VM_EXPIRING_SOON = 5;
+  VM_DELETED_DUE_TO_EXPIRY = 6;
+  VM_DELETED_ON_RELEASE = 7;
+  VM_HOOK_FAILED = 8;
+  POOL_REPLENISHING = 9;
+  POOL_SIZE_BELOW_TARGET = 10;
+}
+
+// Event is a single row from the pool manager's event outbox.
+message Event {
+  // Id is a monotonic id, per pool, used to replay recent events to new subscribers.
+  int64 id = 1;
+  string pool_name = 2;
+  string vm_uid = 3;
+  EventType type = 4;
+  google.protobuf.Timestamp created_at = 5;
+
+  // PayloadJson carries the type-specific payload as JSON. Kept generic for v1 rather than
+  // a oneof per event type; can be replaced with a typed oneof later without changing the
+  // Event's RPC shape.
+  string payload_json = 6;
+}
+
+// PoolStatus is the live health of a pool, alongside its PoolSpec.
+message PoolStatus {
+  int32 available_count = 1;
+  int32 leased_count = 2;
+  int32 provisioning_count = 3;
+  int32 quarantined_count = 4;
+}
+
+// Pool pairs a pool's spec with its current live status.
+message Pool {
+  PoolSpec spec = 1;
+  PoolStatus status = 2;
+}
