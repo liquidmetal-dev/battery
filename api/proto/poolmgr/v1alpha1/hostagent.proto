@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package poolmgr.v1alpha1;
+
+import "google/protobuf/duration.proto";
+
+option go_package = "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1;poolmgrv1alpha1";
+
+// Hostagent is implemented by poolmgr-hostagent, a per-flintlock-host sidecar that proxies
+// guest-agent vsock calls (via the vsock-connect CLI) on behalf of the pool manager, which has
+// no direct filesystem access to other hosts' /run/flintlock/*.vsock sockets.
+service Hostagent {
+  // WaitReady blocks until the guest-agent at vsock_path responds to a ping, or returns
+  // DEADLINE_EXCEEDED once timeout elapses.
+  rpc WaitReady(WaitReadyRequest) returns (WaitReadyResponse);
+  // Run executes cmd via the guest-agent's exec, streaming stdout/stderr chunks back as they're
+  // produced and finishing with an ExitCode message once the command completes.
+  rpc Run(RunRequest) returns (stream RunResponse);
+}
+
+message WaitReadyRequest {
+  // VsockPath is the host-local Unix-domain-socket path from flintlock's
+  // MicroVMStatus.vsock_path.
+  string vsock_path = 1;
+  // Timeout bounds how long to keep retrying the ping before giving up.
+  google.protobuf.Duration timeout = 2;
+}
+
+message WaitReadyResponse {}
+
+message RunRequest {
+  string vsock_path = 1;
+  // Cmd is the command and its arguments, e.g. ["echo", "hi"] -- passed through to
+  // `vsock-connect exec ... -- <cmd...>` without a shell.
+  repeated string cmd = 2;
+  // Timeout bounds how long the command may run before it's killed and Run returns
+  // DEADLINE_EXCEEDED.
+  google.protobuf.Duration timeout = 3;
+}
+
+message RunResponse {
+  oneof output {
+    bytes stdout_chunk = 1;
+    bytes stderr_chunk = 2;
+    // ExitCode is sent as the final message in the stream once the command completes.
+    int32 exit_code = 3;
+  }
+}
