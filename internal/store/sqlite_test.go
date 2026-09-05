@@ -85,6 +85,28 @@ func TestCreateAndGetPool(t *testing.T) {
 	}
 }
 
+func TestCreatePoolNilDuration(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*poolmgrv1alpha1.PoolSpec)
+	}{
+		{"nil HeartbeatInterval", func(p *poolmgrv1alpha1.PoolSpec) { p.HeartbeatInterval = nil }},
+		{"nil HeartbeatExpiryThreshold", func(p *poolmgrv1alpha1.PoolSpec) { p.HeartbeatExpiryThreshold = nil }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := openTestStore(t)
+			ctx := context.Background()
+
+			p := samplePoolSpec("pool-a")
+			tt.mutate(p)
+			if err := s.CreatePool(ctx, p); err == nil {
+				t.Fatalf("CreatePool() with %s error = nil, want error", tt.name)
+			}
+		})
+	}
+}
+
 func TestGetPoolNotFound(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

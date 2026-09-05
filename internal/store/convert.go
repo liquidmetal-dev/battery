@@ -29,10 +29,31 @@ type poolRow struct {
 	heartbeatExpiryThresholdNs int64
 }
 
+// requireDuration rejects a nil duration instead of letting AsDuration() silently return 0:
+// (*durationpb.Duration)(nil).AsDuration() does not panic (its Get* accessors are nil-safe),
+// so a caller that forgets to set heartbeat_interval/heartbeat_expiry_threshold would
+// otherwise get no error and a pool persisted with a 0s threshold - which makes every lease
+// immediately expired.
+func requireDuration(field string, d *durationpb.Duration) (time.Duration, error) {
+	if d == nil {
+		return 0, fmt.Errorf("store: %s is required", field)
+	}
+	return d.AsDuration(), nil
+}
+
 func poolToRow(p *poolmgrv1alpha1.PoolSpec) (poolRow, error) {
 	hosts, err := json.Marshal(p.GetFlintlockHosts())
 	if err != nil {
 		return poolRow{}, fmt.Errorf("marshal flintlock_hosts: %w", err)
+	}
+
+	heartbeatInterval, err := requireDuration("heartbeat_interval", p.GetHeartbeatInterval())
+	if err != nil {
+		return poolRow{}, err
+	}
+	heartbeatExpiryThreshold, err := requireDuration("heartbeat_expiry_threshold", p.GetHeartbeatExpiryThreshold())
+	if err != nil {
+		return poolRow{}, err
 	}
 
 	template, err := marshalProtoJSON(p.GetMicrovmTemplate())
@@ -65,8 +86,8 @@ func poolToRow(p *poolmgrv1alpha1.PoolSpec) (poolRow, error) {
 		createCommands:             string(createCommands),
 		preLeaseCommands:           string(preLeaseCommands),
 		hookFailurePolicy:          int32(p.GetHookFailurePolicy()),
-		heartbeatIntervalNs:        p.GetHeartbeatInterval().AsDuration().Nanoseconds(),
-		heartbeatExpiryThresholdNs: p.GetHeartbeatExpiryThreshold().AsDuration().Nanoseconds(),
+		heartbeatIntervalNs:        heartbeatInterval.Nanoseconds(),
+		heartbeatExpiryThresholdNs: heartbeatExpiryThreshold.Nanoseconds(),
 	}, nil
 }
 
