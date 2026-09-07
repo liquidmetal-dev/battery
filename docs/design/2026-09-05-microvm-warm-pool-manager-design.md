@@ -268,9 +268,11 @@ unacked rows replayed, keyed by a monotonic id per pool).
 - A fake guest-agent client interface for hook-running tests (no real vsock needed).
 - CI (`ci.yml`): `go build`, `go vet`, `golangci-lint`, `go test ./...` on PRs.
 - Manual/E2E verification (documented, not automated in v1): run against a real flintlockd +
-  Firecracker VM with `allow_guest_agent: true` and confirm `vsock-connect ping` succeeds,
-  confirm claim/heartbeat/release/expiry flow end-to-end, confirm `/metrics` and
-  `Events.Subscribe` reflect real transitions.
+  Firecracker VM with `allow_guest_agent: true` and confirm `MicroVMExec.ExecCommand`/
+  `MicroVMSSHProxy.SSHProxy` work end-to-end, confirm claim/heartbeat/release/expiry flow
+  end-to-end, confirm `/metrics` and `Events.Subscribe` reflect real transitions. See
+  [`docs/runbooks/e2e-manual-verification.md`](../runbooks/e2e-manual-verification.md) for the
+  step-by-step runbook.
 
 ## Open Items Deferred Past v1 (explicitly out of scope)
 
