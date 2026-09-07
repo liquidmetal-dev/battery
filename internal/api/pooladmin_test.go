@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	"google.golang.org/grpc/codes"
@@ -58,6 +59,21 @@ func TestCreatePoolForcesAllowGuestAgent(t *testing.T) {
 	}
 	if !got.GetSpec().GetMicrovmTemplate().GetAllowGuestAgent() {
 		t.Errorf("GetPool() allow_guest_agent = false, want forced true (persisted)")
+	}
+}
+
+// TestCreatePoolNilSpec confirms a nil Spec is rejected as InvalidArgument
+// rather than panicking: spec.GetName()/GetNamespace() are nil-safe
+// generated getters, so validatePoolSpec's first checks catch a nil spec
+// before any code reaches a direct (non-getter) field access.
+func TestCreatePoolNilSpec(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	s := api.NewPoolAdminServer(st)
+
+	_, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("CreatePool() with nil spec error = %v, want InvalidArgument", err)
 	}
 }
 
@@ -153,7 +169,7 @@ func TestUpdatePool(t *testing.T) {
 
 	update := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_DELETE_AND_REPLACE, []string{"echo hi"})
 	update.Size = 5
-	update.HeartbeatInterval = durationpb.New(60)
+	update.HeartbeatInterval = durationpb.New(60 * time.Second)
 	update.MicrovmTemplate.AllowGuestAgent = false
 
 	got, err := s.UpdatePool(ctx, &poolmgrv1alpha1.UpdatePoolRequest{Spec: update})
