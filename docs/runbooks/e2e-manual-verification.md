@@ -12,14 +12,14 @@ the `poolmgr-hostagent`/vsock-connect path (see [#29](https://github.com/liquidm
 
 ## Status of this runbook
 
-- **Runnable today**: flintlockd's `MicroVMExec`/`MicroVMSSHProxy` (steps 2–5), `poolmgrd`'s
-  `PoolAdmin` CRUD and `/metrics` (steps 6–7), and an `Events.Subscribe` connectivity check
-  (step 8).
+- **Runnable today**: flintlockd's `MicroVMExec`/`MicroVMSSHProxy` (steps 2–4), `poolmgrd`'s
+  `/metrics` startup check and `PoolAdmin` CRUD (steps 5–6), and an `Events.Subscribe`
+  connectivity check (step 7).
 - **Blocked on [#40](https://github.com/liquidmetal-dev/battery/issues/40)** ("Dynamic per-pool
   Reconciler lifecycle"): nothing starts a `Reconciler` per pool yet, so `CreatePool` never
   provisions a VM or marks one `AVAILABLE`. `ClaimVM` therefore always fails
   `RESOURCE_EXHAUSTED`, and `Heartbeat`/`ReleaseVM`/lease-expiry/replenishment can't be exercised
-  through the real API. Step 9 documents the commands to run once that lands.
+  through the real API. Step 8 documents the commands to run once that lands.
 
 ## Prerequisites
 
@@ -39,7 +39,7 @@ Both `flintlockd` and `poolmgrd` register gRPC server reflection, so `grpcurl` d
 ## 1. Start flintlockd with exec and SSH-proxy enabled
 
 ```sh
-flintlockd run --insecure --enable-exec-api --enable-ssh-proxy-api
+flintlockd run --insecure --enable-exec-api --enable-ssh-proxy-api --parent-iface <host-interface>
 ```
 
 `--enable-exec-api`/`--enable-ssh-proxy-api` gate the `MicroVMExec`/`MicroVMSSHProxy` gRPC
@@ -47,6 +47,11 @@ services (both default to off: exec runs arbitrary commands in a guest, and SSH-
 a client straight to the guest's `sshd`). `--insecure` matches `battery`'s own
 `TLSConfig.Insecure`/`ServerTLSConfig.Insecure` for this runbook; for a production-shaped check,
 use flintlock's mTLS flags and `battery`'s `CertFile`/`KeyFile`/`CAFile` config instead.
+
+`--parent-iface <host-interface>` (or `--bridge-name <bridge>` if you're using a bridge instead —
+see the [Network setup](https://github.com/liquidmetal-dev/flintlock/blob/main/userdocs/docs/getting-started/network.md)
+prerequisite above) is required: flintlockd refuses to start unless at least one of the two is
+set, so use whichever the network setup step left you with.
 
 ## 2. Create a real MicroVM
 
@@ -227,20 +232,48 @@ Example config (`poolmgrd-config.json`):
 go run ./cmd/poolmgrd -config poolmgrd-config.json -db /tmp/poolmgr-e2e.db
 ```
 
-Confirm `/metrics` is up and the pool-manager metric families are registered (all zero, since no
-pool exists yet):
+Confirm `/metrics` is up. With no pool created yet, `poolmgr_pool_*` won't appear —
+`internal/metrics/pool_collector.go`'s `Collect` only emits a pool's gauges once it exists in the
+store — so check the gRPC server metrics instead, which `poolmgrd` pre-initializes (zero-valued)
+for every registered RPC method at startup:
 
 ```sh
-curl -s localhost:9092/metrics | grep '^poolmgr_'
+curl -s localhost:9092/metrics | grep '^grpc_server_started_total'
 ```
 
 ## 6. `PoolAdmin` CRUD verification
+
+This uses a real, provisionable `microvm_template` (same shape as step 2's `CreateMicroVM`
+payload) rather than a token one — flintlock validates `memory_in_mb >= 1024` and requires a root
+volume plus at least one network interface, so a minimal `{vcpu, memory_in_mb}` template would
+never let a VM reach `AVAILABLE` once [#40](https://github.com/liquidmetal-dev/battery/issues/40)
+starts provisioning against it:
 
 ```sh
 grpcurl -d '{
   "spec": {
     "name": "e2e-pool", "namespace": "e2e",
-    "microvm_template": { "vcpu": 1, "memory_in_mb": 512 },
+    "microvm_template": {
+      "vcpu": 2,
+      "memory_in_mb": 2048,
+      "kernel": {
+        "image": "docker.io/richardcase/ubuntu-bionic-kernel:0.0.11",
+        "filename": "vmlinux",
+        "add_network_config": true
+      },
+      "initrd": {
+        "image": "docker.io/richardcase/ubuntu-bionic-kernel:0.0.11",
+        "filename": "initrd-generic"
+      },
+      "root_volume": {
+        "id": "root",
+        "is_read_only": false,
+        "source": { "container_source": "docker.io/richardcase/ubuntu-bionic-test:cloudimage_v0.0.1" }
+      },
+      "interfaces": [
+        { "device_id": "eth1", "type": 1, "address": { "address": "192.168.100.31/32" } }
+      ]
+    },
     "size": 1,
     "flintlock_hosts": ["host-a"],
     "replenishment_strategy": { "type": "MIN_SIZE_THRESHOLD", "min_size": 1 },
@@ -252,15 +285,25 @@ grpcurl -d '{"ref": {"name": "e2e-pool", "namespace": "e2e"}}' \
   -plaintext localhost:9091 poolmgr.v1alpha1.PoolAdmin/GetPool
 
 grpcurl -d '{"namespace": "e2e"}' -plaintext localhost:9091 poolmgr.v1alpha1.PoolAdmin/ListPools
-
-grpcurl -d '{"ref": {"name": "e2e-pool", "namespace": "e2e"}}' \
-  -plaintext localhost:9091 poolmgr.v1alpha1.PoolAdmin/DeletePool
 ```
 
 `GetPool`/`ListPools` should return the spec with a `status` object whose counts are all `0` —
 that's expected today (see [Status of this runbook](#status-of-this-runbook)), not a bug: nothing
-provisions VMs against a pool until [#40](https://github.com/liquidmetal-dev/battery/issues/40)
-starts a `Reconciler` for it.
+provisions VMs against a pool until #40 starts a `Reconciler` for it. Now that a pool exists, its
+`poolmgr_pool_*` gauges should also appear:
+
+```sh
+curl -s localhost:9092/metrics | grep '^poolmgr_pool_'
+# poolmgr_pool_size{pool_name="e2e-pool",pool_namespace="e2e"} 1
+# poolmgr_pool_available{pool_name="e2e-pool",pool_namespace="e2e"} 0
+# poolmgr_pool_leased{pool_name="e2e-pool",pool_namespace="e2e"} 0
+# poolmgr_pool_provisioning{pool_name="e2e-pool",pool_namespace="e2e"} 0
+# poolmgr_pool_quarantined{pool_name="e2e-pool",pool_namespace="e2e"} 0
+```
+
+Leave `e2e-pool` in place — step 8 reuses it once #40 lands. (If you're not continuing to step 8
+right now, clean it up with `DeletePool`:
+`grpcurl -d '{"ref": {"name": "e2e-pool", "namespace": "e2e"}}' -plaintext localhost:9091 poolmgr.v1alpha1.PoolAdmin/DeletePool`.)
 
 ## 7. `Events.Subscribe` connectivity check
 
@@ -270,15 +313,29 @@ In one terminal:
 grpcurl -d '{}' -plaintext localhost:9091 poolmgr.v1alpha1.Events/Subscribe
 ```
 
-In another, run the `CreatePool`/`DeletePool` calls from step 6. Confirm the stream stays open
-and doesn't error. No `Event` message is expected yet: every `EventType` in
-`api/proto/poolmgr/v1alpha1/types.proto` originates from a successful `ClaimVM`/`ReleaseVM` or
-from reconciler-driven provisioning, neither of which run without #40.
+In another, poke the store with a throwaway pool (using a different name so `e2e-pool` from step 6
+is left untouched — step 8 needs it):
+
+```sh
+grpcurl -d '{"spec": {"name": "e2e-events-poke", "namespace": "e2e", "microvm_template": {"vcpu": 1, "memory_in_mb": 1024, "root_volume": {"id": "root", "is_read_only": false, "source": {"container_source": "docker.io/richardcase/ubuntu-bionic-test:cloudimage_v0.0.1"}}, "interfaces": [{"device_id": "eth1", "type": 1, "address": {"address": "192.168.100.32/32"}}]}, "size": 0, "flintlock_hosts": ["host-a"], "replenishment_strategy": {"type": "MIN_SIZE_THRESHOLD", "min_size": 0}, "hook_failure_policy": "DELETE_AND_REPLACE"}}' \
+  -plaintext localhost:9091 poolmgr.v1alpha1.PoolAdmin/CreatePool
+
+grpcurl -d '{"ref": {"name": "e2e-events-poke", "namespace": "e2e"}}' \
+  -plaintext localhost:9091 poolmgr.v1alpha1.PoolAdmin/DeletePool
+```
+
+Confirm the stream stays open and doesn't error. No `Event` message is expected yet: every
+`EventType` in `api/proto/poolmgr/v1alpha1/types.proto` originates from a successful
+`ClaimVM`/`ReleaseVM` or from reconciler-driven provisioning, neither of which run without #40 —
+this step only proves the subscription itself works.
 
 ## 8. Blocked: claim / heartbeat / release / expiry
 
 Blocked on [#40](https://github.com/liquidmetal-dev/battery/issues/40). Once a `Reconciler` is
-started per pool and a `CreatePool` call actually provisions VMs, come back and run:
+started per pool and a `CreatePool` call actually provisions VMs, come back and run these against
+`e2e-pool` from step 6 — its `microvm_template` is a real, provisionable spec (unlike a token
+`{vcpu, memory_in_mb}` template, it'll actually pass flintlock's create validation and reach
+`AVAILABLE`):
 
 ```sh
 # Expect a real lease_id + vm_uid once a VM is AVAILABLE (RESOURCE_EXHAUSTED until then).
@@ -302,7 +359,7 @@ While the `Events.Subscribe` stream from step 7 is open, confirm the expected se
 - **`ClaimVM` returns `RESOURCE_EXHAUSTED`**: expected today — see
   [#40](https://github.com/liquidmetal-dev/battery/issues/40). Not a bug until that lands.
 - **`ExecCommand`/`SSHProxy` errors or hangs**: check, in order — was the VM created with
-  `"allow_guest_agent": true"`? Is `GetMicroVM` reporting `state: CREATED`? Was `flintlockd`
+  `"allow_guest_agent": true`? Is `GetMicroVM` reporting `state: CREATED`? Was `flintlockd`
   started with `--enable-exec-api`/`--enable-ssh-proxy-api`?
 - **`grpcurl` fails to resolve a service/method**: both `flintlockd` and `poolmgrd` register gRPC
   reflection, so this usually means a transport mismatch — check the server's TLS mode
