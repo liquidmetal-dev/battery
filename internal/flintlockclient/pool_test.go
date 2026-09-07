@@ -40,8 +40,8 @@ func (f *fakeMicroVMServer) GetMicroVM(_ context.Context, _ *microvmv1alpha1.Get
 }
 
 // startFakeServer starts a fake flintlock gRPC server on a real TCP
-// listener (loopback), optionally with TLS creds, and returns its address
-// and a cleanup func.
+// listener (loopback), optionally with TLS creds, and returns its address.
+// The server is stopped via t.Cleanup.
 func startFakeServer(t *testing.T, creds credentials.TransportCredentials, version int32) string {
 	t.Helper()
 
@@ -260,6 +260,23 @@ func TestPool_Close(t *testing.T) {
 	}
 	if err := pool.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestPool_New_NilConfig(t *testing.T) {
+	if _, err := flintlockclient.New(nil); err == nil {
+		t.Fatalf("expected error for nil config")
+	}
+}
+
+func TestPool_New_InvalidConfigFailsValidation(t *testing.T) {
+	cfg := &config.Config{Hosts: []config.HostConfig{
+		{Name: "host-a", Address: "127.0.0.1:1", TLS: config.TLSConfig{Insecure: true}},
+		{Name: "host-a", Address: "127.0.0.1:2", TLS: config.TLSConfig{Insecure: true}},
+	}}
+
+	if _, err := flintlockclient.New(cfg); err == nil {
+		t.Fatalf("expected error for invalid config (duplicate host name)")
 	}
 }
 

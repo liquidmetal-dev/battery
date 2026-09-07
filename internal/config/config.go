@@ -48,7 +48,7 @@ func Load(path string) (*Config, error) {
 	}
 
 	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("config: %s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 
 	return &cfg, nil

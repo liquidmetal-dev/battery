@@ -31,6 +31,13 @@ type Pool struct {
 // New dials every host in cfg and returns a Pool. On any dial/TLS-setup
 // error it closes what it already opened and returns the error.
 func New(cfg *config.Config) (*Pool, error) {
+	if cfg == nil {
+		return nil, errors.New("flintlockclient: cfg is required")
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("flintlockclient: %w", err)
+	}
+
 	p := &Pool{
 		conns:   make(map[string]*grpc.ClientConn, len(cfg.Hosts)),
 		clients: make(map[string]microvmv1alpha1.MicroVMClient, len(cfg.Hosts)),

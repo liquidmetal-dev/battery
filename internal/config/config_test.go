@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/liquidmetal-dev/battery/internal/config"
@@ -182,6 +183,9 @@ func TestLoad_InvalidConfigFailsValidation(t *testing.T) {
 	_, err := config.Load(path)
 	if err == nil {
 		t.Fatalf("expected error for empty host list")
+	}
+	if n := strings.Count(err.Error(), "config:"); n != 1 {
+		t.Fatalf("expected exactly one \"config:\" prefix in error, got %d: %v", n, err)
 	}
 }
 
