@@ -89,6 +89,28 @@ func sampleEvent(poolName, poolNamespace, vmUID string, eventType poolmgrv1alpha
 	}
 }
 
+// fakePoolLifecycle records StartReconciler/StopReconciler calls for tests
+// that assert PoolAdminServer's wiring without a real poolmanager.Manager.
+type fakePoolLifecycle struct {
+	mu       sync.Mutex
+	started  []string
+	stopped  []string
+	startErr error
+}
+
+func (f *fakePoolLifecycle) StartReconciler(spec *poolmgrv1alpha1.PoolSpec) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.started = append(f.started, spec.GetName())
+	return f.startErr
+}
+
+func (f *fakePoolLifecycle) StopReconciler(name, _ string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stopped = append(f.stopped, name)
+}
+
 // sampleAvailableVM returns a minimal AVAILABLE VMRecord for poolName on
 // host-a.
 func sampleAvailableVM(uid, poolName string) *poolmgrv1alpha1.VMRecord {

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	"google.golang.org/grpc/codes"
@@ -13,17 +14,41 @@ import (
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
 
+// PoolLifecycle starts and stops a pool's Reconciler in response to
+// CreatePool/DeletePool succeeding. Satisfied structurally by
+// *poolmanager.Manager; kept narrow here so internal/api doesn't need to
+// import internal/poolmanager.
+type PoolLifecycle interface {
+	StartReconciler(spec *poolmgrv1alpha1.PoolSpec) error
+	StopReconciler(name, namespace string)
+}
+
+// NoopPoolLifecycle implements PoolLifecycle by doing nothing. Used when
+// poolMgr is nil, e.g. in most unit tests.
+type NoopPoolLifecycle struct{}
+
+// StartReconciler does nothing and always succeeds.
+func (NoopPoolLifecycle) StartReconciler(*poolmgrv1alpha1.PoolSpec) error { return nil }
+
+// StopReconciler does nothing.
+func (NoopPoolLifecycle) StopReconciler(string, string) {}
+
 // PoolAdminServer implements poolmgrv1alpha1.PoolAdminServer: the CRUD
 // lifecycle of pool definitions.
 type PoolAdminServer struct {
 	poolmgrv1alpha1.UnimplementedPoolAdminServer
 
-	store store.Store
+	store   store.Store
+	poolMgr PoolLifecycle
 }
 
-// NewPoolAdminServer returns a PoolAdminServer backed by st.
-func NewPoolAdminServer(st store.Store) *PoolAdminServer {
-	return &PoolAdminServer{store: st}
+// NewPoolAdminServer returns a PoolAdminServer backed by st. If poolMgr is
+// nil, NoopPoolLifecycle{} is used.
+func NewPoolAdminServer(st store.Store, poolMgr PoolLifecycle) *PoolAdminServer {
+	if poolMgr == nil {
+		poolMgr = NoopPoolLifecycle{}
+	}
+	return &PoolAdminServer{store: st, poolMgr: poolMgr}
 }
 
 // validatePoolSpec checks the fields CreatePool/UpdatePool both require, and
@@ -73,6 +98,16 @@ func (s *PoolAdminServer) CreatePool(ctx context.Context, req *poolmgrv1alpha1.C
 
 	if err := s.store.CreatePool(ctx, spec); err != nil {
 		return nil, status.Errorf(codes.Internal, "create pool: %v", err)
+	}
+
+	// A start failure here is unreachable in practice (spec's replenishment
+	// strategy was already validated above), but if it ever happens, the
+	// pool itself was created successfully - failing the RPC would misreport
+	// that to the caller. Log it as an operational signal instead; the pool
+	// will simply have no reconciler running until poolmgrd restarts (which
+	// re-seeds every pool) or the pool is deleted and recreated.
+	if err := s.poolMgr.StartReconciler(spec); err != nil {
+		slog.ErrorContext(ctx, "pooladmin: start reconciler failed", "pool", spec.GetName(), "namespace", spec.GetNamespace(), "error", err)
 	}
 
 	return &poolmgrv1alpha1.Pool{Spec: spec, Status: &poolmgrv1alpha1.PoolStatus{}}, nil
@@ -159,6 +194,8 @@ func (s *PoolAdminServer) DeletePool(ctx context.Context, req *poolmgrv1alpha1.D
 		}
 		return nil, status.Errorf(codes.Internal, "delete pool: %v", err)
 	}
+
+	s.poolMgr.StopReconciler(name, ns)
 	return &emptypb.Empty{}, nil
 }
 
