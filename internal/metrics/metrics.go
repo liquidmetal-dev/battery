@@ -13,12 +13,13 @@ import (
 // only unique within its namespace (store.GetPool takes both), so
 // pool_name alone can collide across namespaces.
 type metricSet struct {
-	vmClaimsTotal     *prometheus.CounterVec
-	vmReleasesTotal   *prometheus.CounterVec
-	provisionDuration *prometheus.HistogramVec
-	hookDuration      *prometheus.HistogramVec
-	hookFailuresTotal *prometheus.CounterVec
-	leaseDuration     *prometheus.HistogramVec
+	vmClaimsTotal                  *prometheus.CounterVec
+	vmReleasesTotal                *prometheus.CounterVec
+	provisionDuration              *prometheus.HistogramVec
+	hookDuration                   *prometheus.HistogramVec
+	hookFailuresTotal              *prometheus.CounterVec
+	leaseDuration                  *prometheus.HistogramVec
+	reconcilerUnexpectedExitsTotal *prometheus.CounterVec
 }
 
 func newMetricSet(reg *prometheus.Registry) *metricSet {
@@ -47,6 +48,10 @@ func newMetricSet(reg *prometheus.Registry) *metricSet {
 			Name: "poolmgr_lease_duration_seconds",
 			Help: "Duration a VM was leased, from ClaimVM to release/expiry, labeled by pool_name/pool_namespace.",
 		}, []string{"pool_name", "pool_namespace"}),
+		reconcilerUnexpectedExitsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "poolmgr_reconciler_unexpected_exit_total",
+			Help: "Total number of times a pool's Reconciler.Run returned with an error other than context.Canceled, labeled by pool_name/pool_namespace. Expected to stay at 0 - see internal/poolmanager.",
+		}, []string{"pool_name", "pool_namespace"}),
 	}
 
 	reg.MustRegister(
@@ -56,6 +61,7 @@ func newMetricSet(reg *prometheus.Registry) *metricSet {
 		m.hookDuration,
 		m.hookFailuresTotal,
 		m.leaseDuration,
+		m.reconcilerUnexpectedExitsTotal,
 	)
 
 	return m
@@ -95,4 +101,12 @@ func (r *Registry) RecordHookFailure(hook, poolName, poolNamespace string) {
 // poolmgr_lease_duration_seconds for poolName/poolNamespace.
 func (r *Registry) ObserveLeaseDuration(poolName, poolNamespace string, d time.Duration) {
 	r.metrics.leaseDuration.WithLabelValues(poolName, poolNamespace).Observe(d.Seconds())
+}
+
+// RecordReconcilerUnexpectedExit increments poolmgr_reconciler_unexpected_exit_total
+// for poolName/poolNamespace. A reconciler's Run loop is only ever expected to
+// return via context cancellation; any other return is unexpected and is not
+// retried (see internal/poolmanager.Manager.StartReconciler).
+func (r *Registry) RecordReconcilerUnexpectedExit(poolName, poolNamespace string) {
+	r.metrics.reconcilerUnexpectedExitsTotal.WithLabelValues(poolName, poolNamespace).Inc()
 }

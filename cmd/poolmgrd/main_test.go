@@ -15,6 +15,7 @@ import (
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	"github.com/liquidmetal-dev/battery/internal/config"
 	"github.com/liquidmetal-dev/battery/internal/metrics"
+	"github.com/liquidmetal-dev/battery/internal/poolmanager"
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
 
@@ -26,6 +27,11 @@ func openTestStore(t *testing.T) store.Store {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	return st
+}
+
+func newTestPoolManager(t *testing.T, st store.Store) *poolmanager.Manager {
+	t.Helper()
+	return poolmanager.New(context.Background(), st, nil, metrics.NewRegistry())
 }
 
 // dialInsecure dials addr with insecure transport credentials and returns
@@ -44,8 +50,9 @@ func TestBuildGRPCServer_RegistersApplicationServices(t *testing.T) {
 	st := openTestStore(t)
 	reg := metrics.NewRegistry()
 	cfg := config.APIServerConfig{Addr: ":0", TLS: config.ServerTLSConfig{Insecure: true}}
+	poolMgr := newTestPoolManager(t, st)
 
-	srv, err := buildGRPCServer(cfg, st, nil, reg)
+	srv, err := buildGRPCServer(cfg, st, nil, reg, poolMgr)
 	if err != nil {
 		t.Fatalf("buildGRPCServer: %v", err)
 	}
@@ -68,8 +75,9 @@ func TestBuildGRPCServer_RegistersHealthService(t *testing.T) {
 	st := openTestStore(t)
 	reg := metrics.NewRegistry()
 	cfg := config.APIServerConfig{Addr: ":0", TLS: config.ServerTLSConfig{Insecure: true}}
+	poolMgr := newTestPoolManager(t, st)
 
-	srv, err := buildGRPCServer(cfg, st, nil, reg)
+	srv, err := buildGRPCServer(cfg, st, nil, reg, poolMgr)
 	if err != nil {
 		t.Fatalf("buildGRPCServer: %v", err)
 	}
@@ -96,8 +104,9 @@ func TestBuildGRPCServer_RegistersReflection(t *testing.T) {
 	st := openTestStore(t)
 	reg := metrics.NewRegistry()
 	cfg := config.APIServerConfig{Addr: ":0", TLS: config.ServerTLSConfig{Insecure: true}}
+	poolMgr := newTestPoolManager(t, st)
 
-	srv, err := buildGRPCServer(cfg, st, nil, reg)
+	srv, err := buildGRPCServer(cfg, st, nil, reg, poolMgr)
 	if err != nil {
 		t.Fatalf("buildGRPCServer: %v", err)
 	}
@@ -126,8 +135,9 @@ func TestServeGRPC_ShutsDownWithActiveStream(t *testing.T) {
 	st := openTestStore(t)
 	reg := metrics.NewRegistry()
 	cfg := config.APIServerConfig{Addr: ":0", TLS: config.ServerTLSConfig{Insecure: true}}
+	poolMgr := newTestPoolManager(t, st)
 
-	srv, err := buildGRPCServer(cfg, st, nil, reg)
+	srv, err := buildGRPCServer(cfg, st, nil, reg, poolMgr)
 	if err != nil {
 		t.Fatalf("buildGRPCServer: %v", err)
 	}
@@ -166,8 +176,9 @@ func TestBuildGRPCServer_InvalidConfig_ReturnsError(t *testing.T) {
 	st := openTestStore(t)
 	reg := metrics.NewRegistry()
 	cfg := config.APIServerConfig{TLS: config.ServerTLSConfig{Insecure: true, CertFile: "cert.pem"}}
+	poolMgr := newTestPoolManager(t, st)
 
-	if _, err := buildGRPCServer(cfg, st, nil, reg); err == nil {
+	if _, err := buildGRPCServer(cfg, st, nil, reg, poolMgr); err == nil {
 		t.Fatalf("expected error for invalid config, got nil")
 	}
 }

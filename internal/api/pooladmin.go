@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"sync"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	"google.golang.org/grpc/codes"
@@ -13,17 +15,77 @@ import (
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
 
+// PoolLifecycle starts and stops a pool's Reconciler in response to
+// CreatePool/DeletePool succeeding. Satisfied structurally by
+// *poolmanager.Manager; kept narrow here so internal/api doesn't need to
+// import internal/poolmanager.
+type PoolLifecycle interface {
+	StartReconciler(spec *poolmgrv1alpha1.PoolSpec) error
+	StopReconciler(name, namespace string)
+}
+
+// NoopPoolLifecycle implements PoolLifecycle by doing nothing. Used when
+// poolMgr is nil, e.g. in most unit tests.
+type NoopPoolLifecycle struct{}
+
+// StartReconciler does nothing and always succeeds.
+func (NoopPoolLifecycle) StartReconciler(*poolmgrv1alpha1.PoolSpec) error { return nil }
+
+// StopReconciler does nothing.
+func (NoopPoolLifecycle) StopReconciler(string, string) {}
+
 // PoolAdminServer implements poolmgrv1alpha1.PoolAdminServer: the CRUD
 // lifecycle of pool definitions.
 type PoolAdminServer struct {
 	poolmgrv1alpha1.UnimplementedPoolAdminServer
 
-	store store.Store
+	store   store.Store
+	poolMgr PoolLifecycle
+
+	poolLocksMu sync.Mutex
+	poolLocks   map[poolLockKey]*sync.Mutex
 }
 
-// NewPoolAdminServer returns a PoolAdminServer backed by st.
-func NewPoolAdminServer(st store.Store) *PoolAdminServer {
-	return &PoolAdminServer{store: st}
+// NewPoolAdminServer returns a PoolAdminServer backed by st. If poolMgr is
+// nil, NoopPoolLifecycle{} is used.
+func NewPoolAdminServer(st store.Store, poolMgr PoolLifecycle) *PoolAdminServer {
+	if poolMgr == nil {
+		poolMgr = NoopPoolLifecycle{}
+	}
+	return &PoolAdminServer{store: st, poolMgr: poolMgr, poolLocks: make(map[poolLockKey]*sync.Mutex)}
+}
+
+// poolLockKey identifies the pool a lockPool call serializes on.
+type poolLockKey struct {
+	name      string
+	namespace string
+}
+
+// lockPool serializes CreatePool/UpdatePool/DeletePool for the same
+// (name, namespace). Without this, two concurrent RPCs against the same
+// pool can interleave their store write with their PoolLifecycle
+// transition: e.g. two concurrent UpdatePool calls could persist spec A
+// then spec B, but call StopReconciler+StartReconciler in the order B then
+// A - leaving the store holding B while the live reconciler runs against
+// the stale A, permanently disagreeing until another successful
+// Create/Update/Delete cycle. Locking the whole read-validate-write-
+// lifecycle sequence per pool, across all three RPCs, closes that window:
+// only one such sequence for a given pool can be in flight at a time.
+// Returns an unlock function; callers hold it (typically via defer) for the
+// duration of that pool-scoped critical section.
+func (s *PoolAdminServer) lockPool(name, namespace string) func() {
+	key := poolLockKey{name: name, namespace: namespace}
+
+	s.poolLocksMu.Lock()
+	l, ok := s.poolLocks[key]
+	if !ok {
+		l = &sync.Mutex{}
+		s.poolLocks[key] = l
+	}
+	s.poolLocksMu.Unlock()
+
+	l.Lock()
+	return l.Unlock
 }
 
 // validatePoolSpec checks the fields CreatePool/UpdatePool both require, and
@@ -63,6 +125,9 @@ func (s *PoolAdminServer) CreatePool(ctx context.Context, req *poolmgrv1alpha1.C
 		return nil, err
 	}
 
+	unlock := s.lockPool(spec.GetName(), spec.GetNamespace())
+	defer unlock()
+
 	_, err := s.store.GetPool(ctx, spec.GetName(), spec.GetNamespace())
 	if err == nil {
 		return nil, status.Errorf(codes.AlreadyExists, "pool %s/%s already exists", spec.GetNamespace(), spec.GetName())
@@ -73,6 +138,16 @@ func (s *PoolAdminServer) CreatePool(ctx context.Context, req *poolmgrv1alpha1.C
 
 	if err := s.store.CreatePool(ctx, spec); err != nil {
 		return nil, status.Errorf(codes.Internal, "create pool: %v", err)
+	}
+
+	// A start failure here is unreachable in practice (spec's replenishment
+	// strategy was already validated above), but if it ever happens, the
+	// pool itself was created successfully - failing the RPC would misreport
+	// that to the caller. Log it as an operational signal instead; the pool
+	// will simply have no reconciler running until poolmgrd restarts (which
+	// re-seeds every pool) or the pool is deleted and recreated.
+	if err := s.poolMgr.StartReconciler(spec); err != nil {
+		slog.ErrorContext(ctx, "pooladmin: start reconciler failed", "pool", spec.GetName(), "namespace", spec.GetNamespace(), "error", err)
 	}
 
 	return &poolmgrv1alpha1.Pool{Spec: spec, Status: &poolmgrv1alpha1.PoolStatus{}}, nil
@@ -113,6 +188,9 @@ func (s *PoolAdminServer) UpdatePool(ctx context.Context, req *poolmgrv1alpha1.U
 		return nil, err
 	}
 
+	unlock := s.lockPool(spec.GetName(), spec.GetNamespace())
+	defer unlock()
+
 	if _, err := s.store.GetPool(ctx, spec.GetName(), spec.GetNamespace()); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, status.Errorf(codes.NotFound, "pool %s/%s not found", spec.GetNamespace(), spec.GetName())
@@ -122,6 +200,18 @@ func (s *PoolAdminServer) UpdatePool(ctx context.Context, req *poolmgrv1alpha1.U
 
 	if err := s.store.UpdatePool(ctx, spec); err != nil {
 		return nil, status.Errorf(codes.Internal, "update pool: %v", err)
+	}
+
+	// Same log-only philosophy as CreatePool's StartReconciler call above:
+	// the pool's spec is already persisted, so failing the RPC here would
+	// misreport that. Stop the old reconciler (if any - StopReconciler is a
+	// no-op for an unknown pool) and start a fresh one against the new spec;
+	// on start failure the pool simply has no reconciler running until
+	// poolmgrd restarts (re-seeds every pool) or another successful
+	// CreatePool/UpdatePool/DeletePool cycle.
+	s.poolMgr.StopReconciler(spec.GetName(), spec.GetNamespace())
+	if err := s.poolMgr.StartReconciler(spec); err != nil {
+		slog.ErrorContext(ctx, "pooladmin: restart reconciler failed", "pool", spec.GetName(), "namespace", spec.GetNamespace(), "error", err)
 	}
 
 	counts, err := reconciler.CountVMs(ctx, s.store, spec.GetName(), spec.GetNamespace())
@@ -137,6 +227,9 @@ func (s *PoolAdminServer) UpdatePool(ctx context.Context, req *poolmgrv1alpha1.U
 // VM/lease rows.
 func (s *PoolAdminServer) DeletePool(ctx context.Context, req *poolmgrv1alpha1.DeletePoolRequest) (*emptypb.Empty, error) {
 	name, ns := req.GetRef().GetName(), req.GetRef().GetNamespace()
+
+	unlock := s.lockPool(name, ns)
+	defer unlock()
 
 	if _, err := s.store.GetPool(ctx, name, ns); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -159,6 +252,8 @@ func (s *PoolAdminServer) DeletePool(ctx context.Context, req *poolmgrv1alpha1.D
 		}
 		return nil, status.Errorf(codes.Internal, "delete pool: %v", err)
 	}
+
+	s.poolMgr.StopReconciler(name, ns)
 	return &emptypb.Empty{}, nil
 }
 

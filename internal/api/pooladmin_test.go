@@ -2,6 +2,8 @@ package api_test
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,12 +13,13 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/liquidmetal-dev/battery/internal/api"
+	"github.com/liquidmetal-dev/battery/internal/store"
 )
 
 func TestCreateGetPool(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
-	s := api.NewPoolAdminServer(st)
+	s := api.NewPoolAdminServer(st, nil)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
 	created, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec})
@@ -40,7 +43,7 @@ func TestCreateGetPool(t *testing.T) {
 func TestCreatePoolForcesAllowGuestAgent(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
-	s := api.NewPoolAdminServer(st)
+	s := api.NewPoolAdminServer(st, nil)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
 	spec.MicrovmTemplate.AllowGuestAgent = false
@@ -69,7 +72,7 @@ func TestCreatePoolForcesAllowGuestAgent(t *testing.T) {
 func TestCreatePoolNilSpec(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
-	s := api.NewPoolAdminServer(st)
+	s := api.NewPoolAdminServer(st, nil)
 
 	_, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{})
 	if status.Code(err) != codes.InvalidArgument {
@@ -110,7 +113,7 @@ func TestCreatePoolValidation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 			st := openTestStore(t)
-			s := api.NewPoolAdminServer(st)
+			s := api.NewPoolAdminServer(st, nil)
 
 			spec := base()
 			tt.mutate(spec)
@@ -126,7 +129,7 @@ func TestCreatePoolValidation(t *testing.T) {
 func TestCreatePoolAlreadyExists(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
-	s := api.NewPoolAdminServer(st)
+	s := api.NewPoolAdminServer(st, nil)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
 	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
@@ -142,7 +145,7 @@ func TestCreatePoolAlreadyExists(t *testing.T) {
 func TestGetUpdateDeletePoolNotFound(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
-	s := api.NewPoolAdminServer(st)
+	s := api.NewPoolAdminServer(st, nil)
 
 	ref := &poolmgrv1alpha1.PoolRef{Name: "missing", Namespace: "default"}
 
@@ -160,7 +163,7 @@ func TestGetUpdateDeletePoolNotFound(t *testing.T) {
 func TestUpdatePool(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
-	s := api.NewPoolAdminServer(st)
+	s := api.NewPoolAdminServer(st, nil)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
 	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
@@ -190,7 +193,7 @@ func TestUpdatePool(t *testing.T) {
 func TestListPoolsNamespaceFilter(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
-	s := api.NewPoolAdminServer(st)
+	s := api.NewPoolAdminServer(st, nil)
 
 	a := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
 	b := samplePool("pool-b", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
@@ -224,7 +227,7 @@ func TestListPoolsNamespaceFilter(t *testing.T) {
 func TestDeletePool(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
-	s := api.NewPoolAdminServer(st)
+	s := api.NewPoolAdminServer(st, nil)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
 	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
@@ -254,7 +257,7 @@ func TestDeletePoolBlockedWithVMs(t *testing.T) {
 		t.Run(phase.String(), func(t *testing.T) {
 			ctx := context.Background()
 			st := openTestStore(t)
-			s := api.NewPoolAdminServer(st)
+			s := api.NewPoolAdminServer(st, nil)
 
 			spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
 			if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
@@ -276,7 +279,7 @@ func TestDeletePoolBlockedWithVMs(t *testing.T) {
 func TestGetPoolStatusCounts(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
-	s := api.NewPoolAdminServer(st)
+	s := api.NewPoolAdminServer(st, nil)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
 	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
@@ -312,4 +315,230 @@ func TestGetPoolStatusCounts(t *testing.T) {
 func withPhase(vm *poolmgrv1alpha1.VMRecord, phase poolmgrv1alpha1.VMPhase) *poolmgrv1alpha1.VMRecord {
 	vm.Phase = phase
 	return vm
+}
+
+func TestCreatePool_StartsReconciler(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	lifecycle := &fakePoolLifecycle{}
+	s := api.NewPoolAdminServer(st, lifecycle)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
+	if len(lifecycle.started) != 1 || lifecycle.started[0] != "pool-a" {
+		t.Fatalf("started = %v, want [pool-a]", lifecycle.started)
+	}
+}
+
+func TestCreatePool_ValidationFailure_DoesNotStartReconciler(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	lifecycle := &fakePoolLifecycle{}
+	s := api.NewPoolAdminServer(st, lifecycle)
+
+	spec := samplePool("", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil) // empty name is invalid
+	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err == nil {
+		t.Fatal("expected CreatePool to fail validation")
+	}
+
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
+	if len(lifecycle.started) != 0 {
+		t.Fatalf("started = %v, want none", lifecycle.started)
+	}
+}
+
+func TestDeletePool_StopsReconciler(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	lifecycle := &fakePoolLifecycle{}
+	s := api.NewPoolAdminServer(st, lifecycle)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+
+	if _, err := s.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}}); err != nil {
+		t.Fatalf("DeletePool() error = %v", err)
+	}
+
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
+	if len(lifecycle.stopped) != 1 || lifecycle.stopped[0] != "pool-a" {
+		t.Fatalf("stopped = %v, want [pool-a]", lifecycle.stopped)
+	}
+}
+
+func TestUpdatePool_RestartsReconciler(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	lifecycle := &fakePoolLifecycle{}
+	s := api.NewPoolAdminServer(st, lifecycle)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+
+	update := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	update.Size = 5
+	if _, err := s.UpdatePool(ctx, &poolmgrv1alpha1.UpdatePoolRequest{Spec: update}); err != nil {
+		t.Fatalf("UpdatePool() error = %v", err)
+	}
+
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
+	if len(lifecycle.started) != 2 || lifecycle.started[0] != "pool-a" || lifecycle.started[1] != "pool-a" {
+		t.Fatalf("started = %v, want [pool-a pool-a]", lifecycle.started)
+	}
+	if len(lifecycle.stopped) != 1 || lifecycle.stopped[0] != "pool-a" {
+		t.Fatalf("stopped = %v, want [pool-a]", lifecycle.stopped)
+	}
+}
+
+// pausingStore wraps a store.Store and, on its first UpdatePool call only,
+// blocks after the underlying write completes until resume is closed. Used
+// to force a controlled window between a concurrent UpdatePool RPC's store
+// write and its PoolLifecycle transition, to prove per-pool serialization
+// (see TestUpdatePool_ConcurrentUpdates_Serialized).
+type pausingStore struct {
+	store.Store
+	once   sync.Once
+	paused chan struct{}
+	resume chan struct{}
+}
+
+func (p *pausingStore) UpdatePool(ctx context.Context, spec *poolmgrv1alpha1.PoolSpec) error {
+	if err := p.Store.UpdatePool(ctx, spec); err != nil {
+		return err
+	}
+	p.once.Do(func() {
+		close(p.paused)
+		<-p.resume
+	})
+	return nil
+}
+
+// TestUpdatePool_ConcurrentUpdates_Serialized reproduces the race from PR
+// review: without per-pool serialization, two concurrent UpdatePool calls
+// for the same pool can persist their specs in one order but call
+// StopReconciler/StartReconciler in the other order, leaving the store and
+// the live reconciler permanently disagreeing about which spec is current.
+// This forces update A to pause between its store write and its lifecycle
+// transition, then asserts update B cannot complete (or even reach its own
+// store write) while A holds the pool's lock - proving the two can never
+// interleave - and that the store and the reconciler's last-started spec
+// agree once both finish.
+func TestUpdatePool_ConcurrentUpdates_Serialized(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	lifecycle := &fakePoolLifecycle{}
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	setup := api.NewPoolAdminServer(st, lifecycle)
+	if _, err := setup.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+
+	ps := &pausingStore{Store: st, paused: make(chan struct{}), resume: make(chan struct{})}
+	s := api.NewPoolAdminServer(ps, lifecycle)
+
+	specA := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	specA.Size = 3
+	specB := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	specB.Size = 5
+
+	doneA := make(chan error, 1)
+	go func() {
+		_, err := s.UpdatePool(ctx, &poolmgrv1alpha1.UpdatePoolRequest{Spec: specA})
+		doneA <- err
+	}()
+
+	select {
+	case <-ps.paused:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for update A to pause after its store write")
+	}
+
+	doneB := make(chan error, 1)
+	go func() {
+		_, err := s.UpdatePool(ctx, &poolmgrv1alpha1.UpdatePoolRequest{Spec: specB})
+		doneB <- err
+	}()
+
+	select {
+	case err := <-doneB:
+		t.Fatalf("UpdatePool B returned (err=%v) while A was still paused mid-transition - not serialized", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(ps.resume)
+
+	if err := <-doneA; err != nil {
+		t.Fatalf("UpdatePool A: %v", err)
+	}
+	if err := <-doneB; err != nil {
+		t.Fatalf("UpdatePool B: %v", err)
+	}
+
+	final, err := st.GetPool(ctx, "pool-a", "default")
+	if err != nil {
+		t.Fatalf("GetPool: %v", err)
+	}
+	if final.GetSize() != specB.GetSize() {
+		t.Fatalf("store spec.Size = %d, want %d (B, the last update to complete)", final.GetSize(), specB.GetSize())
+	}
+
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
+	if len(lifecycle.started) != 3 {
+		t.Fatalf("started = %v, want 3 entries (create, A's restart, B's restart)", lifecycle.started)
+	}
+}
+
+func TestCreatePool_StartReconcilerFails_StillReturnsSuccess(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	lifecycle := &fakePoolLifecycle{startErr: errors.New("boom")}
+	s := api.NewPoolAdminServer(st, lifecycle)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	got, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec})
+	if err != nil {
+		t.Fatalf("CreatePool() error = %v, want nil despite StartReconciler failure", err)
+	}
+	if got == nil {
+		t.Fatal("CreatePool() returned nil response, want non-nil despite StartReconciler failure")
+	}
+}
+
+func TestDeletePool_VMsStillPresent_DoesNotStopReconciler(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	lifecycle := &fakePoolLifecycle{}
+	s := api.NewPoolAdminServer(st, lifecycle)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+	if err := st.CreateVM(ctx, sampleAvailableVM("vm-1", "pool-a")); err != nil {
+		t.Fatalf("CreateVM() error = %v", err)
+	}
+
+	if _, err := s.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}}); err == nil {
+		t.Fatal("expected DeletePool to fail with VMs still present")
+	}
+
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
+	if len(lifecycle.stopped) != 0 {
+		t.Fatalf("stopped = %v, want none", lifecycle.stopped)
+	}
 }

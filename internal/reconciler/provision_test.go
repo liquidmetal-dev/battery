@@ -268,6 +268,54 @@ func TestProvision_UpdatePhaseFailure_AppliesHookFailurePolicy(t *testing.T) {
 	}
 }
 
+// TestProvision_ContextCancelledMidProvision_StillAppliesHookFailurePolicy
+// reproduces stopping a pool's Reconciler (e.g. via PoolAdminServer.
+// UpdatePool/DeletePool, or poolmgrd shutdown) while a Provision call for
+// that pool is in flight: ctx is cancelled after the VMRecord is already
+// persisted (PROVISIONING) but before the microvm reaches CREATED.
+// ApplyHookFailurePolicy's own cleanup must still land the record in a
+// terminal phase (here QUARANTINED) rather than leaving it stranded in
+// PROVISIONING forever, which is what happens if that cleanup mistakenly
+// runs on the already-cancelled ctx instead of a detached one.
+func TestProvision_ContextCancelledMidProvision_StillAppliesHookFailurePolicy(t *testing.T) {
+	vm := &fakeMicroVM{pollsUntilCreated: 1000} // never reaches CREATED within this test
+	exec := alwaysReadyExec()
+	flint := startFakeFlintlock(t, vm, exec)
+	st := openTestStore(t)
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 1, []string{"host-a"})
+	pool.HookFailurePolicy = poolmgrv1alpha1.HookFailurePolicy_QUARANTINE
+
+	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.Provision(ctx, pool) }()
+
+	// Give CreateVM time to persist the record and at least one poll to
+	// happen, then cancel - simulating the owning Reconciler being stopped
+	// mid-Provision.
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Provision() error = nil, want a cancellation-related error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Provision to return after cancel")
+	}
+
+	vms := onlyVMsInPool(t, st, "pool-a")
+	if len(vms) != 1 {
+		t.Fatalf("expected 1 VM record, got %d", len(vms))
+	}
+	if vms[0].GetPhase() != poolmgrv1alpha1.VMPhase_QUARANTINED {
+		t.Fatalf("expected phase QUARANTINED after cancellation, got %v - ApplyHookFailurePolicy's cleanup must not use the already-cancelled ctx", vms[0].GetPhase())
+	}
+}
+
 func TestProvision_UnknownHost(t *testing.T) {
 	vm := &fakeMicroVM{}
 	exec := &fakeMicroVMExec{}
