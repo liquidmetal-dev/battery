@@ -63,6 +63,30 @@ The gRPC API is defined in `api/proto` using [buf](https://buf.build/). After ed
 ./hack/generate-proto.sh
 ```
 
+## Releasing
+
+Releases are cut by pushing a semver tag matching `v*.*.*` (e.g. `v0.1.0`)
+to `main`. This triggers `.github/workflows/release.yml`, which:
+
+- builds `poolmgrd` for `linux/amd64` and `linux/arm64` via GoReleaser
+- publishes a multi-arch container image to
+  `ghcr.io/liquidmetal-dev/poolmgrd:<tag>` (and `:latest`)
+- creates a GitHub release with a changelog grouped by commit type
+- pushes `api/proto` (`PoolAdmin`/`Lease`/`Events`/`types`) to the Buf
+  Schema Registry at `buf.build/liquidmetal-dev/battery`
+
+**One-time setup:** a `BUF_TOKEN` repository secret (a Buf Schema Registry
+API token with write access to `liquidmetal-dev/battery`) must exist
+before the first tag is pushed. Until the first successful `buf push`,
+the `buf breaking` check in CI (`.github/workflows/ci.yml`) has nothing
+to compare against and will fail on every PR — cut the first release (or
+run `buf push` manually) as soon as this lands.
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE) for details.
