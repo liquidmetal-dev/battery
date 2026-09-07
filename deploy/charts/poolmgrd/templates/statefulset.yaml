@@ -1,0 +1,118 @@
+{{- $hasTLS := eq (include "poolmgrd.hasTLS" .) "true" -}}
+{{- $grpcPort := include "poolmgrd.portFromAddr" .Values.config.api_server.addr -}}
+{{- $metricsPort := include "poolmgrd.portFromAddr" .Values.config.metrics_addr -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "poolmgrd.fullname" . }}
+  labels:
+    {{- include "poolmgrd.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "poolmgrd.fullname" . }}
+  # poolmgrd is single-instance for v1: no HA/leader-election, state lives
+  # on the local SQLite file. Replicas is intentionally not configurable.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "poolmgrd.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "poolmgrd.selectorLabels" . | nindent 8 }}
+      annotations:
+        # poolmgrd loads config once at startup with no reload path, so
+        # without these the StatefulSet spec is unchanged (and no rollout
+        # happens) when only the rendered ConfigMap/Secret content changes.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if and .Values.tls.create (not .Values.tls.existingSecret) }}
+        checksum/tls: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "poolmgrd.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: poolmgrd
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - -config=/etc/poolmgrd/config.json
+            - -db=/data/poolmgr.db
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: grpc
+              containerPort: {{ $grpcPort }}
+            - name: metrics
+              containerPort: {{ $metricsPort }}
+          # Liveness/readiness probe the plain-HTTP /metrics endpoint rather
+          # than the gRPC health service: the gRPC API may require mTLS
+          # client certs (kubelet's native grpc probe can't present one),
+          # and the distroless base image ships no shell/probe binary for
+          # an exec-based check.
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/poolmgrd
+              readOnly: true
+            {{- if $hasTLS }}
+            - name: tls
+              mountPath: /etc/poolmgrd/tls
+              readOnly: true
+            {{- end }}
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "poolmgrd.fullname" . }}-config
+        {{- if $hasTLS }}
+        - name: tls
+          secret:
+            secretName: {{ include "poolmgrd.tlsSecretName" . }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.persistence.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}

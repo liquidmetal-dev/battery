@@ -1,0 +1,10 @@
+poolmgrd has been deployed as {{ include "poolmgrd.fullname" . }}.
+
+Check rollout status:
+  kubectl rollout status statefulset/{{ include "poolmgrd.fullname" . }} -n {{ .Release.Namespace }}
+
+Port-forward the gRPC API:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "poolmgrd.fullname" . }} {{ include "poolmgrd.portFromAddr" .Values.config.api_server.addr }}:{{ include "poolmgrd.portFromAddr" .Values.config.api_server.addr }}
+
+Port-forward metrics:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "poolmgrd.fullname" . }} {{ include "poolmgrd.portFromAddr" .Values.config.metrics_addr }}:{{ include "poolmgrd.portFromAddr" .Values.config.metrics_addr }}

@@ -1,0 +1,73 @@
+image:
+  repository: ghcr.io/liquidmetal-dev/poolmgrd
+  # Defaults to .Chart.AppVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# config is rendered verbatim (as JSON) into poolmgrd's -config file, using
+# poolmgrd's own config schema (see internal/config/config.go) -- the field
+# names below (hosts, api_server, metrics_addr, ...) are exactly the JSON
+# tags poolmgrd itself parses. File paths referenced under any tls block
+# (cert_file/key_file/ca_file/client_ca_file) must match where the TLS
+# Secret is mounted: /etc/poolmgrd/tls/<key-in-tls.files-or-existingSecret>.
+#
+# The gRPC and metrics container/service ports are derived from
+# config.api_server.addr and config.metrics_addr, so there is a single
+# source of truth for ports.
+config:
+  hosts: []
+  # - name: host-a
+  #   address: flintlock-a.example.com:9090
+  #   tls:
+  #     insecure: true
+  api_server:
+    addr: ":8443"
+    tls:
+      insecure: true
+    basic_auth_token: ""
+  metrics_addr: ":9090"
+
+# TLS materials for config.hosts[].tls and config.api_server.tls, mounted at
+# /etc/poolmgrd/tls. Leave both create and existingSecret unset/false for an
+# all-insecure deployment (no TLS volume is mounted in that case).
+tls:
+  # When true, the chart creates a Secret named "<release>-poolmgrd-tls"
+  # from tls.files.
+  create: false
+  # When set, the chart mounts this pre-existing Secret instead of creating
+  # one (e.g. for certs managed by cert-manager/external-secrets). Takes
+  # precedence over tls.create.
+  existingSecret: ""
+  # Filename -> PEM content, only used when tls.create is true. Filenames
+  # must match the cert_file/key_file/ca_file/client_ca_file values
+  # referenced under config.hosts[].tls / config.api_server.tls.
+  files: {}
+
+persistence:
+  size: 1Gi
+  storageClassName: ""
+
+metrics:
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}
+
+resources: {}
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+# fsGroup 65532 matches the distroless "nonroot" image's UID/GID (see
+# Dockerfile), so the mounted PVC is group-writable by the container --
+# without it, a fresh PVC provisioned root:root leaves poolmgrd unable to
+# create /data/poolmgr.db.
+podSecurityContext:
+  fsGroup: 65532
+securityContext: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

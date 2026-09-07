@@ -45,3 +45,9 @@ jobs:
       - run: buf push --create --create-visibility public --label "${{ github.ref_name }}" --label main
         env:
           BUF_TOKEN: ${{ secrets.BUF_TOKEN }}
+
+      - name: Package and push Helm chart
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          helm package deploy/charts/poolmgrd --version "$version" --app-version "$version" --destination /tmp/helm-dist
+          helm push "/tmp/helm-dist/poolmgrd-${version}.tgz" oci://ghcr.io/liquidmetal-dev/charts
