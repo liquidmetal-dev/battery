@@ -87,3 +87,12 @@ func TestRegistriesAreIsolated(t *testing.T) {
 
 	assertNotContains(t, scrape(t, regB), "poolmgr_vm_claims_total")
 }
+
+func TestRecordReconcilerUnexpectedExit(t *testing.T) {
+	reg := metrics.NewRegistry()
+	reg.RecordReconcilerUnexpectedExit("pool-a", "default")
+	reg.RecordReconcilerUnexpectedExit("pool-a", "default")
+
+	body := scrape(t, reg)
+	assertContains(t, body, `poolmgr_reconciler_unexpected_exit_total{pool_name="pool-a",pool_namespace="default"} 2`)
+}
