@@ -11,6 +11,7 @@ import (
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 
 	"github.com/liquidmetal-dev/battery/internal/flintlockclient"
+	"github.com/liquidmetal-dev/battery/internal/metrics"
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
 
@@ -39,8 +40,9 @@ type Reconciler struct {
 }
 
 // New returns a Reconciler for pool. tickInterval <= 0 uses
-// DefaultTickInterval.
-func New(pool *poolmgrv1alpha1.PoolSpec, st store.Store, flint *flintlockclient.Pool, tickInterval time.Duration, pcfg ProvisionConfig) (*Reconciler, error) {
+// DefaultTickInterval. If m is nil, a fresh unshared metrics.Registry is
+// used (see NewProvisioner).
+func New(pool *poolmgrv1alpha1.PoolSpec, st store.Store, flint *flintlockclient.Pool, tickInterval time.Duration, pcfg ProvisionConfig, m *metrics.Registry) (*Reconciler, error) {
 	if pool == nil {
 		return nil, errors.New("reconciler: pool is required")
 	}
@@ -56,7 +58,7 @@ func New(pool *poolmgrv1alpha1.PoolSpec, st store.Store, flint *flintlockclient.
 		pool:         pool,
 		store:        st,
 		strategy:     strategy,
-		provisioner:  NewProvisioner(st, flint, pcfg),
+		provisioner:  NewProvisioner(st, flint, pcfg, m),
 		tickInterval: tickInterval,
 		claimed:      make(chan struct{}, notifyBuffer),
 		deleted:      make(chan struct{}, notifyBuffer),

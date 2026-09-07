@@ -45,7 +45,7 @@ func TestReconciler_MinSizeThreshold_TickDrivenTopUp(t *testing.T) {
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 2, []string{"host-a"})
 	pool.ReplenishmentStrategy.MinSize = int32Ptr(2)
 
-	r, err := reconciler.New(pool, st, flint, 10*time.Millisecond, fastProvisionConfig())
+	r, err := reconciler.New(pool, st, flint, 10*time.Millisecond, fastProvisionConfig(), nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestReconciler_MinSizeThreshold_CountsPreLeaseHookRunningAsInFlight(t *test
 		}
 	}
 
-	r, err := reconciler.New(pool, st, flint, 10*time.Millisecond, fastProvisionConfig())
+	r, err := reconciler.New(pool, st, flint, 10*time.Millisecond, fastProvisionConfig(), nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestReconciler_ImmediateOnLease_OnlyOnClaimNotification(t *testing.T) {
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE, 5, []string{"host-a"})
 
-	r, err := reconciler.New(pool, st, flint, 10*time.Millisecond, fastProvisionConfig())
+	r, err := reconciler.New(pool, st, flint, 10*time.Millisecond, fastProvisionConfig(), nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestReconciler_ReplaceOnDelete_OnlyOnDeleteNotification(t *testing.T) {
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE, 5, []string{"host-a"})
 
-	r, err := reconciler.New(pool, st, flint, 10*time.Millisecond, fastProvisionConfig())
+	r, err := reconciler.New(pool, st, flint, 10*time.Millisecond, fastProvisionConfig(), nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

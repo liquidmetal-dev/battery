@@ -10,14 +10,22 @@ import (
 	"os"
 )
 
+// DefaultMetricsAddr is the address the pool manager's /metrics HTTP
+// listener binds to when Config.MetricsAddr is empty.
+const DefaultMetricsAddr = ":9090"
+
 // Config is the top-level configuration: the set of flintlock hosts the pool
-// manager can dial, plus the pool manager's own API server config.
-// APIServer is a pointer so that a config file predating its introduction
-// (or one that simply omits it) parses as "not configured" rather than as
-// an explicit, invalid all-zero value.
+// manager can dial, the pool manager's own API server config, and the
+// address its /metrics HTTP endpoint listens on. APIServer is a pointer so
+// that a config file predating its introduction (or one that simply omits
+// it) parses as "not configured" rather than as an explicit, invalid
+// all-zero value.
 type Config struct {
 	Hosts     []HostConfig     `json:"hosts"`
 	APIServer *APIServerConfig `json:"api_server,omitempty"`
+	// MetricsAddr is the address (host:port, or :port) the /metrics HTTP
+	// endpoint listens on. Empty uses DefaultMetricsAddr.
+	MetricsAddr string `json:"metrics_addr,omitempty"`
 }
 
 // HostConfig describes one flintlock host: an address plus per-host TLS
@@ -49,6 +57,9 @@ func Load(path string) (*Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("config: parse %s: %w", path, err)
+	}
+	if cfg.MetricsAddr == "" {
+		cfg.MetricsAddr = DefaultMetricsAddr
 	}
 
 	if err := cfg.Validate(); err != nil {

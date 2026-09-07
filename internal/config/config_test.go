@@ -39,6 +39,26 @@ func TestLoad_ValidInsecureHost(t *testing.T) {
 	if host.Name != "host-a" || host.Address != "10.0.0.1:9090" || !host.TLS.Insecure {
 		t.Fatalf("unexpected host: %+v", host)
 	}
+	if cfg.MetricsAddr != config.DefaultMetricsAddr {
+		t.Fatalf("expected default metrics_addr %q, got %q", config.DefaultMetricsAddr, cfg.MetricsAddr)
+	}
+}
+
+func TestLoad_ExplicitMetricsAddr(t *testing.T) {
+	path := writeConfigFile(t, `{
+		"hosts": [
+			{"name": "host-a", "address": "10.0.0.1:9090", "tls": {"insecure": true}}
+		],
+		"metrics_addr": ":9999"
+	}`)
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.MetricsAddr != ":9999" {
+		t.Fatalf("expected metrics_addr :9999, got %q", cfg.MetricsAddr)
+	}
 }
 
 func TestLoad_ValidMTLSHost(t *testing.T) {
