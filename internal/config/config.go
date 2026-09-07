@@ -129,6 +129,8 @@ func (t TLSConfig) Validate() error {
 // APIServerConfig controls the pool manager's own gRPC API server: its TLS
 // mode and an optional basic-auth token layered on top.
 type APIServerConfig struct {
+	// Addr is the address (host:port, or :port) the gRPC server listens on.
+	Addr           string          `json:"addr"`
 	TLS            ServerTLSConfig `json:"tls"`
 	BasicAuthToken string          `json:"basic_auth_token,omitempty"`
 }
@@ -137,6 +139,9 @@ type APIServerConfig struct {
 // BasicAuthToken has no format requirements: any non-empty value enables
 // basic auth, and an empty value leaves it disabled, independent of TLS mode.
 func (a APIServerConfig) Validate() error {
+	if a.Addr == "" {
+		return errors.New("api_server: addr is required")
+	}
 	if err := a.TLS.Validate(); err != nil {
 		return err
 	}

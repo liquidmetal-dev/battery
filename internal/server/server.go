@@ -25,9 +25,11 @@ import (
 
 // New builds a *grpc.Server configured per cfg: TLS credentials (or an
 // explicit insecure mode) and, if cfg.BasicAuthToken is set, a basic-auth
-// interceptor rejecting unauthenticated calls. Callers still need to
-// register their services on the returned server and Serve it.
-func New(cfg config.APIServerConfig) (*grpc.Server, error) {
+// interceptor rejecting unauthenticated calls. extraOpts, if given, are
+// appended after those (e.g. a caller's metrics.Registry.ServerOptions()).
+// Callers still need to register their services on the returned server and
+// Serve it.
+func New(cfg config.APIServerConfig, extraOpts ...grpc.ServerOption) (*grpc.Server, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("server: %w", err)
 	}
@@ -46,6 +48,8 @@ func New(cfg config.APIServerConfig) (*grpc.Server, error) {
 		unary, stream := basicAuthInterceptors(cfg.BasicAuthToken)
 		opts = append(opts, grpc.ChainUnaryInterceptor(unary), grpc.ChainStreamInterceptor(stream))
 	}
+
+	opts = append(opts, extraOpts...)
 
 	return grpc.NewServer(opts...), nil
 }
