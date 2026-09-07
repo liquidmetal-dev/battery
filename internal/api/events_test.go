@@ -74,7 +74,7 @@ func TestSubscribe_ReplayOnConnect(t *testing.T) {
 	defer cancel()
 	stream := newFakeEventStream(streamCtx)
 
-	s := api.NewEventsServer(st, 10*time.Millisecond)
+	s := api.NewEventsServer(st, 10*time.Millisecond, 0)
 	done := make(chan error, 1)
 	go func() {
 		done <- s.Subscribe(&poolmgrv1alpha1.SubscribeRequest{
@@ -110,7 +110,7 @@ func TestSubscribe_LiveTailing(t *testing.T) {
 	defer cancel()
 	stream := newFakeEventStream(streamCtx)
 
-	s := api.NewEventsServer(st, 10*time.Millisecond)
+	s := api.NewEventsServer(st, 10*time.Millisecond, 0)
 	done := make(chan error, 1)
 	go func() {
 		done <- s.Subscribe(&poolmgrv1alpha1.SubscribeRequest{
@@ -149,7 +149,7 @@ func TestSubscribe_PoolFilterExcludesOtherPools(t *testing.T) {
 	defer cancel()
 	stream := newFakeEventStream(streamCtx)
 
-	s := api.NewEventsServer(st, 10*time.Millisecond)
+	s := api.NewEventsServer(st, 10*time.Millisecond, 0)
 	done := make(chan error, 1)
 	go func() {
 		done <- s.Subscribe(&poolmgrv1alpha1.SubscribeRequest{
@@ -184,7 +184,7 @@ func TestSubscribe_NoFilterReceivesAllPools(t *testing.T) {
 	defer cancel()
 	stream := newFakeEventStream(streamCtx)
 
-	s := api.NewEventsServer(st, 10*time.Millisecond)
+	s := api.NewEventsServer(st, 10*time.Millisecond, 0)
 	done := make(chan error, 1)
 	go func() {
 		done <- s.Subscribe(&poolmgrv1alpha1.SubscribeRequest{}, stream)
@@ -200,12 +200,53 @@ func TestSubscribe_NoFilterReceivesAllPools(t *testing.T) {
 	<-done
 }
 
+func TestSubscribe_DrainsMultipleBatchesBeforePolling(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	const numEvents = 5
+	want := make([]int64, numEvents)
+	for i := 0; i < numEvents; i++ {
+		e := sampleEvent("pool-a", "default", "vm-1", poolmgrv1alpha1.EventType_VM_PROVISIONED)
+		if err := st.AppendEvent(ctx, e); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+		want[i] = e.GetId()
+	}
+
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stream := newFakeEventStream(streamCtx)
+
+	// A batch size smaller than numEvents, paired with a poll interval far
+	// longer than the test timeout, means the only way every event can
+	// arrive before recvEvent's 2s deadline is if Subscribe keeps draining
+	// full batches instead of waiting for a tick between them.
+	s := api.NewEventsServer(st, time.Hour, 2)
+	done := make(chan error, 1)
+	go func() {
+		done <- s.Subscribe(&poolmgrv1alpha1.SubscribeRequest{
+			Pool: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"},
+		}, stream)
+	}()
+
+	for i, wantID := range want {
+		got := recvEvent(t, stream)
+		if got.GetId() != wantID {
+			t.Fatalf("event[%d] id = %d, want %d", i, got.GetId(), wantID)
+		}
+	}
+
+	cancel()
+	<-done
+}
+
 func TestSubscribe_ContextCancelReturnsPromptly(t *testing.T) {
 	st := openTestStore(t)
 	streamCtx, cancel := context.WithCancel(context.Background())
 
 	stream := newFakeEventStream(streamCtx)
-	s := api.NewEventsServer(st, 10*time.Millisecond)
+	s := api.NewEventsServer(st, 10*time.Millisecond, 0)
 	done := make(chan error, 1)
 	go func() {
 		done <- s.Subscribe(&poolmgrv1alpha1.SubscribeRequest{}, stream)

@@ -801,7 +801,7 @@ func TestAppendEventNilCreatedAt(t *testing.T) {
 		t.Fatal("AppendEvent() with nil CreatedAt error = nil, want error")
 	}
 
-	got, err := s.ListEventsSince(ctx, "pool-a", "default", 0)
+	got, err := s.ListEventsSince(ctx, "pool-a", "default", 0, 100)
 	if err != nil {
 		t.Fatalf("ListEventsSince() error = %v", err)
 	}
@@ -827,7 +827,7 @@ func TestListEventsSince(t *testing.T) {
 	e3 := sampleEvent("pool-b", "default", "vm-2", poolmgrv1alpha1.EventType_VM_PROVISIONED)
 	must(s.AppendEvent(ctx, e3))
 
-	got, err := s.ListEventsSince(ctx, "pool-a", "default", e1.Id)
+	got, err := s.ListEventsSince(ctx, "pool-a", "default", e1.Id, 100)
 	if err != nil {
 		t.Fatalf("ListEventsSince() error = %v", err)
 	}
@@ -852,12 +852,80 @@ func TestListEventsSinceZeroReturnsAll(t *testing.T) {
 	must(s.AppendEvent(ctx, sampleEvent("pool-a", "default", "vm-1", poolmgrv1alpha1.EventType_VM_PROVISIONED)))
 	must(s.AppendEvent(ctx, sampleEvent("pool-a", "default", "vm-1", poolmgrv1alpha1.EventType_VM_AVAILABLE)))
 
-	got, err := s.ListEventsSince(ctx, "pool-a", "default", 0)
+	got, err := s.ListEventsSince(ctx, "pool-a", "default", 0, 100)
 	if err != nil {
 		t.Fatalf("ListEventsSince() error = %v", err)
 	}
 	if len(got) != 2 {
 		t.Fatalf("ListEventsSince(pool-a, default, 0) returned %d events, want 2", len(got))
+	}
+}
+
+func TestListEventsSinceRespectsLimit(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup error = %v", err)
+		}
+	}
+	e1 := sampleEvent("pool-a", "default", "vm-1", poolmgrv1alpha1.EventType_VM_PROVISIONED)
+	must(s.AppendEvent(ctx, e1))
+	e2 := sampleEvent("pool-a", "default", "vm-1", poolmgrv1alpha1.EventType_VM_AVAILABLE)
+	must(s.AppendEvent(ctx, e2))
+	e3 := sampleEvent("pool-a", "default", "vm-1", poolmgrv1alpha1.EventType_VM_CLAIMED)
+	must(s.AppendEvent(ctx, e3))
+
+	got, err := s.ListEventsSince(ctx, "pool-a", "default", 0, 2)
+	if err != nil {
+		t.Fatalf("ListEventsSince() error = %v", err)
+	}
+	if len(got) != 2 || got[0].Id != e1.Id || got[1].Id != e2.Id {
+		t.Fatalf("ListEventsSince(0, limit=2) = %+v, want [event id %d, event id %d]", got, e1.Id, e2.Id)
+	}
+
+	got, err = s.ListEventsSince(ctx, "pool-a", "default", got[len(got)-1].Id, 2)
+	if err != nil {
+		t.Fatalf("ListEventsSince() error = %v", err)
+	}
+	if len(got) != 1 || got[0].Id != e3.Id {
+		t.Fatalf("ListEventsSince(%d, limit=2) = %+v, want [event id %d]", e2.Id, got, e3.Id)
+	}
+}
+
+func TestListAllEventsSinceRespectsLimit(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup error = %v", err)
+		}
+	}
+	e1 := sampleEvent("pool-a", "default", "vm-1", poolmgrv1alpha1.EventType_VM_PROVISIONED)
+	must(s.AppendEvent(ctx, e1))
+	e2 := sampleEvent("pool-b", "default", "vm-2", poolmgrv1alpha1.EventType_VM_PROVISIONED)
+	must(s.AppendEvent(ctx, e2))
+	e3 := sampleEvent("pool-a", "default", "vm-1", poolmgrv1alpha1.EventType_VM_AVAILABLE)
+	must(s.AppendEvent(ctx, e3))
+
+	got, err := s.ListAllEventsSince(ctx, 0, 2)
+	if err != nil {
+		t.Fatalf("ListAllEventsSince() error = %v", err)
+	}
+	if len(got) != 2 || got[0].Id != e1.Id || got[1].Id != e2.Id {
+		t.Fatalf("ListAllEventsSince(0, limit=2) = %+v, want [event id %d, event id %d]", got, e1.Id, e2.Id)
+	}
+
+	got, err = s.ListAllEventsSince(ctx, got[len(got)-1].Id, 2)
+	if err != nil {
+		t.Fatalf("ListAllEventsSince() error = %v", err)
+	}
+	if len(got) != 1 || got[0].Id != e3.Id {
+		t.Fatalf("ListAllEventsSince(%d, limit=2) = %+v, want [event id %d]", e2.Id, got, e3.Id)
 	}
 }
 
@@ -878,7 +946,7 @@ func TestListAllEventsSinceOrdersAcrossPools(t *testing.T) {
 	e3 := sampleEvent("pool-a", "default", "vm-1", poolmgrv1alpha1.EventType_VM_AVAILABLE)
 	must(s.AppendEvent(ctx, e3))
 
-	got, err := s.ListAllEventsSince(ctx, 0)
+	got, err := s.ListAllEventsSince(ctx, 0, 100)
 	if err != nil {
 		t.Fatalf("ListAllEventsSince() error = %v", err)
 	}
@@ -908,7 +976,7 @@ func TestListAllEventsSinceRespectsSinceID(t *testing.T) {
 	e2 := sampleEvent("pool-b", "default", "vm-2", poolmgrv1alpha1.EventType_VM_PROVISIONED)
 	must(s.AppendEvent(ctx, e2))
 
-	got, err := s.ListAllEventsSince(ctx, e1.Id)
+	got, err := s.ListAllEventsSince(ctx, e1.Id, 100)
 	if err != nil {
 		t.Fatalf("ListAllEventsSince() error = %v", err)
 	}
@@ -930,7 +998,7 @@ func TestListEventsSinceNamespaceIsolation(t *testing.T) {
 	must(s.AppendEvent(ctx, sampleEvent("pool-a", "ns-1", "vm-1", poolmgrv1alpha1.EventType_VM_PROVISIONED)))
 	must(s.AppendEvent(ctx, sampleEvent("pool-a", "ns-2", "vm-2", poolmgrv1alpha1.EventType_VM_PROVISIONED)))
 
-	got, err := s.ListEventsSince(ctx, "pool-a", "ns-1", 0)
+	got, err := s.ListEventsSince(ctx, "pool-a", "ns-1", 0, 100)
 	if err != nil {
 		t.Fatalf("ListEventsSince() error = %v", err)
 	}

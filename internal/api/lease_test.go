@@ -62,7 +62,7 @@ func TestClaimVM_Success(t *testing.T) {
 		t.Fatalf("expected lease vm_uid vm-1, got %s", lease.GetVmUid())
 	}
 
-	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0)
+	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
 	if err != nil {
 		t.Fatalf("ListEventsSince: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestClaimVM_PreLeaseHookFailure_Quarantine(t *testing.T) {
 		t.Fatalf("expected no NotifyVMDeleted under QUARANTINE (VM wasn't deleted), got %v", notifier.deleted)
 	}
 
-	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0)
+	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
 	if err != nil {
 		t.Fatalf("ListEventsSince: %v", err)
 	}
@@ -387,7 +387,7 @@ func TestReleaseVM_Success(t *testing.T) {
 		t.Fatalf("expected lease to be deleted, GetLease error = %v", err)
 	}
 
-	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0)
+	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
 	if err != nil {
 		t.Fatalf("ListEventsSince: %v", err)
 	}

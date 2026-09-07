@@ -57,7 +57,7 @@ func TestProvision_HappyPath(t *testing.T) {
 		t.Fatalf("expected phase AVAILABLE, got %v", vms[0].GetPhase())
 	}
 
-	events, err := st.ListEventsSince(context.Background(), "pool-a", "default", 0)
+	events, err := st.ListEventsSince(context.Background(), "pool-a", "default", 0, 100)
 	if err != nil {
 		t.Fatalf("ListEventsSince: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestProvision_CreateCommandNonZeroExit_DeleteAndReplace(t *testing.T) {
 		t.Fatalf("expected DeleteMicroVM to be called once, got %v", got)
 	}
 
-	events, err := st.ListEventsSince(context.Background(), "pool-a", "default", 0)
+	events, err := st.ListEventsSince(context.Background(), "pool-a", "default", 0, 100)
 	if err != nil {
 		t.Fatalf("ListEventsSince: %v", err)
 	}
