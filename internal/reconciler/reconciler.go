@@ -121,7 +121,11 @@ func (r *Reconciler) countVMs(ctx context.Context) (VMCounts, error) {
 		switch vm.GetPhase() {
 		case poolmgrv1alpha1.VMPhase_AVAILABLE:
 			counts.Available++
-		case poolmgrv1alpha1.VMPhase_LEASED:
+		case poolmgrv1alpha1.VMPhase_LEASED, poolmgrv1alpha1.VMPhase_PRE_LEASE_HOOK_RUNNING:
+			// PRE_LEASE_HOOK_RUNNING is a transient phase before a VM is
+			// handed to a consumer: it's already claimed in all but name,
+			// so it must count toward Leased or MIN_SIZE_THRESHOLD would
+			// see it as neither available nor in-flight and over-provision.
 			counts.Leased++
 		case poolmgrv1alpha1.VMPhase_PROVISIONING, poolmgrv1alpha1.VMPhase_CREATE_HOOK_RUNNING:
 			counts.Provisioning++

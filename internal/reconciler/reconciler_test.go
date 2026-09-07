@@ -62,6 +62,48 @@ func TestReconciler_MinSizeThreshold_TickDrivenTopUp(t *testing.T) {
 	}
 }
 
+func TestReconciler_MinSizeThreshold_CountsPreLeaseHookRunningAsInFlight(t *testing.T) {
+	vm := &fakeMicroVM{}
+	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 2, []string{"host-a"})
+	pool.ReplenishmentStrategy.MinSize = int32Ptr(2)
+	if err := st.CreatePool(ctx, pool); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
+
+	// Already at the pool's target size (2): one AVAILABLE, one
+	// PRE_LEASE_HOOK_RUNNING (about to be claimed). If PRE_LEASE_HOOK_RUNNING
+	// isn't counted as in-flight, the reconciler will wrongly provision a
+	// third VM.
+	for _, v := range []*poolmgrv1alpha1.VMRecord{
+		sampleVM("vm-1", "pool-a", "host-a", poolmgrv1alpha1.VMPhase_AVAILABLE),
+		sampleVM("vm-2", "pool-a", "host-a", poolmgrv1alpha1.VMPhase_PRE_LEASE_HOOK_RUNNING),
+	} {
+		if err := st.CreateVM(ctx, v); err != nil {
+			t.Fatalf("CreateVM(%s): %v", v.GetUid(), err)
+		}
+	}
+
+	r, err := reconciler.New(pool, st, flint, 10*time.Millisecond, fastProvisionConfig())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = r.Run(runCtx) }()
+
+	// Give several ticks a chance to (wrongly) over-provision.
+	time.Sleep(100 * time.Millisecond)
+
+	if got := len(onlyVMsInPool(t, st, "pool-a")); got != 2 {
+		t.Fatalf("expected pool to stay at 2 VMs, got %d", got)
+	}
+}
+
 func TestReconciler_ImmediateOnLease_OnlyOnClaimNotification(t *testing.T) {
 	vm := &fakeMicroVM{}
 	flint := startFakeFlintlock(t, vm, alwaysReadyExec())

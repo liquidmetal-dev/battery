@@ -15,6 +15,12 @@ import (
 // unrecognised/unspecified ReplenishmentStrategyType.
 var ErrUnknownStrategy = errors.New("reconciler: unknown replenishment strategy")
 
+// ErrMinSizeRequired is returned by NewStrategy for a MIN_SIZE_THRESHOLD
+// strategy with no positive min_size. Without it, GetMinSize() defaults to
+// 0 and DesiredNewVMs's "Available >= minSize" check is always true, so the
+// pool would silently never replenish.
+var ErrMinSizeRequired = errors.New("reconciler: MIN_SIZE_THRESHOLD requires a positive min_size")
+
 // VMCounts summarizes a pool's current VM population by phase, as needed by
 // a Strategy to decide how many new VMs to provision. Quarantined VMs are
 // tracked separately because they never count toward Available.
@@ -49,6 +55,9 @@ func NewStrategy(spec *poolmgrv1alpha1.ReplenishmentStrategy) (Strategy, error) 
 	case poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE:
 		return immediateOnLease{}, nil
 	case poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD:
+		if spec.MinSize == nil || spec.GetMinSize() <= 0 {
+			return nil, ErrMinSizeRequired
+		}
 		return minSizeThreshold{}, nil
 	case poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE:
 		return replaceOnDelete{}, nil

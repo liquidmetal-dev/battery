@@ -182,6 +182,76 @@ func TestProvision_CreateCommandNonZeroExit_DeleteAndReplace(t *testing.T) {
 	}
 }
 
+func vmPhasePtr(p poolmgrv1alpha1.VMPhase) *poolmgrv1alpha1.VMPhase { return &p }
+
+func TestProvision_CreateVMStoreFailure_CleansUpOrphanedMicrovm(t *testing.T) {
+	vm := &fakeMicroVM{}
+	exec := alwaysReadyExec()
+	flint := startFakeFlintlock(t, vm, exec)
+	st := &failingStore{Store: openTestStore(t), failCreateVM: true}
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-a"})
+
+	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig())
+	err := p.Provision(context.Background(), pool)
+	if !errors.Is(err, errInjected) {
+		t.Fatalf("Provision() error = %v, want wrapped errInjected", err)
+	}
+
+	if got := vm.deletedUIDs(); len(got) != 1 {
+		t.Fatalf("expected the orphaned microvm to be deleted, got deleted=%v", got)
+	}
+	if len(onlyVMsInPool(t, st, "pool-a")) != 0 {
+		t.Fatalf("expected no VM record to exist")
+	}
+}
+
+func TestProvision_UpdatePhaseFailure_AppliesHookFailurePolicy(t *testing.T) {
+	tests := []struct {
+		name   string
+		phase  poolmgrv1alpha1.VMPhase
+		policy poolmgrv1alpha1.HookFailurePolicy
+	}{
+		{"CREATE_HOOK_RUNNING + DELETE_AND_REPLACE", poolmgrv1alpha1.VMPhase_CREATE_HOOK_RUNNING, poolmgrv1alpha1.HookFailurePolicy_DELETE_AND_REPLACE},
+		{"CREATE_HOOK_RUNNING + QUARANTINE", poolmgrv1alpha1.VMPhase_CREATE_HOOK_RUNNING, poolmgrv1alpha1.HookFailurePolicy_QUARANTINE},
+		{"AVAILABLE + DELETE_AND_REPLACE", poolmgrv1alpha1.VMPhase_AVAILABLE, poolmgrv1alpha1.HookFailurePolicy_DELETE_AND_REPLACE},
+		{"AVAILABLE + QUARANTINE", poolmgrv1alpha1.VMPhase_AVAILABLE, poolmgrv1alpha1.HookFailurePolicy_QUARANTINE},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			vm := &fakeMicroVM{}
+			exec := alwaysReadyExec()
+			flint := startFakeFlintlock(t, vm, exec)
+			st := &failingStore{Store: openTestStore(t), failUpdateVMPhase: vmPhasePtr(tt.phase)}
+
+			pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-a"})
+			pool.HookFailurePolicy = tt.policy
+
+			p := reconciler.NewProvisioner(st, flint, fastProvisionConfig())
+			err := p.Provision(context.Background(), pool)
+			if !errors.Is(err, errInjected) {
+				t.Fatalf("Provision() error = %v, want wrapped errInjected", err)
+			}
+
+			vms := onlyVMsInPool(t, st, "pool-a")
+			switch tt.policy {
+			case poolmgrv1alpha1.HookFailurePolicy_DELETE_AND_REPLACE:
+				if len(vms) != 0 {
+					t.Fatalf("expected VM record to be deleted, got %+v", vms)
+				}
+				if got := vm.deletedUIDs(); len(got) != 1 {
+					t.Fatalf("expected DeleteMicroVM to be called once, got %v", got)
+				}
+			case poolmgrv1alpha1.HookFailurePolicy_QUARANTINE:
+				if len(vms) != 1 || vms[0].GetPhase() != poolmgrv1alpha1.VMPhase_QUARANTINED {
+					t.Fatalf("expected 1 quarantined VM record, got %+v", vms)
+				}
+			}
+		})
+	}
+}
+
 func TestProvision_UnknownHost(t *testing.T) {
 	vm := &fakeMicroVM{}
 	exec := &fakeMicroVMExec{}

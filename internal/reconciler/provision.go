@@ -9,6 +9,8 @@ import (
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	microvmv1alpha1 "github.com/liquidmetal-dev/flintlock/api/services/microvm/v1alpha1"
 	flintlocktypes "github.com/liquidmetal-dev/flintlock/api/types"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -125,6 +127,10 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 		UpdatedAt:     now,
 	}
 	if err := p.store.CreateVM(ctx, vm); err != nil {
+		// No VMRecord was persisted, so there's nothing to quarantine and
+		// hook_failure_policy doesn't apply: best-effort delete the
+		// now-orphaned microvm before returning, regardless of policy.
+		_, _ = client.DeleteMicroVM(ctx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: uid})
 		return fmt.Errorf("reconciler: provision: CreateVM: %w", err)
 	}
 	p.emit(ctx, pool, uid, poolmgrv1alpha1.EventType_VM_PROVISIONED)
@@ -134,7 +140,7 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 		return err
 	}
 
-	if err := p.updatePhase(ctx, vm, poolmgrv1alpha1.VMPhase_CREATE_HOOK_RUNNING); err != nil {
+	if err := p.updatePhase(ctx, pool, vm, poolmgrv1alpha1.VMPhase_CREATE_HOOK_RUNNING); err != nil {
 		return err
 	}
 
@@ -168,7 +174,7 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 		}
 	}
 
-	if err := p.updatePhase(ctx, vm, poolmgrv1alpha1.VMPhase_AVAILABLE); err != nil {
+	if err := p.updatePhase(ctx, pool, vm, poolmgrv1alpha1.VMPhase_AVAILABLE); err != nil {
 		return err
 	}
 	p.emit(ctx, pool, uid, poolmgrv1alpha1.EventType_VM_AVAILABLE)
@@ -177,12 +183,16 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 
 // updatePhase persists vm's new phase in both the store and the in-memory
 // record passed by callers, so subsequent steps (and fail's quarantine
-// path) see the current phase.
-func (p *Provisioner) updatePhase(ctx context.Context, vm *poolmgrv1alpha1.VMRecord, phase poolmgrv1alpha1.VMPhase) error {
+// path) see the current phase. If the persist itself fails, that's still a
+// provisioning failure: apply pool.HookFailurePolicy rather than leaving
+// the microvm running and the VMRecord stuck in its previous phase.
+func (p *Provisioner) updatePhase(ctx context.Context, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord, phase poolmgrv1alpha1.VMPhase) error {
 	vm.Phase = phase
 	vm.UpdatedAt = timestamppb.Now()
 	if err := p.store.UpdateVM(ctx, vm); err != nil {
-		return fmt.Errorf("reconciler: provision: UpdateVM: %w", err)
+		err = fmt.Errorf("reconciler: provision: UpdateVM: %w", err)
+		p.fail(ctx, pool, vm, err)
+		return err
 	}
 	return nil
 }
@@ -193,9 +203,22 @@ func (p *Provisioner) waitCreated(ctx context.Context, client microvmv1alpha1.Mi
 	ctx, cancel := context.WithTimeout(ctx, p.cfg.CreatePollTimeout)
 	defer cancel()
 
+	ticker := time.NewTicker(p.cfg.CreatePollInterval)
+	defer ticker.Stop()
+
 	for {
 		resp, err := client.GetMicroVM(ctx, &microvmv1alpha1.GetMicroVMRequest{Uid: uid})
 		if err != nil {
+			if status.Code(err) == codes.DeadlineExceeded {
+				// The bounded ctx expired mid-RPC, racing our own ctx.Done()
+				// check below: classify it the same way regardless of which
+				// one noticed first, so callers get a consistent error.
+				// (ctx.Err() isn't reliable here: its deadline-timer
+				// callback runs asynchronously and can still read nil for
+				// a few scheduler ticks after grpc has already produced
+				// this status from the same expired deadline.)
+				return fmt.Errorf("%w: %s", ErrCreateTimedOut, uid)
+			}
 			return fmt.Errorf("reconciler: GetMicroVM: %w", err)
 		}
 		switch resp.GetMicrovm().GetStatus().GetState() {
@@ -208,7 +231,7 @@ func (p *Provisioner) waitCreated(ctx context.Context, client microvmv1alpha1.Mi
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("%w: %s", ErrCreateTimedOut, uid)
-		case <-time.After(p.cfg.CreatePollInterval):
+		case <-ticker.C:
 		}
 	}
 }

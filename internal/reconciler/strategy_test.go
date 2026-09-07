@@ -31,6 +31,30 @@ func TestNewStrategy_Unknown(t *testing.T) {
 	}
 }
 
+func TestNewStrategy_MinSizeRequired(t *testing.T) {
+	zero := int32(0)
+	negative := int32(-1)
+	tests := []struct {
+		name    string
+		minSize *int32
+	}{
+		{"nil min_size", nil},
+		{"zero min_size", &zero},
+		{"negative min_size", &negative},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := &poolmgrv1alpha1.ReplenishmentStrategy{
+				Type:    poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD,
+				MinSize: tt.minSize,
+			}
+			if _, err := reconciler.NewStrategy(spec); !errors.Is(err, reconciler.ErrMinSizeRequired) {
+				t.Fatalf("NewStrategy() error = %v, want ErrMinSizeRequired", err)
+			}
+		})
+	}
+}
+
 func TestImmediateOnLease(t *testing.T) {
 	pool := poolWithStrategy(poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE, 5, 2)
 	s, err := reconciler.NewStrategy(pool.GetReplenishmentStrategy())
