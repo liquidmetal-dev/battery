@@ -40,8 +40,10 @@ func validatePoolSpec(spec *poolmgrv1alpha1.PoolSpec) error {
 	if _, err := reconciler.NewStrategy(spec.GetReplenishmentStrategy()); err != nil {
 		return status.Errorf(codes.InvalidArgument, "spec.replenishment_strategy: %v", err)
 	}
-	if spec.GetHookFailurePolicy() == poolmgrv1alpha1.HookFailurePolicy_HOOK_FAILURE_POLICY_UNSPECIFIED {
-		return status.Error(codes.InvalidArgument, "spec.hook_failure_policy is required")
+	switch spec.GetHookFailurePolicy() {
+	case poolmgrv1alpha1.HookFailurePolicy_DELETE_AND_REPLACE, poolmgrv1alpha1.HookFailurePolicy_QUARANTINE:
+	default:
+		return status.Errorf(codes.InvalidArgument, "spec.hook_failure_policy: invalid value %v", spec.GetHookFailurePolicy())
 	}
 
 	if spec.MicrovmTemplate == nil {
@@ -143,11 +145,11 @@ func (s *PoolAdminServer) DeletePool(ctx context.Context, req *poolmgrv1alpha1.D
 		return nil, status.Errorf(codes.Internal, "get pool: %v", err)
 	}
 
-	counts, err := reconciler.CountVMs(ctx, s.store, name, ns)
+	vms, err := s.store.ListVMsByPool(ctx, name, ns, nil)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "count vms: %v", err)
+		return nil, status.Errorf(codes.Internal, "list vms: %v", err)
 	}
-	if counts.Available+counts.Leased+counts.Provisioning+counts.Quarantined > 0 {
+	if len(vms) > 0 {
 		return nil, status.Errorf(codes.FailedPrecondition, "pool %s/%s still has VMs, delete or drain them first", ns, name)
 	}
 

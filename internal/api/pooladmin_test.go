@@ -84,6 +84,9 @@ func TestCreatePoolValidation(t *testing.T) {
 		{"unspecified hook failure policy", func(s *poolmgrv1alpha1.PoolSpec) {
 			s.HookFailurePolicy = poolmgrv1alpha1.HookFailurePolicy_HOOK_FAILURE_POLICY_UNSPECIFIED
 		}, codes.InvalidArgument},
+		{"unknown hook failure policy", func(s *poolmgrv1alpha1.PoolSpec) {
+			s.HookFailurePolicy = poolmgrv1alpha1.HookFailurePolicy(99)
+		}, codes.InvalidArgument},
 		{"nil microvm template", func(s *poolmgrv1alpha1.PoolSpec) { s.MicrovmTemplate = nil }, codes.InvalidArgument},
 	}
 
@@ -222,22 +225,35 @@ func TestDeletePool(t *testing.T) {
 }
 
 func TestDeletePoolBlockedWithVMs(t *testing.T) {
-	ctx := context.Background()
-	st := openTestStore(t)
-	s := api.NewPoolAdminServer(st)
-
-	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
-	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
-		t.Fatalf("CreatePool() error = %v", err)
-	}
-	if err := st.CreateVM(ctx, sampleAvailableVM("vm-1", "pool-a")); err != nil {
-		t.Fatalf("CreateVM() error = %v", err)
+	// CountVMs only tallies AVAILABLE/LEASED/PROVISIONING/QUARANTINED, so
+	// DeletePool's guard must not be built on top of it - a pool whose only
+	// VM is DELETING or FAILED must still be blocked.
+	phases := []poolmgrv1alpha1.VMPhase{
+		poolmgrv1alpha1.VMPhase_AVAILABLE,
+		poolmgrv1alpha1.VMPhase_DELETING,
+		poolmgrv1alpha1.VMPhase_FAILED,
 	}
 
-	ref := &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}
-	_, err := s.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: ref})
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("DeletePool() with VMs error = %v, want FailedPrecondition", err)
+	for _, phase := range phases {
+		t.Run(phase.String(), func(t *testing.T) {
+			ctx := context.Background()
+			st := openTestStore(t)
+			s := api.NewPoolAdminServer(st)
+
+			spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+			if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+				t.Fatalf("CreatePool() error = %v", err)
+			}
+			if err := st.CreateVM(ctx, withPhase(sampleAvailableVM("vm-1", "pool-a"), phase)); err != nil {
+				t.Fatalf("CreateVM() error = %v", err)
+			}
+
+			ref := &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}
+			_, err := s.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: ref})
+			if status.Code(err) != codes.FailedPrecondition {
+				t.Fatalf("DeletePool() with VM in phase %s error = %v, want FailedPrecondition", phase, err)
+			}
+		})
 	}
 }
 
