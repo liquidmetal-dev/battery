@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/liquidmetal-dev/battery/internal/api"
+	"github.com/liquidmetal-dev/battery/internal/store"
 )
 
 func TestCreateGetPool(t *testing.T) {
@@ -397,6 +399,106 @@ func TestUpdatePool_RestartsReconciler(t *testing.T) {
 	}
 	if len(lifecycle.stopped) != 1 || lifecycle.stopped[0] != "pool-a" {
 		t.Fatalf("stopped = %v, want [pool-a]", lifecycle.stopped)
+	}
+}
+
+// pausingStore wraps a store.Store and, on its first UpdatePool call only,
+// blocks after the underlying write completes until resume is closed. Used
+// to force a controlled window between a concurrent UpdatePool RPC's store
+// write and its PoolLifecycle transition, to prove per-pool serialization
+// (see TestUpdatePool_ConcurrentUpdates_Serialized).
+type pausingStore struct {
+	store.Store
+	once   sync.Once
+	paused chan struct{}
+	resume chan struct{}
+}
+
+func (p *pausingStore) UpdatePool(ctx context.Context, spec *poolmgrv1alpha1.PoolSpec) error {
+	if err := p.Store.UpdatePool(ctx, spec); err != nil {
+		return err
+	}
+	p.once.Do(func() {
+		close(p.paused)
+		<-p.resume
+	})
+	return nil
+}
+
+// TestUpdatePool_ConcurrentUpdates_Serialized reproduces the race from PR
+// review: without per-pool serialization, two concurrent UpdatePool calls
+// for the same pool can persist their specs in one order but call
+// StopReconciler/StartReconciler in the other order, leaving the store and
+// the live reconciler permanently disagreeing about which spec is current.
+// This forces update A to pause between its store write and its lifecycle
+// transition, then asserts update B cannot complete (or even reach its own
+// store write) while A holds the pool's lock - proving the two can never
+// interleave - and that the store and the reconciler's last-started spec
+// agree once both finish.
+func TestUpdatePool_ConcurrentUpdates_Serialized(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	lifecycle := &fakePoolLifecycle{}
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	setup := api.NewPoolAdminServer(st, lifecycle)
+	if _, err := setup.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+
+	ps := &pausingStore{Store: st, paused: make(chan struct{}), resume: make(chan struct{})}
+	s := api.NewPoolAdminServer(ps, lifecycle)
+
+	specA := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	specA.Size = 3
+	specB := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	specB.Size = 5
+
+	doneA := make(chan error, 1)
+	go func() {
+		_, err := s.UpdatePool(ctx, &poolmgrv1alpha1.UpdatePoolRequest{Spec: specA})
+		doneA <- err
+	}()
+
+	select {
+	case <-ps.paused:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for update A to pause after its store write")
+	}
+
+	doneB := make(chan error, 1)
+	go func() {
+		_, err := s.UpdatePool(ctx, &poolmgrv1alpha1.UpdatePoolRequest{Spec: specB})
+		doneB <- err
+	}()
+
+	select {
+	case err := <-doneB:
+		t.Fatalf("UpdatePool B returned (err=%v) while A was still paused mid-transition - not serialized", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(ps.resume)
+
+	if err := <-doneA; err != nil {
+		t.Fatalf("UpdatePool A: %v", err)
+	}
+	if err := <-doneB; err != nil {
+		t.Fatalf("UpdatePool B: %v", err)
+	}
+
+	final, err := st.GetPool(ctx, "pool-a", "default")
+	if err != nil {
+		t.Fatalf("GetPool: %v", err)
+	}
+	if final.GetSize() != specB.GetSize() {
+		t.Fatalf("store spec.Size = %d, want %d (B, the last update to complete)", final.GetSize(), specB.GetSize())
+	}
+
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
+	if len(lifecycle.started) != 3 {
+		t.Fatalf("started = %v, want 3 entries (create, A's restart, B's restart)", lifecycle.started)
 	}
 }
 

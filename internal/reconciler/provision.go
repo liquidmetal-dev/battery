@@ -39,6 +39,11 @@ var ErrCreateFailed = errors.New("reconciler: microvm create failed")
 // or the guest-agent never becomes reachable.
 var ErrHookFailed = errors.New("reconciler: create hook failed")
 
+// hookFailureCleanupTimeout bounds ApplyHookFailurePolicy's own cleanup
+// work, run on a context detached from cancellation of its caller's ctx -
+// see ApplyHookFailurePolicy's comment for why.
+const hookFailureCleanupTimeout = 30 * time.Second
+
 // ProvisionConfig bounds the timing of a single Provision call. Zero-valued
 // fields are replaced with DefaultProvisionConfig's values by
 // NewProvisioner.
@@ -264,23 +269,37 @@ func (p *Provisioner) waitCreated(ctx context.Context, client microvmv1alpha1.Mi
 // poolmgr_hook_failures_total; every failure path in Provision and
 // runPreLeaseHooks funnels through here, so this is the single place that
 // metric is recorded rather than duplicating it at each call site.
+//
+// Cleanup runs on a context detached from ctx's cancellation, bounded by
+// hookFailureCleanupTimeout, rather than on ctx itself: ctx is very often
+// already cancelled or about to be by the time this runs - e.g. the owning
+// Reconciler was stopped mid-Provision because its pool was updated or
+// deleted, or poolmgrd is shutting down. Without detaching, every store/
+// flint call below would fail immediately on the cancelled ctx, leaving vm
+// stranded in a non-terminal phase (PROVISIONING/CREATE_HOOK_RUNNING)
+// forever instead of being quarantined or deleted. Mirrors
+// api.LeaseServer.applyHookFailurePolicy's identical reasoning for the
+// pre-lease-hook path.
 func ApplyHookFailurePolicy(ctx context.Context, st store.Store, flint *flintlockclient.Pool, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord, hook string, m *metrics.Registry) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hookFailureCleanupTimeout)
+	defer cancel()
+
 	switch pool.GetHookFailurePolicy() {
 	case poolmgrv1alpha1.HookFailurePolicy_QUARANTINE:
 		vm.Phase = poolmgrv1alpha1.VMPhase_QUARANTINED
 		vm.LeaseId = nil // no lease exists for a hook failure; don't leave a dangling reference
 		vm.UpdatedAt = timestamppb.Now()
-		_ = st.UpdateVM(ctx, vm)
+		_ = st.UpdateVM(cleanupCtx, vm)
 	default: // DELETE_AND_REPLACE, and the unspecified zero value: fail safe by deleting.
 		if client, err := flint.Client(vm.GetFlintlockHost()); err == nil {
-			_, _ = client.DeleteMicroVM(ctx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: vm.GetUid()})
+			_, _ = client.DeleteMicroVM(cleanupCtx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: vm.GetUid()})
 		}
-		_ = st.DeleteVM(ctx, vm.GetUid())
+		_ = st.DeleteVM(cleanupCtx, vm.GetUid())
 	}
 	if m != nil {
 		m.RecordHookFailure(hook, pool.GetName(), pool.GetNamespace())
 	}
-	EmitEvent(ctx, st, pool, vm.GetUid(), poolmgrv1alpha1.EventType_VM_HOOK_FAILED)
+	EmitEvent(cleanupCtx, st, pool, vm.GetUid(), poolmgrv1alpha1.EventType_VM_HOOK_FAILED)
 }
 
 // EmitEvent appends an event for pool/uid to the store's outbox. It never

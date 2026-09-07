@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	"google.golang.org/grpc/codes"
@@ -40,6 +41,9 @@ type PoolAdminServer struct {
 
 	store   store.Store
 	poolMgr PoolLifecycle
+
+	poolLocksMu sync.Mutex
+	poolLocks   map[poolLockKey]*sync.Mutex
 }
 
 // NewPoolAdminServer returns a PoolAdminServer backed by st. If poolMgr is
@@ -48,7 +52,40 @@ func NewPoolAdminServer(st store.Store, poolMgr PoolLifecycle) *PoolAdminServer 
 	if poolMgr == nil {
 		poolMgr = NoopPoolLifecycle{}
 	}
-	return &PoolAdminServer{store: st, poolMgr: poolMgr}
+	return &PoolAdminServer{store: st, poolMgr: poolMgr, poolLocks: make(map[poolLockKey]*sync.Mutex)}
+}
+
+// poolLockKey identifies the pool a lockPool call serializes on.
+type poolLockKey struct {
+	name      string
+	namespace string
+}
+
+// lockPool serializes CreatePool/UpdatePool/DeletePool for the same
+// (name, namespace). Without this, two concurrent RPCs against the same
+// pool can interleave their store write with their PoolLifecycle
+// transition: e.g. two concurrent UpdatePool calls could persist spec A
+// then spec B, but call StopReconciler+StartReconciler in the order B then
+// A - leaving the store holding B while the live reconciler runs against
+// the stale A, permanently disagreeing until another successful
+// Create/Update/Delete cycle. Locking the whole read-validate-write-
+// lifecycle sequence per pool, across all three RPCs, closes that window:
+// only one such sequence for a given pool can be in flight at a time.
+// Returns an unlock function; callers hold it (typically via defer) for the
+// duration of that pool-scoped critical section.
+func (s *PoolAdminServer) lockPool(name, namespace string) func() {
+	key := poolLockKey{name: name, namespace: namespace}
+
+	s.poolLocksMu.Lock()
+	l, ok := s.poolLocks[key]
+	if !ok {
+		l = &sync.Mutex{}
+		s.poolLocks[key] = l
+	}
+	s.poolLocksMu.Unlock()
+
+	l.Lock()
+	return l.Unlock
 }
 
 // validatePoolSpec checks the fields CreatePool/UpdatePool both require, and
@@ -87,6 +124,9 @@ func (s *PoolAdminServer) CreatePool(ctx context.Context, req *poolmgrv1alpha1.C
 	if err := validatePoolSpec(spec); err != nil {
 		return nil, err
 	}
+
+	unlock := s.lockPool(spec.GetName(), spec.GetNamespace())
+	defer unlock()
 
 	_, err := s.store.GetPool(ctx, spec.GetName(), spec.GetNamespace())
 	if err == nil {
@@ -148,6 +188,9 @@ func (s *PoolAdminServer) UpdatePool(ctx context.Context, req *poolmgrv1alpha1.U
 		return nil, err
 	}
 
+	unlock := s.lockPool(spec.GetName(), spec.GetNamespace())
+	defer unlock()
+
 	if _, err := s.store.GetPool(ctx, spec.GetName(), spec.GetNamespace()); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, status.Errorf(codes.NotFound, "pool %s/%s not found", spec.GetNamespace(), spec.GetName())
@@ -184,6 +227,9 @@ func (s *PoolAdminServer) UpdatePool(ctx context.Context, req *poolmgrv1alpha1.U
 // VM/lease rows.
 func (s *PoolAdminServer) DeletePool(ctx context.Context, req *poolmgrv1alpha1.DeletePoolRequest) (*emptypb.Empty, error) {
 	name, ns := req.GetRef().GetName(), req.GetRef().GetNamespace()
+
+	unlock := s.lockPool(name, ns)
+	defer unlock()
 
 	if _, err := s.store.GetPool(ctx, name, ns); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
