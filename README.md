@@ -65,6 +65,44 @@ The gRPC API is defined in `api/proto` using [buf](https://buf.build/). After ed
 ./hack/generate-proto.sh
 ```
 
+## Releasing
+
+Releases are cut by pushing a semver tag matching `v*.*.*` (e.g. `v0.1.0`)
+to `main`. This triggers `.github/workflows/release.yml`, which:
+
+- builds `poolmgrd` for `linux/amd64` and `linux/arm64` via GoReleaser
+- publishes a multi-arch container image to
+  `ghcr.io/liquidmetal-dev/poolmgrd:<version>` (and `:latest`) — note the
+  image tag drops the leading `v` from the git tag (e.g. tagging `v0.1.0`
+  produces `ghcr.io/liquidmetal-dev/poolmgrd:0.1.0`), unlike the GitHub
+  release itself, which keeps it
+- creates a GitHub release with a changelog grouped by commit type
+- pushes `api/proto` (`PoolAdmin`/`Lease`/`Events`/`types`) to the Buf
+  Schema Registry at `buf.build/liquidmetal-dev/battery`, creating the
+  BSR module on first push if it doesn't exist yet, and labels the push
+  with both the release tag and the moving `main` label — `main` is what
+  `buf breaking` (below) compares PRs against, so every release advances
+  it
+
+**One-time setup:** a `BUF_TOKEN` repository secret (a Buf Schema Registry
+API token with write access to `liquidmetal-dev/battery`) must exist
+before the first tag is pushed. Until the first successful `buf push`,
+the `buf breaking` check in CI (`.github/workflows/ci.yml`) has nothing
+to compare against — that specific "no baseline yet" failure is treated
+as a pass with a warning, but any other `buf breaking` failure (a real
+incompatible schema change) still fails the job normally, before and
+after the first release.
+
+If `buf push` fails after GoReleaser has already published successfully,
+the proto schema push can be re-run manually without re-cutting the
+release: `buf push --create --create-visibility public --label <tag>
+--label main` from a checkout of that tag.
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE) for details.
