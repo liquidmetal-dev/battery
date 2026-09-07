@@ -48,6 +48,13 @@ func TestClaimVM_Success(t *testing.T) {
 	if len(resp.GetNetworkInterfaces()) != 1 {
 		t.Fatalf("expected 1 network interface, got %v", resp.GetNetworkInterfaces())
 	}
+	wantAddr, err := flint.Address("host-a")
+	if err != nil {
+		t.Fatalf("Address: %v", err)
+	}
+	if resp.GetHost().GetName() != "host-a" || resp.GetHost().GetAddress() != wantAddr {
+		t.Fatalf("expected host {host-a %s}, got %v", wantAddr, resp.GetHost())
+	}
 
 	gotVM, err := st.GetVM(ctx, "vm-1")
 	if err != nil {

@@ -160,10 +160,17 @@ func (s *LeaseServer) ClaimVM(ctx context.Context, req *poolmgrv1alpha1.ClaimVMR
 		}
 	}
 
+	hostName := vm.GetFlintlockHost()
+	addr, _ := s.flint.Address(hostName)
+
 	return &poolmgrv1alpha1.ClaimVMResponse{
 		LeaseId:           leaseID,
 		VmUid:             vm.GetUid(),
 		NetworkInterfaces: netIfaces,
+		Host: &poolmgrv1alpha1.HostInfo{
+			Name:    hostName,
+			Address: addr,
+		},
 	}, nil
 }
 

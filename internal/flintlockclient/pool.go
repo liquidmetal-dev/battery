@@ -31,6 +31,7 @@ type Pool struct {
 	clients         map[string]microvmv1alpha1.MicroVMClient
 	execClients     map[string]microvmexecv1alpha1.MicroVMExecClient
 	sshProxyClients map[string]microvmsshproxyv1alpha1.MicroVMSSHProxyClient
+	addresses       map[string]string
 }
 
 // New dials every host in cfg and returns a Pool. On any dial/TLS-setup
@@ -48,6 +49,7 @@ func New(cfg *config.Config) (*Pool, error) {
 		clients:         make(map[string]microvmv1alpha1.MicroVMClient, len(cfg.Hosts)),
 		execClients:     make(map[string]microvmexecv1alpha1.MicroVMExecClient, len(cfg.Hosts)),
 		sshProxyClients: make(map[string]microvmsshproxyv1alpha1.MicroVMSSHProxyClient, len(cfg.Hosts)),
+		addresses:       make(map[string]string, len(cfg.Hosts)),
 	}
 
 	for _, host := range cfg.Hosts {
@@ -67,6 +69,7 @@ func New(cfg *config.Config) (*Pool, error) {
 		p.clients[host.Name] = microvmv1alpha1.NewMicroVMClient(conn)
 		p.execClients[host.Name] = microvmexecv1alpha1.NewMicroVMExecClient(conn)
 		p.sshProxyClients[host.Name] = microvmsshproxyv1alpha1.NewMicroVMSSHProxyClient(conn)
+		p.addresses[host.Name] = host.Address
 	}
 
 	return p, nil
@@ -100,6 +103,16 @@ func (p *Pool) SSHProxyClient(hostName string) (microvmsshproxyv1alpha1.MicroVMS
 		return nil, fmt.Errorf("%w: %q", ErrUnknownHost, hostName)
 	}
 	return client, nil
+}
+
+// Address returns the configured gRPC address for the named host, or
+// ErrUnknownHost if no such host was configured.
+func (p *Pool) Address(hostName string) (string, error) {
+	addr, ok := p.addresses[hostName]
+	if !ok {
+		return "", fmt.Errorf("%w: %q", ErrUnknownHost, hostName)
+	}
+	return addr, nil
 }
 
 // Hosts returns the configured host names.
