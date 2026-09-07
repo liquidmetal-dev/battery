@@ -1,0 +1,3 @@
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY poolmgrd /poolmgrd
+ENTRYPOINT ["/poolmgrd"]
