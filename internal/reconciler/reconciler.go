@@ -111,7 +111,15 @@ func (r *Reconciler) Run(ctx context.Context) error {
 
 // countVMs summarizes the pool's current VMs into VMCounts.
 func (r *Reconciler) countVMs(ctx context.Context) (VMCounts, error) {
-	vms, err := r.store.ListVMsByPool(ctx, r.pool.GetName(), r.pool.GetNamespace(), nil)
+	return CountVMs(ctx, r.store, r.pool.GetName(), r.pool.GetNamespace())
+}
+
+// CountVMs summarizes a pool's current VMs into VMCounts. Exported so
+// callers outside the reconciler's own control loop (e.g. the PoolAdmin API,
+// to populate PoolStatus) can get the same phase breakdown without
+// duplicating the switch below.
+func CountVMs(ctx context.Context, st store.Store, poolName, poolNamespace string) (VMCounts, error) {
+	vms, err := st.ListVMsByPool(ctx, poolName, poolNamespace, nil)
 	if err != nil {
 		return VMCounts{}, fmt.Errorf("reconciler: ListVMsByPool: %w", err)
 	}

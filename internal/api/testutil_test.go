@@ -14,6 +14,7 @@ import (
 	microvmexecv1alpha1 "github.com/liquidmetal-dev/flintlock/api/services/microvmexec/v1alpha1"
 	flintlocktypes "github.com/liquidmetal-dev/flintlock/api/types"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -50,7 +51,8 @@ func samplePool(name string, hookFailurePolicy poolmgrv1alpha1.HookFailurePolicy
 		FlintlockHosts:  []string{"host-a"},
 		MicrovmTemplate: &flintlocktypes.MicroVMSpec{Vcpu: 1},
 		ReplenishmentStrategy: &poolmgrv1alpha1.ReplenishmentStrategy{
-			Type: poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD,
+			Type:    poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD,
+			MinSize: proto.Int32(1),
 		},
 		PreLeaseCommands:         preLeaseCommands,
 		HookFailurePolicy:        hookFailurePolicy,
