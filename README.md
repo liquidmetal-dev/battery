@@ -66,3 +66,8 @@ The gRPC API is defined in `api/proto` using [buf](https://buf.build/). After ed
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE) for details.
+
+## Acknowledgements
+
+Thanks to [@phoban01](https://github.com/phoban01) for the original idea of using warm pools
+with flintlock, based on his work building a GitLab executor that used flintlock warm pools.
