@@ -1,0 +1,82 @@
+version: 2
+
+project_name: poolmgrd
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: poolmgrd
+    main: ./cmd/poolmgrd
+    binary: poolmgrd
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: poolmgrd
+    ids:
+      - poolmgrd
+    formats:
+      - tar.gz
+
+checksum:
+  name_template: "checksums.txt"
+
+dockers:
+  - id: poolmgrd-amd64
+    ids:
+      - poolmgrd
+    goos: linux
+    goarch: amd64
+    use: buildx
+    dockerfile: Dockerfile
+    image_templates:
+      - "ghcr.io/liquidmetal-dev/poolmgrd:{{ .Version }}-amd64"
+    build_flag_templates:
+      - "--platform=linux/amd64"
+  - id: poolmgrd-arm64
+    ids:
+      - poolmgrd
+    goos: linux
+    goarch: arm64
+    use: buildx
+    dockerfile: Dockerfile
+    image_templates:
+      - "ghcr.io/liquidmetal-dev/poolmgrd:{{ .Version }}-arm64"
+    build_flag_templates:
+      - "--platform=linux/arm64"
+
+docker_manifests:
+  - name_template: "ghcr.io/liquidmetal-dev/poolmgrd:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/liquidmetal-dev/poolmgrd:{{ .Version }}-amd64"
+      - "ghcr.io/liquidmetal-dev/poolmgrd:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/liquidmetal-dev/poolmgrd:latest"
+    image_templates:
+      - "ghcr.io/liquidmetal-dev/poolmgrd:{{ .Version }}-amd64"
+      - "ghcr.io/liquidmetal-dev/poolmgrd:{{ .Version }}-arm64"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - "Merge pull request"
+  groups:
+    - title: "Features"
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: "Bug fixes"
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: "Other"
+      order: 999
