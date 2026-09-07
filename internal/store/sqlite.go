@@ -471,6 +471,22 @@ func (s *sqliteStore) ListEventsSince(ctx context.Context, poolName, poolNamespa
 	if err != nil {
 		return nil, fmt.Errorf("store: query events: %w", err)
 	}
+	return scanEvents(rows)
+}
+
+func (s *sqliteStore) ListAllEventsSince(ctx context.Context, sinceID int64) ([]*poolmgrv1alpha1.Event, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, pool_name, pool_namespace, vm_uid, type, created_at, payload_json
+		FROM events WHERE id > ? ORDER BY id`, sinceID)
+	if err != nil {
+		return nil, fmt.Errorf("store: query events: %w", err)
+	}
+	return scanEvents(rows)
+}
+
+// scanEvents reads and closes rows produced by a `SELECT id, pool_name, pool_namespace, vm_uid,
+// type, created_at, payload_json FROM events ...` query, in column order.
+func scanEvents(rows *sql.Rows) ([]*poolmgrv1alpha1.Event, error) {
 	defer func() { _ = rows.Close() }()
 
 	var events []*poolmgrv1alpha1.Event
