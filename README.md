@@ -34,7 +34,9 @@ battery is made up of two binaries:
   exposed via the `Hostagent` gRPC service.
 
 See [`docs/design/2026-09-05-microvm-warm-pool-manager-design.md`](docs/design/2026-09-05-microvm-warm-pool-manager-design.md)
-for the full design rationale and decisions.
+for the full design rationale and decisions, and
+[`docs/runbooks/e2e-manual-verification.md`](docs/runbooks/e2e-manual-verification.md) for the
+manual end-to-end verification runbook against a real flintlockd + Firecracker VM.
 
 ## Getting started
 
