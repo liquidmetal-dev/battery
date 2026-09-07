@@ -83,6 +83,7 @@ func (c *Client) Exec(ctx context.Context, vsockPath string, port int, cmdArgs [
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
+		_ = stdout.Close()
 		return nil, fmt.Errorf("vsock-connect exec: stderr pipe: %w", err)
 	}
 

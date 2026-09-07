@@ -14,6 +14,9 @@ import (
 type fakeRunStream struct {
 	ctx context.Context
 
+	// sendErr, when set, is returned by every call to Send instead of recording the message.
+	sendErr error
+
 	mu   sync.Mutex
 	sent []*poolmgrv1alpha1.RunResponse
 }
@@ -25,6 +28,9 @@ func newFakeRunStream(ctx context.Context) *fakeRunStream {
 func (f *fakeRunStream) Send(resp *poolmgrv1alpha1.RunResponse) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.sendErr != nil {
+		return f.sendErr
+	}
 	f.sent = append(f.sent, resp)
 	return nil
 }

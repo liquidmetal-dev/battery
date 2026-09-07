@@ -138,3 +138,114 @@ func TestRunRejectsEmptyVsockPath(t *testing.T) {
 		t.Fatalf("expected codes.InvalidArgument, got %v", got)
 	}
 }
+
+func TestRunRejectsEmptyCmd(t *testing.T) {
+	runner := &fakeRunner{}
+	server := hostagent.NewServer(runner, 1024, time.Millisecond)
+	stream := newFakeRunStream(context.Background())
+
+	err := server.Run(&poolmgrv1alpha1.RunRequest{
+		VsockPath: "/run/flintlock/a.vsock",
+		Cmd:       nil,
+	}, stream)
+	if err == nil {
+		t.Fatal("expected an error for an empty cmd")
+	}
+	if got := status.Code(err); got != codes.InvalidArgument {
+		t.Fatalf("expected codes.InvalidArgument, got %v", got)
+	}
+}
+
+func TestRunReapsProcessWhenReadingOutputFails(t *testing.T) {
+	execution := &fakeExecution{
+		stdout:   errReader{},
+		stderr:   strings.NewReader(""),
+		exitCode: 0,
+	}
+	runner := &fakeRunner{
+		execFn: func(_ context.Context, _ string, _ int, _ []string) (vsockconnect.Execution, error) {
+			return execution, nil
+		},
+	}
+	server := hostagent.NewServer(runner, 1024, time.Millisecond)
+	stream := newFakeRunStream(context.Background())
+
+	err := server.Run(&poolmgrv1alpha1.RunRequest{
+		VsockPath: "/run/flintlock/a.vsock",
+		Cmd:       []string{"echo", "hi"},
+	}, stream)
+	if err == nil {
+		t.Fatal("expected an error when reading command output fails")
+	}
+	if got := execution.waitCallCount(); got != 1 {
+		t.Fatalf("expected Wait to be called exactly once to reap the process, got %d", got)
+	}
+}
+
+func TestRunReapsProcessWhenStreamingFails(t *testing.T) {
+	execution := &fakeExecution{
+		stdout:   strings.NewReader("hello"),
+		stderr:   strings.NewReader(""),
+		exitCode: 0,
+	}
+	runner := &fakeRunner{
+		execFn: func(_ context.Context, _ string, _ int, _ []string) (vsockconnect.Execution, error) {
+			return execution, nil
+		},
+	}
+	server := hostagent.NewServer(runner, 1024, time.Millisecond)
+	stream := newFakeRunStream(context.Background())
+	stream.sendErr = errors.New("send failed")
+
+	err := server.Run(&poolmgrv1alpha1.RunRequest{
+		VsockPath: "/run/flintlock/a.vsock",
+		Cmd:       []string{"echo", "hi"},
+	}, stream)
+	if err == nil {
+		t.Fatal("expected an error when streaming to the client fails")
+	}
+	if got := execution.waitCallCount(); got != 1 {
+		t.Fatalf("expected Wait to be called exactly once to reap the process, got %d", got)
+	}
+}
+
+func TestRunReturnsCanceledOnClientCancellation(t *testing.T) {
+	blockForever := make(chan struct{})
+	t.Cleanup(func() { close(blockForever) })
+
+	runner := &fakeRunner{
+		execFn: func(_ context.Context, _ string, _ int, _ []string) (vsockconnect.Execution, error) {
+			return &fakeExecution{
+				stdout: strings.NewReader(""),
+				stderr: strings.NewReader(""),
+				waitFn: func() (int, error) {
+					<-blockForever
+					return 0, nil
+				},
+			}, nil
+		},
+	}
+	server := hostagent.NewServer(runner, 1024, time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	stream := newFakeRunStream(ctx)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- server.Run(&poolmgrv1alpha1.RunRequest{
+			VsockPath: "/run/flintlock/a.vsock",
+			Cmd:       []string{"sleep", "100"},
+		}, stream)
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+
+	err := <-done
+	if err == nil {
+		t.Fatal("expected an error when the client cancels the RPC")
+	}
+	if got := status.Code(err); got != codes.Canceled {
+		t.Fatalf("expected codes.Canceled, got %v", got)
+	}
+}

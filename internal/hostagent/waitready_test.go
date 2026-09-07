@@ -82,6 +82,34 @@ func TestWaitReadyRejectsEmptyVsockPath(t *testing.T) {
 	}
 }
 
+func TestWaitReadyReturnsCanceledOnClientCancellation(t *testing.T) {
+	runner := &fakeRunner{
+		pingErrs: []error{errors.New("never ready")},
+	}
+	server := hostagent.NewServer(runner, 1024, time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := server.WaitReady(ctx, &poolmgrv1alpha1.WaitReadyRequest{
+			VsockPath: "/run/flintlock/a.vsock",
+		})
+		done <- err
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+
+	err := <-done
+	if err == nil {
+		t.Fatal("expected an error when the client cancels the RPC")
+	}
+	if got := status.Code(err); got != codes.Canceled {
+		t.Fatalf("expected codes.Canceled, got %v", got)
+	}
+}
+
 func TestWaitReadyUsesConfiguredPort(t *testing.T) {
 	runner := &fakeRunner{}
 	server := hostagent.NewServer(runner, 1024, time.Millisecond)

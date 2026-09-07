@@ -58,6 +58,16 @@ func TestTLSConfigValidate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name:    "insecure with client validation enabled is invalid",
+			tls:     grpcconfig.TLSConfig{Insecure: true, ValidateClient: true},
+			wantErr: true,
+		},
+		{
+			name:    "insecure with client CA file set is invalid",
+			tls:     grpcconfig.TLSConfig{Insecure: true, ClientCAFile: "ca.pem"},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

@@ -4,6 +4,7 @@ package hostagent
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
 
@@ -59,7 +60,7 @@ func (s *Server) WaitReady(ctx context.Context, req *poolmgrv1alpha1.WaitReadyRe
 
 		select {
 		case <-ctx.Done():
-			return nil, status.Error(codes.DeadlineExceeded, "timed out waiting for guest-agent to become ready")
+			return nil, ctxDoneError(ctx, "timed out waiting for guest-agent to become ready")
 		case <-ticker.C:
 		}
 	}
@@ -71,6 +72,9 @@ func (s *Server) WaitReady(ctx context.Context, req *poolmgrv1alpha1.WaitReadyRe
 func (s *Server) Run(req *poolmgrv1alpha1.RunRequest, stream poolmgrv1alpha1.Hostagent_RunServer) error {
 	if req.GetVsockPath() == "" {
 		return status.Error(codes.InvalidArgument, "vsock_path is required")
+	}
+	if len(req.GetCmd()) == 0 {
+		return status.Error(codes.InvalidArgument, "cmd is required")
 	}
 
 	ctx := stream.Context()
@@ -85,16 +89,41 @@ func (s *Server) Run(req *poolmgrv1alpha1.RunRequest, stream poolmgrv1alpha1.Hos
 		return status.Errorf(codes.Unavailable, "starting command: %v", err)
 	}
 
-	stdoutErr := make(chan error, 1)
-	go func() { stdoutErr <- streamChunks(stream, execution.Stdout(), wrapStdout) }()
-	stderrErr := make(chan error, 1)
-	go func() { stderrErr <- streamChunks(stream, execution.Stderr(), wrapStderr) }()
+	// chunks is drained by a single goroutine below, so stream.Send is only ever called from one
+	// place at a time: gRPC server streams aren't safe for concurrent Send calls.
+	chunks := make(chan *poolmgrv1alpha1.RunResponse)
+	streamErr := make(chan error, 1)
+	go func() {
+		for chunk := range chunks {
+			if err := stream.Send(chunk); err != nil {
+				select {
+				case streamErr <- err:
+				default:
+				}
+			}
+		}
+		close(streamErr)
+	}()
 
-	if err := <-stdoutErr; err != nil {
-		return status.Errorf(codes.Unavailable, "streaming stdout: %v", err)
+	stdoutErr := make(chan error, 1)
+	go func() { stdoutErr <- readChunks(chunks, execution.Stdout(), wrapStdout) }()
+	stderrErr := make(chan error, 1)
+	go func() { stderrErr <- readChunks(chunks, execution.Stderr(), wrapStderr) }()
+
+	readErr := <-stdoutErr
+	if err := <-stderrErr; readErr == nil {
+		readErr = err
 	}
-	if err := <-stderrErr; err != nil {
-		return status.Errorf(codes.Unavailable, "streaming stderr: %v", err)
+	close(chunks)
+	sendErr := <-streamErr
+
+	if readErr != nil {
+		_, _ = execution.Wait() // best-effort: reap the process even though we're erroring out
+		return status.Errorf(codes.Unavailable, "reading command output: %v", readErr)
+	}
+	if sendErr != nil {
+		_, _ = execution.Wait() // best-effort: reap the process even though we're erroring out
+		return status.Errorf(codes.Unavailable, "streaming command output: %v", sendErr)
 	}
 
 	waitDone := make(chan struct{})
@@ -111,7 +140,7 @@ func (s *Server) Run(req *poolmgrv1alpha1.RunRequest, stream poolmgrv1alpha1.Hos
 	}
 
 	if ctx.Err() != nil {
-		return status.Error(codes.DeadlineExceeded, "timed out waiting for command to complete")
+		return ctxDoneError(ctx, "timed out waiting for command to complete")
 	}
 
 	if waitErr != nil {
@@ -123,6 +152,16 @@ func (s *Server) Run(req *poolmgrv1alpha1.RunRequest, stream poolmgrv1alpha1.Hos
 	})
 }
 
+// ctxDoneError maps a context that has already fired to the corresponding gRPC status: a client
+// cancellation becomes codes.Canceled, everything else (i.e. a timeout) becomes
+// codes.DeadlineExceeded.
+func ctxDoneError(ctx context.Context, deadlineMsg string) error {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return status.Error(codes.Canceled, "request canceled")
+	}
+	return status.Error(codes.DeadlineExceeded, deadlineMsg)
+}
+
 func wrapStdout(chunk []byte) *poolmgrv1alpha1.RunResponse {
 	return &poolmgrv1alpha1.RunResponse{Output: &poolmgrv1alpha1.RunResponse_StdoutChunk{StdoutChunk: chunk}}
 }
@@ -131,17 +170,15 @@ func wrapStderr(chunk []byte) *poolmgrv1alpha1.RunResponse {
 	return &poolmgrv1alpha1.RunResponse{Output: &poolmgrv1alpha1.RunResponse_StderrChunk{StderrChunk: chunk}}
 }
 
-// streamChunks reads from r until EOF, sending each non-empty read to stream wrapped by wrap.
-func streamChunks(stream poolmgrv1alpha1.Hostagent_RunServer, r io.Reader, wrap func([]byte) *poolmgrv1alpha1.RunResponse) error {
+// readChunks reads from r until EOF, sending each non-empty read to chunks wrapped by wrap.
+func readChunks(chunks chan<- *poolmgrv1alpha1.RunResponse, r io.Reader, wrap func([]byte) *poolmgrv1alpha1.RunResponse) error {
 	buf := make([]byte, 4096)
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
 			chunk := make([]byte, n)
 			copy(chunk, buf[:n])
-			if sendErr := stream.Send(wrap(chunk)); sendErr != nil {
-				return sendErr
-			}
+			chunks <- wrap(chunk)
 		}
 		if err != nil {
 			if err == io.EOF {

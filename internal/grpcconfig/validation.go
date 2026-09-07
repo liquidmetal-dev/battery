@@ -10,6 +10,9 @@ func (t TLSConfig) Validate() error {
 		if t.CertFile != "" || t.KeyFile != "" {
 			return errors.New("tls: cert/key must not be set when insecure mode is enabled")
 		}
+		if t.ValidateClient || t.ClientCAFile != "" {
+			return errors.New("tls: client validation options must not be set when insecure mode is enabled")
+		}
 		return nil
 	}
 
