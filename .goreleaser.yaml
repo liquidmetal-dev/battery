@@ -6,6 +6,9 @@ before:
   hooks:
     - go mod tidy
 
+release:
+  prerelease: auto
+
 builds:
   - id: poolmgrd
     main: ./cmd/poolmgrd

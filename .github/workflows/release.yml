@@ -42,6 +42,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - run: buf push --create --create-visibility public --label "${{ github.ref_name }}"
+      - run: buf push --create --create-visibility public --label "${{ github.ref_name }}" --label main
         env:
           BUF_TOKEN: ${{ secrets.BUF_TOKEN }}

@@ -77,19 +77,24 @@ to `main`. This triggers `.github/workflows/release.yml`, which:
 - creates a GitHub release with a changelog grouped by commit type
 - pushes `api/proto` (`PoolAdmin`/`Lease`/`Events`/`types`) to the Buf
   Schema Registry at `buf.build/liquidmetal-dev/battery`, creating the
-  BSR module on first push if it doesn't exist yet
+  BSR module on first push if it doesn't exist yet, and labels the push
+  with both the release tag and the moving `main` label — `main` is what
+  `buf breaking` (below) compares PRs against, so every release advances
+  it
 
 **One-time setup:** a `BUF_TOKEN` repository secret (a Buf Schema Registry
 API token with write access to `liquidmetal-dev/battery`) must exist
 before the first tag is pushed. Until the first successful `buf push`,
 the `buf breaking` check in CI (`.github/workflows/ci.yml`) has nothing
-to compare against; it's set to `continue-on-error` so it won't block
-PRs until then.
+to compare against — that specific "no baseline yet" failure is treated
+as a pass with a warning, but any other `buf breaking` failure (a real
+incompatible schema change) still fails the job normally, before and
+after the first release.
 
 If `buf push` fails after GoReleaser has already published successfully,
 the proto schema push can be re-run manually without re-cutting the
-release: `buf push --create --create-visibility public --label <tag>`
-from a checkout of that tag.
+release: `buf push --create --create-visibility public --label <tag>
+--label main` from a checkout of that tag.
 
 ```bash
 git tag v0.1.0
