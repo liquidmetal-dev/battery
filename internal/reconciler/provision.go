@@ -133,10 +133,10 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 		_, _ = client.DeleteMicroVM(ctx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: uid})
 		return fmt.Errorf("reconciler: provision: CreateVM: %w", err)
 	}
-	p.emit(ctx, pool, uid, poolmgrv1alpha1.EventType_VM_PROVISIONED)
+	EmitEvent(ctx, p.store, pool, uid, poolmgrv1alpha1.EventType_VM_PROVISIONED)
 
 	if err := p.waitCreated(ctx, client, uid); err != nil {
-		p.fail(ctx, pool, vm, err)
+		ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm)
 		return err
 	}
 
@@ -147,7 +147,7 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 	execClient, err := p.flint.ExecClient(host)
 	if err != nil {
 		err = fmt.Errorf("reconciler: provision: %w", err)
-		p.fail(ctx, pool, vm, err)
+		ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm)
 		return err
 	}
 
@@ -156,7 +156,7 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 	cancel()
 	if err != nil {
 		err = fmt.Errorf("%w: guest-agent not ready: %w", ErrHookFailed, err)
-		p.fail(ctx, pool, vm, err)
+		ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm)
 		return err
 	}
 
@@ -164,12 +164,12 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 		result, err := flintlockclient.Exec(ctx, execClient, uid, cmd, flintlockclient.ExecOptions{TimeoutSeconds: p.cfg.ExecTimeoutSeconds})
 		if err != nil {
 			err = fmt.Errorf("%w: %q: %w", ErrHookFailed, cmd, err)
-			p.fail(ctx, pool, vm, err)
+			ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm)
 			return err
 		}
 		if result.ExitCode != 0 {
 			err = fmt.Errorf("%w: %q: exit code %d", ErrHookFailed, cmd, result.ExitCode)
-			p.fail(ctx, pool, vm, err)
+			ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm)
 			return err
 		}
 	}
@@ -177,7 +177,7 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 	if err := p.updatePhase(ctx, pool, vm, poolmgrv1alpha1.VMPhase_AVAILABLE); err != nil {
 		return err
 	}
-	p.emit(ctx, pool, uid, poolmgrv1alpha1.EventType_VM_AVAILABLE)
+	EmitEvent(ctx, p.store, pool, uid, poolmgrv1alpha1.EventType_VM_AVAILABLE)
 	return nil
 }
 
@@ -191,7 +191,7 @@ func (p *Provisioner) updatePhase(ctx context.Context, pool *poolmgrv1alpha1.Poo
 	vm.UpdatedAt = timestamppb.Now()
 	if err := p.store.UpdateVM(ctx, vm); err != nil {
 		err = fmt.Errorf("reconciler: provision: UpdateVM: %w", err)
-		p.fail(ctx, pool, vm, err)
+		ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm)
 		return err
 	}
 	return nil
@@ -236,30 +236,95 @@ func (p *Provisioner) waitCreated(ctx context.Context, client microvmv1alpha1.Mi
 	}
 }
 
-// fail applies pool.HookFailurePolicy to vm after a provisioning failure,
-// and emits VM_HOOK_FAILED. Store/flintlock errors here are best-effort:
-// the original cause is what the caller returns and logs.
-func (p *Provisioner) fail(ctx context.Context, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord, _ error) {
+// ApplyHookFailurePolicy applies pool.HookFailurePolicy to vm after a hook
+// failure (a create-hook failure during provisioning, or a pre-lease-hook
+// failure during ClaimVM), and emits VM_HOOK_FAILED. Store/flintlock errors
+// here are best-effort: the original failure cause is what the caller
+// should return/log.
+func ApplyHookFailurePolicy(ctx context.Context, st store.Store, flint *flintlockclient.Pool, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord) {
 	switch pool.GetHookFailurePolicy() {
 	case poolmgrv1alpha1.HookFailurePolicy_QUARANTINE:
 		vm.Phase = poolmgrv1alpha1.VMPhase_QUARANTINED
+		vm.LeaseId = nil // no lease exists for a hook failure; don't leave a dangling reference
 		vm.UpdatedAt = timestamppb.Now()
-		_ = p.store.UpdateVM(ctx, vm)
+		_ = st.UpdateVM(ctx, vm)
 	default: // DELETE_AND_REPLACE, and the unspecified zero value: fail safe by deleting.
-		if client, err := p.flint.Client(vm.GetFlintlockHost()); err == nil {
+		if client, err := flint.Client(vm.GetFlintlockHost()); err == nil {
 			_, _ = client.DeleteMicroVM(ctx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: vm.GetUid()})
 		}
-		_ = p.store.DeleteVM(ctx, vm.GetUid())
+		_ = st.DeleteVM(ctx, vm.GetUid())
 	}
-	p.emit(ctx, pool, vm.GetUid(), poolmgrv1alpha1.EventType_VM_HOOK_FAILED)
+	EmitEvent(ctx, st, pool, vm.GetUid(), poolmgrv1alpha1.EventType_VM_HOOK_FAILED)
 }
 
-func (p *Provisioner) emit(ctx context.Context, pool *poolmgrv1alpha1.PoolSpec, uid string, t poolmgrv1alpha1.EventType) {
-	_ = p.store.AppendEvent(ctx, &poolmgrv1alpha1.Event{
+// EmitEvent appends an event for pool/uid to the store's outbox. It never
+// returns an error so it can be called from failure paths without
+// complicating control flow; failures are dropped (best-effort).
+func EmitEvent(ctx context.Context, st store.Store, pool *poolmgrv1alpha1.PoolSpec, uid string, t poolmgrv1alpha1.EventType) {
+	_ = st.AppendEvent(ctx, &poolmgrv1alpha1.Event{
 		PoolName:      pool.GetName(),
 		PoolNamespace: pool.GetNamespace(),
 		VmUid:         uid,
 		Type:          t,
 		CreatedAt:     timestamppb.Now(),
 	})
+}
+
+// DeletionNotifier lets EnsureVMDeleted/FinishVMDeletion callers nudge
+// whichever component owns a pool's Reconciler after a VM is fully deleted,
+// so REPLACE_ON_DELETE pools can replenish.
+type DeletionNotifier interface {
+	NotifyVMDeleted(poolName, poolNamespace string)
+}
+
+// EnsureVMDeleted marks vm DELETING (durably, if it isn't already) and
+// attempts to delete it via flintlock. Success, or flintlock reporting
+// NotFound (already gone), removes vm's store row and returns nil. Any
+// other flintlock/host error leaves vm in the DELETING phase for a later
+// retry (e.g. Sweeper's pending-deletion scan) and returns that error.
+func EnsureVMDeleted(ctx context.Context, st store.Store, flint *flintlockclient.Pool, vm *poolmgrv1alpha1.VMRecord) error {
+	if vm.GetPhase() != poolmgrv1alpha1.VMPhase_DELETING {
+		vm.Phase = poolmgrv1alpha1.VMPhase_DELETING
+		vm.UpdatedAt = timestamppb.Now()
+		if err := st.UpdateVM(ctx, vm); err != nil {
+			return fmt.Errorf("reconciler: mark vm deleting: %w", err)
+		}
+	}
+
+	client, err := flint.Client(vm.GetFlintlockHost())
+	if err != nil {
+		return fmt.Errorf("reconciler: ensure vm deleted: %w", err)
+	}
+	if _, err := client.DeleteMicroVM(ctx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: vm.GetUid()}); err != nil && status.Code(err) != codes.NotFound {
+		return fmt.Errorf("reconciler: DeleteMicroVM: %w", err)
+	}
+
+	if err := st.DeleteVM(ctx, vm.GetUid()); err != nil {
+		return fmt.Errorf("reconciler: delete vm record: %w", err)
+	}
+	return nil
+}
+
+// FinishVMDeletion completes the bookkeeping after EnsureVMDeleted has
+// succeeded for vm: it deletes any lease row still referencing vm (a
+// release whose flintlock call initially failed keeps its lease row in
+// place until deletion is confirmed), emits the appropriate VM_DELETED_*
+// event, and notifies notifier (nil-safe). The event type is inferred from
+// durable state rather than tracked separately: an expiry-triggered
+// deletion has already deleted its lease row up front (via
+// store.DeleteLeaseIfExpired) by the time this runs, while a
+// release-triggered one keeps its lease row until here - so a lease row
+// still being present for vm.GetLeaseId() means this was a release.
+func FinishVMDeletion(ctx context.Context, st store.Store, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord, notifier DeletionNotifier) {
+	eventType := poolmgrv1alpha1.EventType_VM_DELETED_DUE_TO_EXPIRY
+	if leaseID := vm.GetLeaseId(); leaseID != "" {
+		if _, err := st.GetLease(ctx, leaseID); err == nil {
+			eventType = poolmgrv1alpha1.EventType_VM_DELETED_ON_RELEASE
+			_ = st.DeleteLease(ctx, leaseID)
+		}
+	}
+	EmitEvent(ctx, st, pool, vm.GetUid(), eventType)
+	if notifier != nil {
+		notifier.NotifyVMDeleted(pool.GetName(), pool.GetNamespace())
+	}
 }

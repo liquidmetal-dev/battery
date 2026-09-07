@@ -12,6 +12,8 @@ import (
 	microvmexecv1alpha1 "github.com/liquidmetal-dev/flintlock/api/services/microvmexec/v1alpha1"
 	flintlocktypes "github.com/liquidmetal-dev/flintlock/api/types"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
 
@@ -30,6 +32,12 @@ type fakeMicroVM struct {
 
 	pollsUntilCreated int
 	failAfterPolls    bool
+
+	// failDeletesRemaining, if > 0, makes DeleteMicroVM return an
+	// Unavailable error that many times (decrementing each call) before
+	// succeeding, to simulate a flintlock host being transiently
+	// unreachable. Guarded by mu.
+	failDeletesRemaining int
 
 	mu       sync.Mutex
 	getCalls map[string]int
@@ -86,8 +94,13 @@ func (f *fakeMicroVM) GetMicroVM(_ context.Context, req *microvmv1alpha1.GetMicr
 
 func (f *fakeMicroVM) DeleteMicroVM(_ context.Context, req *microvmv1alpha1.DeleteMicroVMRequest) (*emptypb.Empty, error) {
 	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.failDeletesRemaining > 0 {
+		f.failDeletesRemaining--
+		return nil, status.Error(codes.Unavailable, "flintlock host unreachable")
+	}
 	f.deleted = append(f.deleted, req.GetUid())
-	f.mu.Unlock()
 	return &emptypb.Empty{}, nil
 }
 
