@@ -1,6 +1,7 @@
 version: v2
 modules:
   - path: api/proto
+    name: buf.build/liquidmetal-dev/battery
 deps:
   - buf.build/liquidmetal-dev/flintlock
 lint:
