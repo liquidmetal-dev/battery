@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 )
 
 // DefaultMetricsAddr is the address the pool manager's /metrics HTTP
@@ -26,6 +27,14 @@ type Config struct {
 	// MetricsAddr is the address (host:port, or :port) the /metrics HTTP
 	// endpoint listens on. Empty uses DefaultMetricsAddr.
 	MetricsAddr string `json:"metrics_addr,omitempty"`
+	// SweepInterval is how often the lease sweeper scans for expired
+	// leases, as a Go duration string (e.g. "10s"). Empty uses
+	// reconciler.DefaultSweepInterval.
+	SweepInterval string `json:"sweep_interval,omitempty"`
+	// WarningWindow is how far ahead of expiry the sweeper emits a
+	// VM_EXPIRING_SOON warning, as a Go duration string (e.g. "30s"). Empty
+	// uses reconciler.DefaultWarningWindow.
+	WarningWindow string `json:"warning_window,omitempty"`
 }
 
 // HostConfig describes one flintlock host: an address plus per-host TLS
@@ -101,6 +110,29 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if err := validatePositiveDuration("sweep_interval", c.SweepInterval); err != nil {
+		return err
+	}
+	if err := validatePositiveDuration("warning_window", c.WarningWindow); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validatePositiveDuration checks that s, if non-empty, parses as a positive
+// Go duration. An empty s is valid (the caller falls back to a default).
+func validatePositiveDuration(field, s string) error {
+	if s == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("config: %s: %w", field, err)
+	}
+	if d <= 0 {
+		return fmt.Errorf("config: %s: must be positive", field)
+	}
 	return nil
 }
 
