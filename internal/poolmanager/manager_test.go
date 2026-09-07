@@ -165,7 +165,7 @@ func TestManager_StopReconciler_CancelsAndForgets(t *testing.T) {
 	t.Fatal("timed out waiting for fake reconciler to observe cancellation")
 }
 
-func TestManager_StopReconciler_UnknownPoolIsNoop(t *testing.T) {
+func TestManager_StopReconciler_UnknownPoolIsNoop(_ *testing.T) {
 	m := New(context.Background(), nil, nil, nil)
 	m.StopReconciler("does-not-exist", "default") // must not panic
 }
@@ -213,7 +213,7 @@ func TestManager_Notify_ForwardsToRunningPool(t *testing.T) {
 	}
 }
 
-func TestManager_Notify_UnknownPoolIsNoop(t *testing.T) {
+func TestManager_Notify_UnknownPoolIsNoop(_ *testing.T) {
 	m := New(context.Background(), nil, nil, nil)
 	m.NotifyVMClaimed("does-not-exist", "default")
 	m.NotifyVMDeleted("does-not-exist", "default") // must not panic
