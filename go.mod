@@ -3,6 +3,7 @@ module github.com/liquidmetal-dev/battery
 go 1.25.0
 
 require (
+	github.com/google/uuid v1.6.0
 	github.com/liquidmetal-dev/flintlock/api v0.0.0-20260907103632-80befabb631d
 	google.golang.org/grpc v1.83.1
 	google.golang.org/protobuf v1.36.12
@@ -11,7 +12,6 @@ require (
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect

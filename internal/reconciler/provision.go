@@ -133,10 +133,10 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 		_, _ = client.DeleteMicroVM(ctx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: uid})
 		return fmt.Errorf("reconciler: provision: CreateVM: %w", err)
 	}
-	p.emit(ctx, pool, uid, poolmgrv1alpha1.EventType_VM_PROVISIONED)
+	EmitEvent(ctx, p.store, pool, uid, poolmgrv1alpha1.EventType_VM_PROVISIONED)
 
 	if err := p.waitCreated(ctx, client, uid); err != nil {
-		p.fail(ctx, pool, vm, err)
+		ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm)
 		return err
 	}
 
@@ -147,7 +147,7 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 	execClient, err := p.flint.ExecClient(host)
 	if err != nil {
 		err = fmt.Errorf("reconciler: provision: %w", err)
-		p.fail(ctx, pool, vm, err)
+		ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm)
 		return err
 	}
 
@@ -156,7 +156,7 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 	cancel()
 	if err != nil {
 		err = fmt.Errorf("%w: guest-agent not ready: %w", ErrHookFailed, err)
-		p.fail(ctx, pool, vm, err)
+		ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm)
 		return err
 	}
 
@@ -164,12 +164,12 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 		result, err := flintlockclient.Exec(ctx, execClient, uid, cmd, flintlockclient.ExecOptions{TimeoutSeconds: p.cfg.ExecTimeoutSeconds})
 		if err != nil {
 			err = fmt.Errorf("%w: %q: %w", ErrHookFailed, cmd, err)
-			p.fail(ctx, pool, vm, err)
+			ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm)
 			return err
 		}
 		if result.ExitCode != 0 {
 			err = fmt.Errorf("%w: %q: exit code %d", ErrHookFailed, cmd, result.ExitCode)
-			p.fail(ctx, pool, vm, err)
+			ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm)
 			return err
 		}
 	}
@@ -177,7 +177,7 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 	if err := p.updatePhase(ctx, pool, vm, poolmgrv1alpha1.VMPhase_AVAILABLE); err != nil {
 		return err
 	}
-	p.emit(ctx, pool, uid, poolmgrv1alpha1.EventType_VM_AVAILABLE)
+	EmitEvent(ctx, p.store, pool, uid, poolmgrv1alpha1.EventType_VM_AVAILABLE)
 	return nil
 }
 
@@ -191,7 +191,7 @@ func (p *Provisioner) updatePhase(ctx context.Context, pool *poolmgrv1alpha1.Poo
 	vm.UpdatedAt = timestamppb.Now()
 	if err := p.store.UpdateVM(ctx, vm); err != nil {
 		err = fmt.Errorf("reconciler: provision: UpdateVM: %w", err)
-		p.fail(ctx, pool, vm, err)
+		ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm)
 		return err
 	}
 	return nil
@@ -236,26 +236,31 @@ func (p *Provisioner) waitCreated(ctx context.Context, client microvmv1alpha1.Mi
 	}
 }
 
-// fail applies pool.HookFailurePolicy to vm after a provisioning failure,
-// and emits VM_HOOK_FAILED. Store/flintlock errors here are best-effort:
-// the original cause is what the caller returns and logs.
-func (p *Provisioner) fail(ctx context.Context, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord, _ error) {
+// ApplyHookFailurePolicy applies pool.HookFailurePolicy to vm after a hook
+// failure (a create-hook failure during provisioning, or a pre-lease-hook
+// failure during ClaimVM), and emits VM_HOOK_FAILED. Store/flintlock errors
+// here are best-effort: the original failure cause is what the caller
+// should return/log.
+func ApplyHookFailurePolicy(ctx context.Context, st store.Store, flint *flintlockclient.Pool, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord) {
 	switch pool.GetHookFailurePolicy() {
 	case poolmgrv1alpha1.HookFailurePolicy_QUARANTINE:
 		vm.Phase = poolmgrv1alpha1.VMPhase_QUARANTINED
 		vm.UpdatedAt = timestamppb.Now()
-		_ = p.store.UpdateVM(ctx, vm)
+		_ = st.UpdateVM(ctx, vm)
 	default: // DELETE_AND_REPLACE, and the unspecified zero value: fail safe by deleting.
-		if client, err := p.flint.Client(vm.GetFlintlockHost()); err == nil {
+		if client, err := flint.Client(vm.GetFlintlockHost()); err == nil {
 			_, _ = client.DeleteMicroVM(ctx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: vm.GetUid()})
 		}
-		_ = p.store.DeleteVM(ctx, vm.GetUid())
+		_ = st.DeleteVM(ctx, vm.GetUid())
 	}
-	p.emit(ctx, pool, vm.GetUid(), poolmgrv1alpha1.EventType_VM_HOOK_FAILED)
+	EmitEvent(ctx, st, pool, vm.GetUid(), poolmgrv1alpha1.EventType_VM_HOOK_FAILED)
 }
 
-func (p *Provisioner) emit(ctx context.Context, pool *poolmgrv1alpha1.PoolSpec, uid string, t poolmgrv1alpha1.EventType) {
-	_ = p.store.AppendEvent(ctx, &poolmgrv1alpha1.Event{
+// EmitEvent appends an event for pool/uid to the store's outbox. It never
+// returns an error so it can be called from failure paths without
+// complicating control flow; failures are dropped (best-effort).
+func EmitEvent(ctx context.Context, st store.Store, pool *poolmgrv1alpha1.PoolSpec, uid string, t poolmgrv1alpha1.EventType) {
+	_ = st.AppendEvent(ctx, &poolmgrv1alpha1.Event{
 		PoolName:      pool.GetName(),
 		PoolNamespace: pool.GetNamespace(),
 		VmUid:         uid,

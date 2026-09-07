@@ -39,7 +39,9 @@ type Store interface {
 
 	CreateLease(ctx context.Context, l *poolmgrv1alpha1.LeaseRecord) error
 	GetLease(ctx context.Context, leaseID string) (*poolmgrv1alpha1.LeaseRecord, error)
-	UpdateLeaseHeartbeat(ctx context.Context, leaseID string, at time.Time) error
+	// UpdateLeaseHeartbeat records a heartbeat at `at` and extends the lease's expiry to
+	// expiresAt (computed by the caller from the lease's pool's heartbeat_expiry_threshold).
+	UpdateLeaseHeartbeat(ctx context.Context, leaseID string, at time.Time, expiresAt time.Time) error
 	DeleteLease(ctx context.Context, leaseID string) error
 	ListExpiredLeases(ctx context.Context, now time.Time) ([]*poolmgrv1alpha1.LeaseRecord, error)
 

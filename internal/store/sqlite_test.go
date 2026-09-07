@@ -603,7 +603,8 @@ func TestUpdateLeaseHeartbeat(t *testing.T) {
 	}
 
 	newHeartbeat := time.Unix(1_700_000_500, 0)
-	if err := s.UpdateLeaseHeartbeat(ctx, "lease-1", newHeartbeat); err != nil {
+	newExpiresAt := time.Unix(1_700_002_000, 0)
+	if err := s.UpdateLeaseHeartbeat(ctx, "lease-1", newHeartbeat, newExpiresAt); err != nil {
 		t.Fatalf("UpdateLeaseHeartbeat() error = %v", err)
 	}
 
@@ -614,13 +615,16 @@ func TestUpdateLeaseHeartbeat(t *testing.T) {
 	if !got.LastHeartbeatAt.AsTime().Equal(newHeartbeat) {
 		t.Errorf("GetLease() last_heartbeat_at = %v, want %v", got.LastHeartbeatAt.AsTime(), newHeartbeat)
 	}
+	if !got.ExpiresAt.AsTime().Equal(newExpiresAt) {
+		t.Errorf("GetLease() expires_at = %v, want %v", got.ExpiresAt.AsTime(), newExpiresAt)
+	}
 }
 
 func TestUpdateLeaseHeartbeatNotFound(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
-	if err := s.UpdateLeaseHeartbeat(ctx, "missing", time.Now()); err != ErrNotFound {
+	if err := s.UpdateLeaseHeartbeat(ctx, "missing", time.Now(), time.Now()); err != ErrNotFound {
 		t.Errorf("UpdateLeaseHeartbeat() error = %v, want ErrNotFound", err)
 	}
 }

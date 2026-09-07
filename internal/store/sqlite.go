@@ -334,10 +334,10 @@ func (s *sqliteStore) GetLease(ctx context.Context, leaseID string) (*poolmgrv1a
 	return rowToLease(row), nil
 }
 
-func (s *sqliteStore) UpdateLeaseHeartbeat(ctx context.Context, leaseID string, at time.Time) error {
+func (s *sqliteStore) UpdateLeaseHeartbeat(ctx context.Context, leaseID string, at time.Time, expiresAt time.Time) error {
 	res, err := s.db.ExecContext(ctx, `
-		UPDATE leases SET last_heartbeat_at = ? WHERE lease_id = ?`,
-		at.UnixNano(), leaseID,
+		UPDATE leases SET last_heartbeat_at = ?, expires_at = ? WHERE lease_id = ?`,
+		at.UnixNano(), expiresAt.UnixNano(), leaseID,
 	)
 	if err != nil {
 		return fmt.Errorf("store: update lease heartbeat: %w", err)
