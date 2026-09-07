@@ -23,6 +23,7 @@ import (
 	"github.com/liquidmetal-dev/battery/internal/config"
 	"github.com/liquidmetal-dev/battery/internal/flintlockclient"
 	"github.com/liquidmetal-dev/battery/internal/metrics"
+	"github.com/liquidmetal-dev/battery/internal/poolmanager"
 	"github.com/liquidmetal-dev/battery/internal/server"
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
@@ -63,20 +64,28 @@ func main() {
 	reg.RegisterPoolCollector(st)
 
 	// runCtx is cancelled either by the outer signal-driven ctx, or by us
-	// below if one server fails - either way, both listeners shut down
-	// together and we drain both results before exiting.
+	// below if one server fails - either way, every goroutine started below
+	// shuts down together and we drain all of their results before exiting.
 	runCtx, stop := context.WithCancel(ctx)
 	defer stop()
 
-	errCh := make(chan error, 2)
-	pending := 1
+	poolMgr := poolmanager.New(runCtx, st, flint, reg)
+	if err := poolMgr.Seed(runCtx); err != nil {
+		log.Fatalf("poolmgrd: %v", err)
+	}
+
+	errCh := make(chan error, 3)
+	pending := 2
 
 	go func() {
 		errCh <- serveMetrics(runCtx, cfg.MetricsAddr, reg)
 	}()
+	go func() {
+		errCh <- poolMgr.Run()
+	}()
 
 	if cfg.APIServer != nil {
-		grpcSrv, err := buildGRPCServer(*cfg.APIServer, st, flint, reg)
+		grpcSrv, err := buildGRPCServer(*cfg.APIServer, st, flint, reg, poolMgr)
 		if err != nil {
 			log.Fatalf("poolmgrd: %v", err)
 		}
@@ -110,14 +119,14 @@ func main() {
 // registers the PoolAdmin, Lease, and Events services (backed by st and
 // flint) plus grpc/health and reflection, and pre-registers reg's gRPC
 // metrics. The caller still needs to net.Listen and Serve it.
-func buildGRPCServer(cfg config.APIServerConfig, st store.Store, flint *flintlockclient.Pool, reg *metrics.Registry) (*grpc.Server, error) {
+func buildGRPCServer(cfg config.APIServerConfig, st store.Store, flint *flintlockclient.Pool, reg *metrics.Registry, poolMgr *poolmanager.Manager) (*grpc.Server, error) {
 	srv, err := server.New(cfg, reg.ServerOptions()...)
 	if err != nil {
 		return nil, fmt.Errorf("build grpc server: %w", err)
 	}
 
-	poolmgrv1alpha1.RegisterPoolAdminServer(srv, api.NewPoolAdminServer(st))
-	poolmgrv1alpha1.RegisterLeaseServer(srv, api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil, reg))
+	poolmgrv1alpha1.RegisterPoolAdminServer(srv, api.NewPoolAdminServer(st, poolMgr))
+	poolmgrv1alpha1.RegisterLeaseServer(srv, api.NewLeaseServer(st, flint, api.HookExecConfig{}, poolMgr, reg))
 	poolmgrv1alpha1.RegisterEventsServer(srv, api.NewEventsServer(st, 0, 0))
 
 	healthSrv := health.NewServer()
