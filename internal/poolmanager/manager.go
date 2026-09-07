@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/liquidmetal-dev/battery/internal/flintlockclient"
 	"github.com/liquidmetal-dev/battery/internal/metrics"
@@ -55,6 +56,7 @@ type Manager struct {
 	mu      sync.Mutex
 	handles map[poolKey]*reconcilerHandle
 	wg      sync.WaitGroup
+	stopped bool
 }
 
 // New returns a Manager whose per-pool reconciler goroutines are children of
@@ -100,7 +102,21 @@ func (m *Manager) StartReconciler(spec *poolmgrv1alpha1.PoolSpec) error {
 		return fmt.Errorf("poolmanager: reconciler for %s/%s already running", key.namespace, key.name)
 	}
 
-	runner, err := newReconciler(spec, m.store, m.flint, m.metrics)
+	if m.stopped {
+		return fmt.Errorf("poolmanager: manager is shutting down")
+	}
+
+	// Clone spec before handing it to the reconciler: the same pointer is
+	// also marshaled by gRPC into the RPC response, and protobuf-go's
+	// marshaling mutates an internal sizeCache field - a data race against
+	// the reconciler goroutine reading spec on every tick. The clone gives
+	// the reconciler its own private copy.
+	specCopy, ok := proto.Clone(spec).(*poolmgrv1alpha1.PoolSpec)
+	if !ok {
+		return fmt.Errorf("poolmanager: clone spec for %s/%s: unexpected type", key.namespace, key.name)
+	}
+
+	runner, err := newReconciler(specCopy, m.store, m.flint, m.metrics)
 	if err != nil {
 		return fmt.Errorf("poolmanager: new reconciler for %s/%s: %w", key.namespace, key.name, err)
 	}
@@ -177,6 +193,7 @@ func (m *Manager) Run() error {
 	<-m.rootCtx.Done()
 
 	m.mu.Lock()
+	m.stopped = true
 	handles := make([]*reconcilerHandle, 0, len(m.handles))
 	for k, h := range m.handles {
 		handles = append(handles, h)

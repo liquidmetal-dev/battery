@@ -13,12 +13,12 @@ import (
 // only unique within its namespace (store.GetPool takes both), so
 // pool_name alone can collide across namespaces.
 type metricSet struct {
-	vmClaimsTotal                *prometheus.CounterVec
-	vmReleasesTotal              *prometheus.CounterVec
-	provisionDuration            *prometheus.HistogramVec
-	hookDuration                 *prometheus.HistogramVec
-	hookFailuresTotal            *prometheus.CounterVec
-	leaseDuration                *prometheus.HistogramVec
+	vmClaimsTotal                  *prometheus.CounterVec
+	vmReleasesTotal                *prometheus.CounterVec
+	provisionDuration              *prometheus.HistogramVec
+	hookDuration                   *prometheus.HistogramVec
+	hookFailuresTotal              *prometheus.CounterVec
+	leaseDuration                  *prometheus.HistogramVec
 	reconcilerUnexpectedExitsTotal *prometheus.CounterVec
 }
 

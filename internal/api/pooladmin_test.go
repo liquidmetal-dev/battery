@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -369,6 +370,49 @@ func TestDeletePool_StopsReconciler(t *testing.T) {
 	defer lifecycle.mu.Unlock()
 	if len(lifecycle.stopped) != 1 || lifecycle.stopped[0] != "pool-a" {
 		t.Fatalf("stopped = %v, want [pool-a]", lifecycle.stopped)
+	}
+}
+
+func TestUpdatePool_RestartsReconciler(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	lifecycle := &fakePoolLifecycle{}
+	s := api.NewPoolAdminServer(st, lifecycle)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+
+	update := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	update.Size = 5
+	if _, err := s.UpdatePool(ctx, &poolmgrv1alpha1.UpdatePoolRequest{Spec: update}); err != nil {
+		t.Fatalf("UpdatePool() error = %v", err)
+	}
+
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
+	if len(lifecycle.started) != 2 || lifecycle.started[0] != "pool-a" || lifecycle.started[1] != "pool-a" {
+		t.Fatalf("started = %v, want [pool-a pool-a]", lifecycle.started)
+	}
+	if len(lifecycle.stopped) != 1 || lifecycle.stopped[0] != "pool-a" {
+		t.Fatalf("stopped = %v, want [pool-a]", lifecycle.stopped)
+	}
+}
+
+func TestCreatePool_StartReconcilerFails_StillReturnsSuccess(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	lifecycle := &fakePoolLifecycle{startErr: errors.New("boom")}
+	s := api.NewPoolAdminServer(st, lifecycle)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	got, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec})
+	if err != nil {
+		t.Fatalf("CreatePool() error = %v, want nil despite StartReconciler failure", err)
+	}
+	if got == nil {
+		t.Fatal("CreatePool() returned nil response, want non-nil despite StartReconciler failure")
 	}
 }
 

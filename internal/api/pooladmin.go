@@ -159,6 +159,18 @@ func (s *PoolAdminServer) UpdatePool(ctx context.Context, req *poolmgrv1alpha1.U
 		return nil, status.Errorf(codes.Internal, "update pool: %v", err)
 	}
 
+	// Same log-only philosophy as CreatePool's StartReconciler call above:
+	// the pool's spec is already persisted, so failing the RPC here would
+	// misreport that. Stop the old reconciler (if any - StopReconciler is a
+	// no-op for an unknown pool) and start a fresh one against the new spec;
+	// on start failure the pool simply has no reconciler running until
+	// poolmgrd restarts (re-seeds every pool) or another successful
+	// CreatePool/UpdatePool/DeletePool cycle.
+	s.poolMgr.StopReconciler(spec.GetName(), spec.GetNamespace())
+	if err := s.poolMgr.StartReconciler(spec); err != nil {
+		slog.ErrorContext(ctx, "pooladmin: restart reconciler failed", "pool", spec.GetName(), "namespace", spec.GetNamespace(), "error", err)
+	}
+
 	counts, err := reconciler.CountVMs(ctx, s.store, spec.GetName(), spec.GetNamespace())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "count vms: %v", err)

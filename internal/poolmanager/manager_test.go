@@ -78,9 +78,9 @@ func withFakeReconciler(t *testing.T, fakes map[string]*fakeRunner) {
 
 func testPool(name string) *poolmgrv1alpha1.PoolSpec {
 	return &poolmgrv1alpha1.PoolSpec{
-		Name:                    name,
-		Namespace:               "default",
-		HeartbeatInterval:       durationpb.New(30 * time.Second),
+		Name:                     name,
+		Namespace:                "default",
+		HeartbeatInterval:        durationpb.New(30 * time.Second),
 		HeartbeatExpiryThreshold: durationpb.New(90 * time.Second),
 	}
 }
