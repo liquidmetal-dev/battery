@@ -61,7 +61,12 @@ serviceAccount:
   annotations: {}
 
 podAnnotations: {}
-podSecurityContext: {}
+# fsGroup 65532 matches the distroless "nonroot" image's UID/GID (see
+# Dockerfile), so the mounted PVC is group-writable by the container --
+# without it, a fresh PVC provisioned root:root leaves poolmgrd unable to
+# create /data/poolmgr.db.
+podSecurityContext:
+  fsGroup: 65532
 securityContext: {}
 nodeSelector: {}
 tolerations: []

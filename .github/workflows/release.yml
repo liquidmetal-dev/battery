@@ -49,5 +49,5 @@ jobs:
       - name: Package and push Helm chart
         run: |
           version="${GITHUB_REF_NAME#v}"
-          helm package deploy/charts/poolmgrd --version "$version" --app-version "${GITHUB_REF_NAME}" --destination /tmp/helm-dist
+          helm package deploy/charts/poolmgrd --version "$version" --app-version "$version" --destination /tmp/helm-dist
           helm push "/tmp/helm-dist/poolmgrd-${version}.tgz" oci://ghcr.io/liquidmetal-dev/charts

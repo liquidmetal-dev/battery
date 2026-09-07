@@ -19,10 +19,17 @@ spec:
     metadata:
       labels:
         {{- include "poolmgrd.selectorLabels" . | nindent 8 }}
-      {{- with .Values.podAnnotations }}
       annotations:
+        # poolmgrd loads config once at startup with no reload path, so
+        # without these the StatefulSet spec is unchanged (and no rollout
+        # happens) when only the rendered ConfigMap/Secret content changes.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if and .Values.tls.create (not .Values.tls.existingSecret) }}
+        checksum/tls: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "poolmgrd.serviceAccountName" . }}
       {{- with .Values.podSecurityContext }}
