@@ -2,6 +2,8 @@ package metrics_test
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 
@@ -30,9 +32,13 @@ func openTestStore(t *testing.T) store.Store {
 }
 
 func samplePool(name string, size int32) *poolmgrv1alpha1.PoolSpec {
+	return samplePoolIn(name, "default", size)
+}
+
+func samplePoolIn(name, namespace string, size int32) *poolmgrv1alpha1.PoolSpec {
 	return &poolmgrv1alpha1.PoolSpec{
 		Name:            name,
-		Namespace:       "default",
+		Namespace:       namespace,
 		Size:            size,
 		FlintlockHosts:  []string{"host-a"},
 		MicrovmTemplate: &flintlocktypes.MicroVMSpec{Vcpu: 1},
@@ -46,11 +52,15 @@ func samplePool(name string, size int32) *poolmgrv1alpha1.PoolSpec {
 }
 
 func sampleVM(uid, poolName string, phase poolmgrv1alpha1.VMPhase) *poolmgrv1alpha1.VMRecord {
+	return sampleVMIn(uid, poolName, "default", phase)
+}
+
+func sampleVMIn(uid, poolName, poolNamespace string, phase poolmgrv1alpha1.VMPhase) *poolmgrv1alpha1.VMRecord {
 	now := timestamppb.Now()
 	return &poolmgrv1alpha1.VMRecord{
 		Uid:           uid,
 		PoolName:      poolName,
-		PoolNamespace: "default",
+		PoolNamespace: poolNamespace,
 		FlintlockHost: "host-a",
 		Phase:         phase,
 		CreatedAt:     now,
@@ -82,11 +92,48 @@ func TestPoolCollector_EmitsPerPoolGauges(t *testing.T) {
 	reg.RegisterPoolCollector(st)
 
 	body := scrape(t, reg)
-	assertContains(t, body, `poolmgr_pool_size{pool_name="pool-a"} 3`)
-	assertContains(t, body, `poolmgr_pool_available{pool_name="pool-a"} 1`)
-	assertContains(t, body, `poolmgr_pool_leased{pool_name="pool-a"} 2`)
-	assertContains(t, body, `poolmgr_pool_provisioning{pool_name="pool-a"} 1`)
-	assertContains(t, body, `poolmgr_pool_quarantined{pool_name="pool-a"} 1`)
+	assertContains(t, body, `poolmgr_pool_size{pool_name="pool-a",pool_namespace="default"} 3`)
+	assertContains(t, body, `poolmgr_pool_available{pool_name="pool-a",pool_namespace="default"} 1`)
+	assertContains(t, body, `poolmgr_pool_leased{pool_name="pool-a",pool_namespace="default"} 2`)
+	assertContains(t, body, `poolmgr_pool_provisioning{pool_name="pool-a",pool_namespace="default"} 1`)
+	assertContains(t, body, `poolmgr_pool_quarantined{pool_name="pool-a",pool_namespace="default"} 1`)
+}
+
+// TestPoolCollector_SameNameDifferentNamespace reproduces the P1 review
+// finding: two pools sharing a name but not a namespace used to collide
+// into one label set, which made promhttp's default handler fail the
+// whole scrape with duplicate-metric errors (HTTP 500).
+func TestPoolCollector_SameNameDifferentNamespace(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	for _, p := range []*poolmgrv1alpha1.PoolSpec{
+		samplePoolIn("workers", "team-a", 1),
+		samplePoolIn("workers", "team-b", 2),
+	} {
+		if err := st.CreatePool(ctx, p); err != nil {
+			t.Fatalf("CreatePool(%s/%s): %v", p.GetNamespace(), p.GetName(), err)
+		}
+	}
+	if err := st.CreateVM(ctx, sampleVMIn("vm-1", "workers", "team-a", poolmgrv1alpha1.VMPhase_AVAILABLE)); err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+
+	reg := metrics.NewRegistry()
+	reg.RegisterPoolCollector(st)
+
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	w := httptest.NewRecorder()
+	reg.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (no duplicate-metric collision), got %d:\n%s", w.Code, w.Body.String())
+	}
+
+	body := w.Body.String()
+	assertContains(t, body, `poolmgr_pool_size{pool_name="workers",pool_namespace="team-a"} 1`)
+	assertContains(t, body, `poolmgr_pool_size{pool_name="workers",pool_namespace="team-b"} 2`)
+	assertContains(t, body, `poolmgr_pool_available{pool_name="workers",pool_namespace="team-a"} 1`)
+	assertContains(t, body, `poolmgr_pool_available{pool_name="workers",pool_namespace="team-b"} 0`)
 }
 
 func TestPoolCollector_RecomputesOnEveryScrape(t *testing.T) {
@@ -101,11 +148,11 @@ func TestPoolCollector_RecomputesOnEveryScrape(t *testing.T) {
 	reg := metrics.NewRegistry()
 	reg.RegisterPoolCollector(st)
 
-	assertContains(t, scrape(t, reg), `poolmgr_pool_available{pool_name="pool-a"} 0`)
+	assertContains(t, scrape(t, reg), `poolmgr_pool_available{pool_name="pool-a",pool_namespace="default"} 0`)
 
 	if err := st.CreateVM(ctx, sampleVM("vm-1", "pool-a", poolmgrv1alpha1.VMPhase_AVAILABLE)); err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
 
-	assertContains(t, scrape(t, reg), `poolmgr_pool_available{pool_name="pool-a"} 1`)
+	assertContains(t, scrape(t, reg), `poolmgr_pool_available{pool_name="pool-a",pool_namespace="default"} 1`)
 }

@@ -107,7 +107,7 @@ func NewProvisioner(st store.Store, flint *flintlockclient.Pool, cfg ProvisionCo
 // caller to log.
 func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolSpec) error {
 	start := time.Now()
-	defer func() { p.metrics.ObserveProvisionDuration(pool.GetName(), time.Since(start)) }()
+	defer func() { p.metrics.ObserveProvisionDuration(pool.GetName(), pool.GetNamespace(), time.Since(start)) }()
 
 	host, err := PickHost(ctx, p.store, pool)
 	if err != nil {
@@ -192,7 +192,7 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 			return err
 		}
 	}
-	p.metrics.ObserveHookDuration(hookCreate, pool.GetName(), time.Since(hookStart))
+	p.metrics.ObserveHookDuration(hookCreate, pool.GetName(), pool.GetNamespace(), time.Since(hookStart))
 
 	if err := p.updatePhase(ctx, pool, vm, poolmgrv1alpha1.VMPhase_AVAILABLE); err != nil {
 		return err
@@ -278,7 +278,7 @@ func ApplyHookFailurePolicy(ctx context.Context, st store.Store, flint *flintloc
 		_ = st.DeleteVM(ctx, vm.GetUid())
 	}
 	if m != nil {
-		m.RecordHookFailure(hook, pool.GetName())
+		m.RecordHookFailure(hook, pool.GetName(), pool.GetNamespace())
 	}
 	EmitEvent(ctx, st, pool, vm.GetUid(), poolmgrv1alpha1.EventType_VM_HOOK_FAILED)
 }
@@ -335,30 +335,30 @@ func EnsureVMDeleted(ctx context.Context, st store.Store, flint *flintlockclient
 // succeeded for vm: it deletes any lease row still referencing vm (a
 // release whose flintlock call initially failed keeps its lease row in
 // place until deletion is confirmed), emits the appropriate VM_DELETED_*
-// event, records poolmgr_vm_releases_total/poolmgr_lease_duration_seconds
-// (m, nil-safe), and notifies notifier (nil-safe). The event type/release
-// reason is inferred from durable state rather than tracked separately: an
-// expiry-triggered deletion has already deleted its lease row up front (via
+// event, and notifies notifier (nil-safe). The event type is inferred from
+// durable state rather than tracked separately: an expiry-triggered
+// deletion has already deleted its lease row up front (via
 // store.DeleteLeaseIfExpired) by the time this runs, while a
 // release-triggered one keeps its lease row until here - so a lease row
-// still being present for vm.GetLeaseId() means this was a release. Lease
-// duration is only observable in that release case: an expiry-triggered
-// deletion's lease row (and its ClaimedAt) is already gone by this point.
+// still being present for vm.GetLeaseId() means this was a release.
+//
+// poolmgr_vm_releases_total/poolmgr_lease_duration_seconds (m, nil-safe)
+// are only recorded here for that release case: an expiry-triggered
+// deletion's lease row (and its ClaimedAt) is already gone by this point,
+// so Sweeper.beginExpiry records those metrics itself, right when
+// DeleteLeaseIfExpired durably ends the lease - independent of how long
+// this function's caller took to actually finish deleting the VM.
 func FinishVMDeletion(ctx context.Context, st store.Store, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord, notifier DeletionNotifier, m *metrics.Registry) {
 	eventType := poolmgrv1alpha1.EventType_VM_DELETED_DUE_TO_EXPIRY
-	reason := "expiry"
 	if leaseID := vm.GetLeaseId(); leaseID != "" {
 		if lease, err := st.GetLease(ctx, leaseID); err == nil {
 			eventType = poolmgrv1alpha1.EventType_VM_DELETED_ON_RELEASE
-			reason = "api"
 			if m != nil {
-				m.ObserveLeaseDuration(pool.GetName(), time.Since(lease.GetClaimedAt().AsTime()))
+				m.RecordVMRelease(pool.GetName(), pool.GetNamespace(), "api")
+				m.ObserveLeaseDuration(pool.GetName(), pool.GetNamespace(), time.Since(lease.GetClaimedAt().AsTime()))
 			}
 			_ = st.DeleteLease(ctx, leaseID)
 		}
-	}
-	if m != nil {
-		m.RecordVMRelease(pool.GetName(), reason)
 	}
 	EmitEvent(ctx, st, pool, vm.GetUid(), eventType)
 	if notifier != nil {

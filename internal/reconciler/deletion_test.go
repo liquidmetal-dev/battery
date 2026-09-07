@@ -119,9 +119,13 @@ func TestFinishVMDeletion_InfersExpiry(t *testing.T) {
 		t.Fatalf("expected NotifyVMDeleted(pool-a) once, got %v", notifier.deleted)
 	}
 
-	body := scrapeMetrics(t, reg)
-	if !strings.Contains(body, `poolmgr_vm_releases_total{pool_name="pool-a",reason="expiry"} 1`) {
-		t.Fatalf("expected expiry release metric, got:\n%s", body)
+	// FinishVMDeletion no longer records poolmgr_vm_releases_total/
+	// poolmgr_lease_duration_seconds for the expiry case: by this point the
+	// lease row (and its ClaimedAt) is already gone, so Sweeper.beginExpiry
+	// records those metrics itself, right when DeleteLeaseIfExpired durably
+	// ends the lease - see TestSweeper_ExpiresLeaseWithNoHeartbeat.
+	if body := scrapeMetrics(t, reg); strings.Contains(body, "poolmgr_vm_releases_total") {
+		t.Fatalf("expected no release metric recorded by FinishVMDeletion for the expiry case, got:\n%s", body)
 	}
 }
 
@@ -160,10 +164,10 @@ func TestFinishVMDeletion_InfersRelease(t *testing.T) {
 	}
 
 	body := scrapeMetrics(t, reg)
-	if !strings.Contains(body, `poolmgr_vm_releases_total{pool_name="pool-a",reason="api"} 1`) {
+	if !strings.Contains(body, `poolmgr_vm_releases_total{pool_name="pool-a",pool_namespace="default",reason="api"} 1`) {
 		t.Fatalf("expected api release metric, got:\n%s", body)
 	}
-	if !strings.Contains(body, `poolmgr_lease_duration_seconds_count{pool_name="pool-a"} 1`) {
+	if !strings.Contains(body, `poolmgr_lease_duration_seconds_count{pool_name="pool-a",pool_namespace="default"} 1`) {
 		t.Fatalf("expected lease duration observation, got:\n%s", body)
 	}
 }

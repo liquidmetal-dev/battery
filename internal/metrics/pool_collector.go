@@ -10,17 +10,22 @@ import (
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
 
+// poolLabels is shared by every per-pool Desc below: a pool name is only
+// unique within its namespace (store.GetPool takes both), so pool_name
+// alone would collide across namespaces - see pool_namespace.
+var poolLabels = []string{"pool_name", "pool_namespace"}
+
 var (
 	poolSizeDesc = prometheus.NewDesc(
-		"poolmgr_pool_size", "Target size of the pool.", []string{"pool_name"}, nil)
+		"poolmgr_pool_size", "Target size of the pool.", poolLabels, nil)
 	poolAvailableDesc = prometheus.NewDesc(
-		"poolmgr_pool_available", "Number of AVAILABLE VMs in the pool.", []string{"pool_name"}, nil)
+		"poolmgr_pool_available", "Number of AVAILABLE VMs in the pool.", poolLabels, nil)
 	poolLeasedDesc = prometheus.NewDesc(
-		"poolmgr_pool_leased", "Number of LEASED (or PRE_LEASE_HOOK_RUNNING) VMs in the pool.", []string{"pool_name"}, nil)
+		"poolmgr_pool_leased", "Number of LEASED (or PRE_LEASE_HOOK_RUNNING) VMs in the pool.", poolLabels, nil)
 	poolProvisioningDesc = prometheus.NewDesc(
-		"poolmgr_pool_provisioning", "Number of PROVISIONING (or CREATE_HOOK_RUNNING) VMs in the pool.", []string{"pool_name"}, nil)
+		"poolmgr_pool_provisioning", "Number of PROVISIONING (or CREATE_HOOK_RUNNING) VMs in the pool.", poolLabels, nil)
 	poolQuarantinedDesc = prometheus.NewDesc(
-		"poolmgr_pool_quarantined", "Number of QUARANTINED VMs in the pool.", []string{"pool_name"}, nil)
+		"poolmgr_pool_quarantined", "Number of QUARANTINED VMs in the pool.", poolLabels, nil)
 )
 
 // PoolCollector is a pull-based prometheus.Collector that computes the
@@ -49,7 +54,7 @@ func (c *PoolCollector) Describe(ch chan<- *prometheus.Desc) {
 
 // Collect implements prometheus.Collector: it lists every pool and, for
 // each, counts its VMs by phase, emitting one gauge sample per metric per
-// pool_name.
+// (pool_name, pool_namespace) pair.
 func (c *PoolCollector) Collect(ch chan<- prometheus.Metric) {
 	ctx := context.Background()
 
@@ -62,16 +67,16 @@ func (c *PoolCollector) Collect(ch chan<- prometheus.Metric) {
 	for _, pool := range pools {
 		counts, err := countVMs(ctx, c.store, pool.GetName(), pool.GetNamespace())
 		if err != nil {
-			slog.ErrorContext(ctx, "metrics: PoolCollector: count VMs failed", "pool", pool.GetName(), "error", err)
+			slog.ErrorContext(ctx, "metrics: PoolCollector: count VMs failed", "pool", pool.GetName(), "namespace", pool.GetNamespace(), "error", err)
 			continue
 		}
 
-		name := pool.GetName()
-		ch <- prometheus.MustNewConstMetric(poolSizeDesc, prometheus.GaugeValue, float64(pool.GetSize()), name)
-		ch <- prometheus.MustNewConstMetric(poolAvailableDesc, prometheus.GaugeValue, float64(counts.available), name)
-		ch <- prometheus.MustNewConstMetric(poolLeasedDesc, prometheus.GaugeValue, float64(counts.leased), name)
-		ch <- prometheus.MustNewConstMetric(poolProvisioningDesc, prometheus.GaugeValue, float64(counts.provisioning), name)
-		ch <- prometheus.MustNewConstMetric(poolQuarantinedDesc, prometheus.GaugeValue, float64(counts.quarantined), name)
+		name, namespace := pool.GetName(), pool.GetNamespace()
+		ch <- prometheus.MustNewConstMetric(poolSizeDesc, prometheus.GaugeValue, float64(pool.GetSize()), name, namespace)
+		ch <- prometheus.MustNewConstMetric(poolAvailableDesc, prometheus.GaugeValue, float64(counts.available), name, namespace)
+		ch <- prometheus.MustNewConstMetric(poolLeasedDesc, prometheus.GaugeValue, float64(counts.leased), name, namespace)
+		ch <- prometheus.MustNewConstMetric(poolProvisioningDesc, prometheus.GaugeValue, float64(counts.provisioning), name, namespace)
+		ch <- prometheus.MustNewConstMetric(poolQuarantinedDesc, prometheus.GaugeValue, float64(counts.quarantined), name, namespace)
 	}
 }
 

@@ -30,6 +30,9 @@ type Registry struct {
 func NewRegistry() *Registry {
 	reg := prometheus.NewRegistry()
 	grpcMetrics := grpc_prometheus.NewServerMetrics()
+	// Off by default in grpc_prometheus; without this,
+	// grpc_server_handling_seconds never appears in a scrape.
+	grpcMetrics.EnableHandlingTimeHistogram()
 	reg.MustRegister(grpcMetrics)
 
 	return &Registry{

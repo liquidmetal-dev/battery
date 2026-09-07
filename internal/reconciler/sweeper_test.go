@@ -2,12 +2,14 @@ package reconciler_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/liquidmetal-dev/battery/internal/metrics"
 	"github.com/liquidmetal-dev/battery/internal/reconciler"
 )
 
@@ -64,7 +66,8 @@ func TestSweeper_ExpiresLeaseWithNoHeartbeat(t *testing.T) {
 	}
 
 	notifier := &spyNotifier{}
-	sweeper := reconciler.NewSweeper(st, flint, time.Second, 30*time.Second, notifier, nil)
+	reg := metrics.NewRegistry()
+	sweeper := reconciler.NewSweeper(st, flint, time.Second, 30*time.Second, notifier, reg)
 	sweeper.Tick(ctx, now)
 
 	if _, err := st.GetVM(ctx, "vm-1"); err == nil {
@@ -87,6 +90,14 @@ func TestSweeper_ExpiresLeaseWithNoHeartbeat(t *testing.T) {
 
 	if len(notifier.deleted) != 1 || notifier.deleted[0] != "default/pool-a" {
 		t.Fatalf("expected NotifyVMDeleted(pool-a) once, got %v", notifier.deleted)
+	}
+
+	body := scrapeMetrics(t, reg)
+	if !strings.Contains(body, `poolmgr_vm_releases_total{pool_name="pool-a",pool_namespace="default",reason="expiry"} 1`) {
+		t.Fatalf("expected expiry release metric, got:\n%s", body)
+	}
+	if !strings.Contains(body, `poolmgr_lease_duration_seconds_count{pool_name="pool-a",pool_namespace="default"} 1`) {
+		t.Fatalf("expected lease duration observation, got:\n%s", body)
 	}
 }
 
@@ -267,7 +278,8 @@ func TestSweeper_RetriesPendingDeletionAcrossTicks(t *testing.T) {
 	}
 
 	notifier := &spyNotifier{}
-	sweeper := reconciler.NewSweeper(st, flint, time.Second, 30*time.Second, notifier, nil)
+	reg := metrics.NewRegistry()
+	sweeper := reconciler.NewSweeper(st, flint, time.Second, 30*time.Second, notifier, reg)
 
 	// First tick: the lease is correctly claimed and deleted, but flintlock
 	// fails once - the VM must be left DELETING, not silently forgotten.
@@ -293,6 +305,13 @@ func TestSweeper_RetriesPendingDeletionAcrossTicks(t *testing.T) {
 	if len(notifier.deleted) != 0 {
 		t.Fatalf("expected no NotifyVMDeleted until deletion is confirmed, got %v", notifier.deleted)
 	}
+	// The lease already durably expired on this first tick (before the
+	// flintlock delete attempt failed), so the release/duration metrics are
+	// already recorded here - independent of retryPendingDeletions finishing
+	// the actual VM deletion later.
+	if body := scrapeMetrics(t, reg); !strings.Contains(body, `poolmgr_vm_releases_total{pool_name="pool-a",pool_namespace="default",reason="expiry"} 1`) {
+		t.Fatalf("expected expiry release metric to already be recorded after tick 1, got:\n%s", body)
+	}
 
 	// Second tick: retryPendingDeletions finishes the job.
 	sweeper.Tick(ctx, now.Add(time.Second))
@@ -309,5 +328,11 @@ func TestSweeper_RetriesPendingDeletionAcrossTicks(t *testing.T) {
 	}
 	if len(notifier.deleted) != 1 || notifier.deleted[0] != "default/pool-a" {
 		t.Fatalf("expected NotifyVMDeleted(pool-a) once after retry, got %v", notifier.deleted)
+	}
+
+	// retryPendingDeletions' call to FinishVMDeletion must not double-count
+	// the release/duration metrics already recorded on tick 1.
+	if body := scrapeMetrics(t, reg); !strings.Contains(body, `poolmgr_vm_releases_total{pool_name="pool-a",pool_namespace="default",reason="expiry"} 1`) {
+		t.Fatalf("expected expiry release metric to still be exactly 1 after retry, got:\n%s", body)
 	}
 }

@@ -77,7 +77,7 @@ func TestClaimVM_Success(t *testing.T) {
 		t.Fatalf("expected NotifyVMClaimed(pool-a) once, got %v", notifier.claimed)
 	}
 
-	if body := scrapeMetrics(t, reg); !strings.Contains(body, `poolmgr_vm_claims_total{pool_name="pool-a"} 1`) {
+	if body := scrapeMetrics(t, reg); !strings.Contains(body, `poolmgr_vm_claims_total{pool_name="pool-a",pool_namespace="default"} 1`) {
 		t.Fatalf("expected 1 vm claim recorded, got:\n%s", body)
 	}
 }

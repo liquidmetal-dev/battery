@@ -69,10 +69,10 @@ func TestProvision_HappyPath(t *testing.T) {
 	}
 
 	body := scrapeMetrics(t, reg)
-	if !strings.Contains(body, `poolmgr_vm_provision_duration_seconds_count{pool_name="pool-a"} 1`) {
+	if !strings.Contains(body, `poolmgr_vm_provision_duration_seconds_count{pool_name="pool-a",pool_namespace="default"} 1`) {
 		t.Fatalf("expected 1 provision duration observation, got:\n%s", body)
 	}
-	if !strings.Contains(body, `poolmgr_hook_duration_seconds_count{hook="create",pool_name="pool-a"} 1`) {
+	if !strings.Contains(body, `poolmgr_hook_duration_seconds_count{hook="create",pool_name="pool-a",pool_namespace="default"} 1`) {
 		t.Fatalf("expected 1 create hook duration observation, got:\n%s", body)
 	}
 }
@@ -193,7 +193,7 @@ func TestProvision_CreateCommandNonZeroExit_DeleteAndReplace(t *testing.T) {
 		t.Fatalf("unexpected events: %+v", events)
 	}
 
-	if body := scrapeMetrics(t, reg); !strings.Contains(body, `poolmgr_hook_failures_total{hook="create",pool_name="pool-a"} 1`) {
+	if body := scrapeMetrics(t, reg); !strings.Contains(body, `poolmgr_hook_failures_total{hook="create",pool_name="pool-a",pool_namespace="default"} 1`) {
 		t.Fatalf("expected 1 create hook failure recorded, got:\n%s", body)
 	}
 }

@@ -147,7 +147,7 @@ func (s *LeaseServer) ClaimVM(ctx context.Context, req *poolmgrv1alpha1.ClaimVMR
 	}
 
 	reconciler.EmitEvent(ctx, s.store, pool, vm.GetUid(), poolmgrv1alpha1.EventType_VM_CLAIMED)
-	s.metrics.RecordVMClaim(poolName)
+	s.metrics.RecordVMClaim(poolName, poolNS)
 	s.notifier.NotifyVMClaimed(poolName, poolNS)
 
 	// Best-effort: the lease is already committed at this point, so a
@@ -198,7 +198,7 @@ func (s *LeaseServer) runPreLeaseHooks(ctx context.Context, pool *poolmgrv1alpha
 			return fmt.Errorf("exec %q: exit code %d", cmd, result.ExitCode)
 		}
 	}
-	s.metrics.ObserveHookDuration("pre_lease", pool.GetName(), time.Since(start))
+	s.metrics.ObserveHookDuration("pre_lease", pool.GetName(), pool.GetNamespace(), time.Since(start))
 	return nil
 }
 

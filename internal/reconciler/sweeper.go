@@ -183,9 +183,17 @@ func (s *Sweeper) warnExpiringSoon(ctx context.Context, l *poolmgrv1alpha1.Lease
 // EnsureVMDeleted fails, the VM is left DELETING for retryPendingDeletions
 // to finish on a later tick.
 func (s *Sweeper) beginExpiry(ctx context.Context, l *poolmgrv1alpha1.LeaseRecord, now time.Time) {
-	if _, err := s.store.DeleteLeaseIfExpired(ctx, l.GetLeaseId(), now); err != nil {
+	expiredLease, err := s.store.DeleteLeaseIfExpired(ctx, l.GetLeaseId(), now)
+	if err != nil {
 		return // ErrNotFound, ErrLeaseNotExpired, or a transient store error: safe to skip/retry later
 	}
+	// The lease durably ends here, regardless of how long the VM's actual
+	// flintlock deletion below takes (it may need retryPendingDeletions to
+	// finish it on a later tick): record the release/duration now rather
+	// than in FinishVMDeletion, whose own lease lookup would already find
+	// this row gone.
+	s.metrics.RecordVMRelease(expiredLease.GetPoolName(), expiredLease.GetPoolNamespace(), "expiry")
+	s.metrics.ObserveLeaseDuration(expiredLease.GetPoolName(), expiredLease.GetPoolNamespace(), now.Sub(expiredLease.GetClaimedAt().AsTime()))
 
 	vm, err := s.store.GetVM(ctx, l.GetVmUid())
 	if err != nil {

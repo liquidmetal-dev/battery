@@ -50,4 +50,5 @@ func TestServerOptions_RecordsGRPCMetrics(t *testing.T) {
 
 	body := scrape(t, reg)
 	assertContains(t, body, `grpc_server_handled_total{grpc_code="OK",grpc_method="Check",grpc_service="grpc.health.v1.Health",grpc_type="unary"} 1`)
+	assertContains(t, body, `grpc_server_handling_seconds_count{grpc_method="Check",grpc_service="grpc.health.v1.Health",grpc_type="unary"} 1`)
 }
