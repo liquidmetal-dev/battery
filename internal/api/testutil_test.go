@@ -80,8 +80,9 @@ func sampleAvailableVM(uid, poolName string) *poolmgrv1alpha1.VMRecord {
 type fakeMicroVM struct {
 	microvmv1alpha1.UnimplementedMicroVMServer
 
-	mu      sync.Mutex
-	deleted []string
+	mu        sync.Mutex
+	deleted   []string
+	deleteErr error // if set, DeleteMicroVM returns this instead of succeeding
 }
 
 func (f *fakeMicroVM) GetMicroVM(_ context.Context, _ *microvmv1alpha1.GetMicroVMRequest) (*microvmv1alpha1.GetMicroVMResponse, error) {
@@ -99,8 +100,12 @@ func (f *fakeMicroVM) GetMicroVM(_ context.Context, _ *microvmv1alpha1.GetMicroV
 
 func (f *fakeMicroVM) DeleteMicroVM(_ context.Context, req *microvmv1alpha1.DeleteMicroVMRequest) (*emptypb.Empty, error) {
 	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.deleteErr != nil {
+		return nil, f.deleteErr
+	}
 	f.deleted = append(f.deleted, req.GetUid())
-	f.mu.Unlock()
 	return &emptypb.Empty{}, nil
 }
 

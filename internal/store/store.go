@@ -19,6 +19,10 @@ var ErrNotFound = errors.New("store: not found")
 // is currently in the AVAILABLE phase.
 var ErrNoAvailableVM = errors.New("store: no available vm in pool")
 
+// ErrLeaseNotExpired is returned by DeleteLeaseIfExpired when the lease's
+// expiry was extended (by a Heartbeat) since the caller last observed it.
+var ErrLeaseNotExpired = errors.New("store: lease not expired")
+
 // Store is the repository interface for pool manager persistence.
 type Store interface {
 	CreatePool(ctx context.Context, p *poolmgrv1alpha1.PoolSpec) error
@@ -44,9 +48,19 @@ type Store interface {
 	UpdateLeaseHeartbeat(ctx context.Context, leaseID string, at time.Time, expiresAt time.Time) error
 	DeleteLease(ctx context.Context, leaseID string) error
 	ListExpiredLeases(ctx context.Context, now time.Time) ([]*poolmgrv1alpha1.LeaseRecord, error)
+	// DeleteLeaseIfExpired re-checks leaseID's expiry against now and, only if still expired,
+	// deletes the lease row and returns the record as it was just before deletion. Returns
+	// ErrLeaseNotExpired if a heartbeat renewed the lease's expiry since the caller last observed
+	// it (the caller should treat the lease as alive and skip it), or ErrNotFound if no such
+	// lease exists. Used to atomically "claim" an expired lease for deletion without racing a
+	// concurrent Heartbeat call.
+	DeleteLeaseIfExpired(ctx context.Context, leaseID string, now time.Time) (*poolmgrv1alpha1.LeaseRecord, error)
 
 	AppendEvent(ctx context.Context, e *poolmgrv1alpha1.Event) error
 	ListEventsSince(ctx context.Context, poolName, poolNamespace string, sinceID int64) ([]*poolmgrv1alpha1.Event, error)
+
+	// ListVMsByPhase returns all VMs (across all pools) currently in phase.
+	ListVMsByPhase(ctx context.Context, phase poolmgrv1alpha1.VMPhase) ([]*poolmgrv1alpha1.VMRecord, error)
 
 	Close() error
 }

@@ -222,6 +222,29 @@ func (s *sqliteStore) ListVMsByPool(ctx context.Context, poolName, poolNamespace
 	return vms, nil
 }
 
+func (s *sqliteStore) ListVMsByPhase(ctx context.Context, phase poolmgrv1alpha1.VMPhase) ([]*poolmgrv1alpha1.VMRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT uid, pool_name, pool_namespace, flintlock_host, phase, lease_id, created_at, updated_at
+		FROM vms WHERE phase = ? ORDER BY uid`, int32(phase))
+	if err != nil {
+		return nil, fmt.Errorf("store: query vms by phase: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var vms []*poolmgrv1alpha1.VMRecord
+	for rows.Next() {
+		var row vmRow
+		if err := rows.Scan(&row.uid, &row.poolName, &row.poolNamespace, &row.flintlockHost, &row.phase, &row.leaseID, &row.createdAt, &row.updatedAt); err != nil {
+			return nil, fmt.Errorf("store: scan vm: %w", err)
+		}
+		vms = append(vms, rowToVM(row))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate vms: %w", err)
+	}
+	return vms, nil
+}
+
 func (s *sqliteStore) UpdateVM(ctx context.Context, v *poolmgrv1alpha1.VMRecord) error {
 	row, err := vmToRow(v)
 	if err != nil {
@@ -374,6 +397,49 @@ func (s *sqliteStore) ListExpiredLeases(ctx context.Context, now time.Time) ([]*
 		return nil, fmt.Errorf("store: iterate leases: %w", err)
 	}
 	return leases, nil
+}
+
+func (s *sqliteStore) DeleteLeaseIfExpired(ctx context.Context, leaseID string, now time.Time) (*poolmgrv1alpha1.LeaseRecord, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("store: begin claim tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var row leaseRow
+	err = tx.QueryRowContext(ctx, `
+		SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at
+		FROM leases WHERE lease_id = ?`, leaseID,
+	).Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: select lease: %w", err)
+	}
+	if row.expiresAt > now.UnixNano() {
+		return nil, ErrLeaseNotExpired
+	}
+
+	// Guard the DELETE with "AND expires_at <= ?" and check rows affected, rather than trusting
+	// the SELECT above: if a Heartbeat renewed this lease between the SELECT and here, this
+	// DELETE must not remove it.
+	res, err := tx.ExecContext(ctx, `DELETE FROM leases WHERE lease_id = ? AND expires_at <= ?`, leaseID, now.UnixNano())
+	if err != nil {
+		return nil, fmt.Errorf("store: delete expired lease: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("store: delete expired lease rows affected: %w", err)
+	}
+	if n == 0 {
+		return nil, ErrLeaseNotExpired
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: commit claim tx: %w", err)
+	}
+	return rowToLease(row), nil
 }
 
 func (s *sqliteStore) AppendEvent(ctx context.Context, e *poolmgrv1alpha1.Event) error {

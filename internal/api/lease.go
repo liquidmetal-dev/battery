@@ -107,7 +107,7 @@ func (s *LeaseServer) ClaimVM(ctx context.Context, req *poolmgrv1alpha1.ClaimVMR
 	vm.LeaseId = &leaseID
 	vm.UpdatedAt = timestamppb.New(now)
 	if err := s.store.UpdateVM(ctx, vm); err != nil {
-		reconciler.ApplyHookFailurePolicy(ctx, s.store, s.flint, pool, vm)
+		s.applyHookFailurePolicy(ctx, pool, vm)
 		return nil, status.Errorf(codes.Internal, "update vm to leased: %v", err)
 	}
 
@@ -121,7 +121,7 @@ func (s *LeaseServer) ClaimVM(ctx context.Context, req *poolmgrv1alpha1.ClaimVMR
 		ExpiresAt:       timestamppb.New(expiresAt),
 	}
 	if err := s.store.CreateLease(ctx, lease); err != nil {
-		reconciler.ApplyHookFailurePolicy(ctx, s.store, s.flint, pool, vm)
+		s.applyHookFailurePolicy(ctx, pool, vm)
 		return nil, status.Errorf(codes.Internal, "create lease: %v", err)
 	}
 
@@ -154,28 +154,39 @@ func (s *LeaseServer) runPreLeaseHooks(ctx context.Context, pool *poolmgrv1alpha
 	vm.Phase = poolmgrv1alpha1.VMPhase_PRE_LEASE_HOOK_RUNNING
 	vm.UpdatedAt = timestamppb.Now()
 	if err := s.store.UpdateVM(ctx, vm); err != nil {
-		reconciler.ApplyHookFailurePolicy(ctx, s.store, s.flint, pool, vm)
+		s.applyHookFailurePolicy(ctx, pool, vm)
 		return fmt.Errorf("update vm phase: %w", err)
 	}
 
 	execClient, err := s.flint.ExecClient(vm.GetFlintlockHost())
 	if err != nil {
-		reconciler.ApplyHookFailurePolicy(ctx, s.store, s.flint, pool, vm)
+		s.applyHookFailurePolicy(ctx, pool, vm)
 		return fmt.Errorf("exec client: %w", err)
 	}
 
 	for _, cmd := range pool.GetPreLeaseCommands() {
 		result, err := flintlockclient.Exec(ctx, execClient, vm.GetUid(), cmd, flintlockclient.ExecOptions{TimeoutSeconds: s.cfg.ExecTimeoutSeconds})
 		if err != nil {
-			reconciler.ApplyHookFailurePolicy(ctx, s.store, s.flint, pool, vm)
+			s.applyHookFailurePolicy(ctx, pool, vm)
 			return fmt.Errorf("exec %q: %w", cmd, err)
 		}
 		if result.ExitCode != 0 {
-			reconciler.ApplyHookFailurePolicy(ctx, s.store, s.flint, pool, vm)
+			s.applyHookFailurePolicy(ctx, pool, vm)
 			return fmt.Errorf("exec %q: exit code %d", cmd, result.ExitCode)
 		}
 	}
 	return nil
+}
+
+// applyHookFailurePolicy applies pool.HookFailurePolicy to vm (quarantine or
+// delete) and, if the policy actually deleted the VM, notifies so
+// REPLACE_ON_DELETE pools can replenish - reconciler.ApplyHookFailurePolicy
+// itself has no notifier, so this wraps it for every ClaimVM call site.
+func (s *LeaseServer) applyHookFailurePolicy(ctx context.Context, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord) {
+	reconciler.ApplyHookFailurePolicy(ctx, s.store, s.flint, pool, vm)
+	if pool.GetHookFailurePolicy() != poolmgrv1alpha1.HookFailurePolicy_QUARANTINE {
+		s.notifier.NotifyVMDeleted(pool.GetName(), pool.GetNamespace())
+	}
 }
 
 // Heartbeat extends leaseID's expiry by the lease's pool's
@@ -209,7 +220,11 @@ func (s *LeaseServer) Heartbeat(ctx context.Context, req *poolmgrv1alpha1.Heartb
 }
 
 // ReleaseVM ends leaseID's lease: the VM is deleted via flintlock and the
-// lease/VM rows are removed.
+// lease/VM rows are removed. If flintlock doesn't confirm the deletion (the
+// host is unreachable, etc.), the VM is left DELETING and this returns
+// Unavailable rather than reporting success or dropping the lease row - the
+// Sweeper's pending-deletion retry (or a client retry of ReleaseVM) finishes
+// the job once flintlock is reachable again.
 func (s *LeaseServer) ReleaseVM(ctx context.Context, req *poolmgrv1alpha1.ReleaseVMRequest) (*emptypb.Empty, error) {
 	lease, err := s.store.GetLease(ctx, req.GetLeaseId())
 	if errors.Is(err, store.ErrNotFound) {
@@ -225,21 +240,19 @@ func (s *LeaseServer) ReleaseVM(ctx context.Context, req *poolmgrv1alpha1.Releas
 	}
 
 	if vm != nil {
-		// Best-effort: proceed with cleanup even if flintlock can't be
-		// reached, so lease/store state is never left dangling just because
-		// a host is unreachable. May leave an orphaned microvm on that host
-		// for operator follow-up.
-		if client, cerr := s.flint.Client(vm.GetFlintlockHost()); cerr == nil {
-			_, _ = client.DeleteMicroVM(ctx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: vm.GetUid()})
+		if err := reconciler.EnsureVMDeleted(ctx, s.store, s.flint, vm); err != nil {
+			return nil, status.Errorf(codes.Unavailable, "vm cleanup pending, retry later: %v", err)
 		}
-		if err := s.store.DeleteVM(ctx, vm.GetUid()); err != nil && !errors.Is(err, store.ErrNotFound) {
-			return nil, status.Errorf(codes.Internal, "delete vm: %v", err)
+		pool, perr := s.store.GetPool(ctx, lease.GetPoolName(), lease.GetPoolNamespace())
+		if perr != nil {
+			return nil, status.Errorf(codes.Internal, "get pool: %v", perr)
 		}
-		if pool, perr := s.store.GetPool(ctx, lease.GetPoolName(), lease.GetPoolNamespace()); perr == nil {
-			reconciler.EmitEvent(ctx, s.store, pool, vm.GetUid(), poolmgrv1alpha1.EventType_VM_DELETED_ON_RELEASE)
-		}
+		reconciler.FinishVMDeletion(ctx, s.store, pool, vm, s.notifier)
+		return &emptypb.Empty{}, nil
 	}
 
+	// VM record already gone (a previous attempt already finished the
+	// deletion): just make sure the lease row is gone too, for idempotency.
 	if err := s.store.DeleteLease(ctx, req.GetLeaseId()); err != nil && !errors.Is(err, store.ErrNotFound) {
 		return nil, status.Errorf(codes.Internal, "delete lease: %v", err)
 	}

@@ -245,6 +245,7 @@ func ApplyHookFailurePolicy(ctx context.Context, st store.Store, flint *flintloc
 	switch pool.GetHookFailurePolicy() {
 	case poolmgrv1alpha1.HookFailurePolicy_QUARANTINE:
 		vm.Phase = poolmgrv1alpha1.VMPhase_QUARANTINED
+		vm.LeaseId = nil // no lease exists for a hook failure; don't leave a dangling reference
 		vm.UpdatedAt = timestamppb.Now()
 		_ = st.UpdateVM(ctx, vm)
 	default: // DELETE_AND_REPLACE, and the unspecified zero value: fail safe by deleting.
@@ -267,4 +268,63 @@ func EmitEvent(ctx context.Context, st store.Store, pool *poolmgrv1alpha1.PoolSp
 		Type:          t,
 		CreatedAt:     timestamppb.Now(),
 	})
+}
+
+// DeletionNotifier lets EnsureVMDeleted/FinishVMDeletion callers nudge
+// whichever component owns a pool's Reconciler after a VM is fully deleted,
+// so REPLACE_ON_DELETE pools can replenish.
+type DeletionNotifier interface {
+	NotifyVMDeleted(poolName, poolNamespace string)
+}
+
+// EnsureVMDeleted marks vm DELETING (durably, if it isn't already) and
+// attempts to delete it via flintlock. Success, or flintlock reporting
+// NotFound (already gone), removes vm's store row and returns nil. Any
+// other flintlock/host error leaves vm in the DELETING phase for a later
+// retry (e.g. Sweeper's pending-deletion scan) and returns that error.
+func EnsureVMDeleted(ctx context.Context, st store.Store, flint *flintlockclient.Pool, vm *poolmgrv1alpha1.VMRecord) error {
+	if vm.GetPhase() != poolmgrv1alpha1.VMPhase_DELETING {
+		vm.Phase = poolmgrv1alpha1.VMPhase_DELETING
+		vm.UpdatedAt = timestamppb.Now()
+		if err := st.UpdateVM(ctx, vm); err != nil {
+			return fmt.Errorf("reconciler: mark vm deleting: %w", err)
+		}
+	}
+
+	client, err := flint.Client(vm.GetFlintlockHost())
+	if err != nil {
+		return fmt.Errorf("reconciler: ensure vm deleted: %w", err)
+	}
+	if _, err := client.DeleteMicroVM(ctx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: vm.GetUid()}); err != nil && status.Code(err) != codes.NotFound {
+		return fmt.Errorf("reconciler: DeleteMicroVM: %w", err)
+	}
+
+	if err := st.DeleteVM(ctx, vm.GetUid()); err != nil {
+		return fmt.Errorf("reconciler: delete vm record: %w", err)
+	}
+	return nil
+}
+
+// FinishVMDeletion completes the bookkeeping after EnsureVMDeleted has
+// succeeded for vm: it deletes any lease row still referencing vm (a
+// release whose flintlock call initially failed keeps its lease row in
+// place until deletion is confirmed), emits the appropriate VM_DELETED_*
+// event, and notifies notifier (nil-safe). The event type is inferred from
+// durable state rather than tracked separately: an expiry-triggered
+// deletion has already deleted its lease row up front (via
+// store.DeleteLeaseIfExpired) by the time this runs, while a
+// release-triggered one keeps its lease row until here - so a lease row
+// still being present for vm.GetLeaseId() means this was a release.
+func FinishVMDeletion(ctx context.Context, st store.Store, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord, notifier DeletionNotifier) {
+	eventType := poolmgrv1alpha1.EventType_VM_DELETED_DUE_TO_EXPIRY
+	if leaseID := vm.GetLeaseId(); leaseID != "" {
+		if _, err := st.GetLease(ctx, leaseID); err == nil {
+			eventType = poolmgrv1alpha1.EventType_VM_DELETED_ON_RELEASE
+			_ = st.DeleteLease(ctx, leaseID)
+		}
+	}
+	EmitEvent(ctx, st, pool, vm.GetUid(), eventType)
+	if notifier != nil {
+		notifier.NotifyVMDeleted(pool.GetName(), pool.GetNamespace())
+	}
 }

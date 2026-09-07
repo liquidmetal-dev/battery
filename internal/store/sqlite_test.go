@@ -332,6 +332,29 @@ func TestListVMsByPoolNamespaceIsolation(t *testing.T) {
 	}
 }
 
+func TestListVMsByPhase(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup error = %v", err)
+		}
+	}
+	must(s.CreateVM(ctx, sampleVMRecord("vm-1", "pool-a", "default", poolmgrv1alpha1.VMPhase_DELETING)))
+	must(s.CreateVM(ctx, sampleVMRecord("vm-2", "pool-b", "default", poolmgrv1alpha1.VMPhase_DELETING)))
+	must(s.CreateVM(ctx, sampleVMRecord("vm-3", "pool-a", "default", poolmgrv1alpha1.VMPhase_AVAILABLE)))
+
+	got, err := s.ListVMsByPhase(ctx, poolmgrv1alpha1.VMPhase_DELETING)
+	if err != nil {
+		t.Fatalf("ListVMsByPhase() error = %v", err)
+	}
+	if len(got) != 2 || got[0].Uid != "vm-1" || got[1].Uid != "vm-2" {
+		t.Fatalf("ListVMsByPhase(DELETING) = %+v, want [vm-1, vm-2]", got)
+	}
+}
+
 func TestUpdateVM(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -674,6 +697,73 @@ func TestListExpiredLeases(t *testing.T) {
 	}
 	if len(expired) != 1 || expired[0].LeaseId != "lease-expired" {
 		t.Fatalf("ListExpiredLeases() = %+v, want [lease-expired]", expired)
+	}
+}
+
+func TestDeleteLeaseIfExpired_Success(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	now := time.Unix(1_750_000_000, 0)
+	l := sampleLeaseRecord("lease-1", "vm-1", "pool-a", "default", now.Add(-time.Second))
+	if err := s.CreateLease(ctx, l); err != nil {
+		t.Fatalf("CreateLease() error = %v", err)
+	}
+
+	got, err := s.DeleteLeaseIfExpired(ctx, "lease-1", now)
+	if err != nil {
+		t.Fatalf("DeleteLeaseIfExpired() error = %v", err)
+	}
+	if got.GetLeaseId() != "lease-1" {
+		t.Fatalf("DeleteLeaseIfExpired() returned %+v, want lease-1", got)
+	}
+	if _, err := s.GetLease(ctx, "lease-1"); err != ErrNotFound {
+		t.Errorf("GetLease() after DeleteLeaseIfExpired error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestDeleteLeaseIfExpired_NotFound(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.DeleteLeaseIfExpired(ctx, "missing", time.Now()); err != ErrNotFound {
+		t.Errorf("DeleteLeaseIfExpired() error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestDeleteLeaseIfExpired_RenewedSinceObserved is the deterministic
+// interleaving test for the TOCTOU race between a sweeper reading an
+// expired lease from ListExpiredLeases and a concurrent Heartbeat renewing
+// it before the sweeper acts: the renewal is simulated by calling
+// UpdateLeaseHeartbeat between the lease becoming "expired as of now" and
+// the DeleteLeaseIfExpired call that would otherwise delete it.
+func TestDeleteLeaseIfExpired_RenewedSinceObserved(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	now := time.Unix(1_750_000_000, 0)
+	l := sampleLeaseRecord("lease-1", "vm-1", "pool-a", "default", now.Add(-time.Second))
+	if err := s.CreateLease(ctx, l); err != nil {
+		t.Fatalf("CreateLease() error = %v", err)
+	}
+
+	// Simulate a Heartbeat landing after the sweeper observed the lease as
+	// expired (via ListExpiredLeases) but before it claims it for deletion.
+	renewedExpiry := now.Add(time.Hour)
+	if err := s.UpdateLeaseHeartbeat(ctx, "lease-1", now, renewedExpiry); err != nil {
+		t.Fatalf("UpdateLeaseHeartbeat() error = %v", err)
+	}
+
+	if _, err := s.DeleteLeaseIfExpired(ctx, "lease-1", now); err != ErrLeaseNotExpired {
+		t.Fatalf("DeleteLeaseIfExpired() error = %v, want ErrLeaseNotExpired", err)
+	}
+
+	got, err := s.GetLease(ctx, "lease-1")
+	if err != nil {
+		t.Fatalf("GetLease() after renewed DeleteLeaseIfExpired error = %v", err)
+	}
+	if !got.GetExpiresAt().AsTime().Equal(renewedExpiry) {
+		t.Fatalf("GetLease() expires_at = %v, want %v (renewal must survive)", got.GetExpiresAt().AsTime(), renewedExpiry)
 	}
 }
 
