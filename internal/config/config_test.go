@@ -198,6 +198,61 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+func TestValidate_SweepIntervalAndWarningWindow(t *testing.T) {
+	validHosts := []config.HostConfig{
+		{Name: "a", Address: "127.0.0.1:1", TLS: config.TLSConfig{Insecure: true}},
+	}
+
+	tests := []struct {
+		name          string
+		sweepInterval string
+		warningWindow string
+		wantErr       bool
+	}{
+		{name: "both empty uses defaults", wantErr: false},
+		{name: "valid durations", sweepInterval: "10s", warningWindow: "30s", wantErr: false},
+		{name: "invalid sweep_interval", sweepInterval: "not-a-duration", wantErr: true},
+		{name: "invalid warning_window", warningWindow: "not-a-duration", wantErr: true},
+		{name: "zero sweep_interval is invalid", sweepInterval: "0s", wantErr: true},
+		{name: "negative warning_window is invalid", warningWindow: "-5s", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{
+				Hosts:         validHosts,
+				SweepInterval: tt.sweepInterval,
+				WarningWindow: tt.warningWindow,
+			}
+			err := cfg.Validate()
+			if tt.wantErr && err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoad_SweepIntervalAndWarningWindow(t *testing.T) {
+	path := writeConfigFile(t, `{
+		"hosts": [
+			{"name": "host-a", "address": "10.0.0.1:9090", "tls": {"insecure": true}}
+		],
+		"sweep_interval": "15s",
+		"warning_window": "45s"
+	}`)
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.SweepInterval != "15s" || cfg.WarningWindow != "45s" {
+		t.Fatalf("unexpected sweep config: sweep_interval=%q warning_window=%q", cfg.SweepInterval, cfg.WarningWindow)
+	}
+}
+
 func TestLoad_InvalidConfigFailsValidation(t *testing.T) {
 	path := writeConfigFile(t, `{"hosts": []}`)
 	_, err := config.Load(path)

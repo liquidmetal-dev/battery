@@ -24,6 +24,7 @@ import (
 	"github.com/liquidmetal-dev/battery/internal/flintlockclient"
 	"github.com/liquidmetal-dev/battery/internal/metrics"
 	"github.com/liquidmetal-dev/battery/internal/poolmanager"
+	"github.com/liquidmetal-dev/battery/internal/reconciler"
 	"github.com/liquidmetal-dev/battery/internal/server"
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
@@ -74,14 +75,22 @@ func main() {
 		log.Fatalf("poolmgrd: %v", err)
 	}
 
-	errCh := make(chan error, 3)
-	pending := 2
+	// cfg.Validate (via config.Load) already guarantees these parse cleanly.
+	sweepInterval, _ := time.ParseDuration(cfg.SweepInterval)
+	warningWindow, _ := time.ParseDuration(cfg.WarningWindow)
+	sweeper := reconciler.NewSweeper(st, flint, sweepInterval, warningWindow, poolMgr, reg)
+
+	errCh := make(chan error, 4)
+	pending := 3
 
 	go func() {
 		errCh <- serveMetrics(runCtx, cfg.MetricsAddr, reg)
 	}()
 	go func() {
 		errCh <- poolMgr.Run()
+	}()
+	go func() {
+		errCh <- sweeper.Run(runCtx)
 	}()
 
 	if cfg.APIServer != nil {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"path/filepath"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"github.com/liquidmetal-dev/battery/internal/config"
 	"github.com/liquidmetal-dev/battery/internal/metrics"
 	"github.com/liquidmetal-dev/battery/internal/poolmanager"
+	"github.com/liquidmetal-dev/battery/internal/reconciler"
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
 
@@ -169,6 +171,32 @@ func TestServeGRPC_ShutsDownWithActiveStream(t *testing.T) {
 	case <-done:
 	case <-time.After(grpcShutdownTimeout + 2*time.Second):
 		t.Fatalf("serveGRPC did not return within grpcShutdownTimeout of an active stream blocking GracefulStop")
+	}
+}
+
+// TestSweeperRun_ShutsDownOnContextCancel exercises the Sweeper.Run contract
+// exactly as main() relies on it: run in a goroutine reporting into an
+// errCh, cancel runCtx, and confirm it returns promptly with
+// context.Canceled so the drain loop in main() treats it as a clean exit.
+func TestSweeperRun_ShutsDownOnContextCancel(t *testing.T) {
+	st := openTestStore(t)
+	reg := metrics.NewRegistry()
+	poolMgr := newTestPoolManager(t, st)
+	sweeper := reconciler.NewSweeper(st, nil, time.Millisecond, 0, poolMgr, reg)
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- sweeper.Run(runCtx) }()
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("sweeper.Run did not return promptly after context cancellation")
 	}
 }
 
