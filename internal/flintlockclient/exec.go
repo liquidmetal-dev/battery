@@ -50,6 +50,9 @@ type ExecOptions struct {
 // error only for a transport/RPC failure, or for a server-sent Error
 // message (wrapped as ErrExecFailed).
 func Exec(ctx context.Context, client microvmexecv1alpha1.MicroVMExecClient, uid, cmd string, opts ExecOptions) (*ExecResult, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	stream, err := client.ExecCommand(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("flintlockclient: exec %s: open stream: %w", uid, err)
@@ -114,10 +117,15 @@ func Exec(ctx context.Context, client microvmexecv1alpha1.MicroVMExecClient, uid
 // including ErrExecFailed: a permanently-broken VM will spin until ctx's
 // deadline rather than fail fast. Callers must bound ctx sensibly.
 //
-// Each probe attempt gets its own sub-timeout (capped at 5s) derived from
-// ctx, so a single hung attempt can't consume the whole deadline without
-// any retries happening.
+// Each probe attempt gets its own sub-timeout, derived from interval
+// (capped at 5s) and bounded by ctx via context.WithTimeout, so a single
+// hung attempt can't consume the whole deadline without any retries
+// happening.
 func WaitReady(ctx context.Context, client microvmexecv1alpha1.MicroVMExecClient, uid string, interval time.Duration) error {
+	if interval <= 0 {
+		return fmt.Errorf("flintlockclient: WaitReady %s: interval must be positive, got %s", uid, interval)
+	}
+
 	probeTimeout := interval
 	if probeTimeout > maxProbeTimeout {
 		probeTimeout = maxProbeTimeout

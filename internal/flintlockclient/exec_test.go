@@ -74,6 +74,7 @@ func startFakeExecServer(t *testing.T, fake *fakeMicroVMExecServer) string {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	t.Cleanup(func() { _ = lis.Close() })
 
 	srv := grpc.NewServer()
 	microvmexecv1alpha1.RegisterMicroVMExecServer(srv, fake)
@@ -226,6 +227,23 @@ func TestWaitReady_DeadlineExceeded(t *testing.T) {
 	}
 	if elapsed > 2*time.Second {
 		t.Fatalf("WaitReady took too long to give up: %v", elapsed)
+	}
+}
+
+func TestWaitReady_InvalidInterval(t *testing.T) {
+	fake := &fakeMicroVMExecServer{
+		respond: func(_ *microvmexecv1alpha1.ExecStart) ([]byte, []byte, int32, string, error) {
+			t.Fatalf("exec should not be attempted with a non-positive interval")
+			return nil, nil, 0, "", nil
+		},
+	}
+	addr := startFakeExecServer(t, fake)
+	client := dialExecClient(t, addr)
+
+	for _, interval := range []time.Duration{0, -1 * time.Second} {
+		if err := flintlockclient.WaitReady(context.Background(), client, "vm-1", interval); err == nil {
+			t.Fatalf("expected error for interval %v, got nil", interval)
+		}
 	}
 }
 
