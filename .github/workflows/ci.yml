@@ -62,9 +62,12 @@ jobs:
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
       - run: buf lint
       # First run after this lands must publish an initial BSR version
-      # (cut a release tag, or `buf push` manually) before this step has
-      # anything to compare against.
-      - run: buf breaking --against 'buf.build/liquidmetal-dev/battery'
+      # (cut a release tag, or `buf push --create` manually) before this
+      # step has anything to compare against. continue-on-error keeps CI
+      # green until then — remove it once the module has its first push.
+      - name: buf breaking
+        run: buf breaking --against 'buf.build/liquidmetal-dev/battery'
+        continue-on-error: true
       - run: ./hack/generate-proto.sh
       - run: git diff --exit-code -- api/proto
 
@@ -83,5 +86,5 @@ jobs:
       - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser
-          version: "~> v2"
+          version: "2.18.0"
           args: release --snapshot --clean

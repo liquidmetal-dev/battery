@@ -58,6 +58,7 @@ docker_manifests:
       - "ghcr.io/liquidmetal-dev/poolmgrd:{{ .Version }}-amd64"
       - "ghcr.io/liquidmetal-dev/poolmgrd:{{ .Version }}-arm64"
   - name_template: "ghcr.io/liquidmetal-dev/poolmgrd:latest"
+    skip_push: auto
     image_templates:
       - "ghcr.io/liquidmetal-dev/poolmgrd:{{ .Version }}-amd64"
       - "ghcr.io/liquidmetal-dev/poolmgrd:{{ .Version }}-arm64"
