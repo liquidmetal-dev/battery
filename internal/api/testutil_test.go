@@ -61,6 +61,17 @@ func samplePool(name string, hookFailurePolicy poolmgrv1alpha1.HookFailurePolicy
 	}
 }
 
+// sampleEvent returns a minimal outbox Event for poolName/poolNamespace/vmUID.
+func sampleEvent(poolName, poolNamespace, vmUID string, eventType poolmgrv1alpha1.EventType) *poolmgrv1alpha1.Event {
+	return &poolmgrv1alpha1.Event{
+		PoolName:      poolName,
+		PoolNamespace: poolNamespace,
+		VmUid:         vmUID,
+		Type:          eventType,
+		CreatedAt:     timestamppb.Now(),
+	}
+}
+
 // sampleAvailableVM returns a minimal AVAILABLE VMRecord for poolName on
 // host-a.
 func sampleAvailableVM(uid, poolName string) *poolmgrv1alpha1.VMRecord {

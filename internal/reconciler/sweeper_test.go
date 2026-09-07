@@ -77,7 +77,7 @@ func TestSweeper_ExpiresLeaseWithNoHeartbeat(t *testing.T) {
 		t.Fatalf("expected DeleteMicroVM(vm-1) to be called once, got %v", got)
 	}
 
-	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0)
+	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
 	if err != nil {
 		t.Fatalf("ListEventsSince: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestSweeper_WarnsOnceUntilHeartbeatResets(t *testing.T) {
 	sweeper.Tick(ctx, now.Add(time.Second))
 	sweeper.Tick(ctx, now.Add(2*time.Second))
 
-	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0)
+	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
 	if err != nil {
 		t.Fatalf("ListEventsSince: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestSweeper_WarnsOnceUntilHeartbeatResets(t *testing.T) {
 	}
 	sweeper.Tick(ctx, now.Add(3*time.Second))
 
-	events, err = st.ListEventsSince(ctx, "pool-a", "default", 0)
+	events, err = st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
 	if err != nil {
 		t.Fatalf("ListEventsSince: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestSweeper_SkipsVMAlreadyReleased(t *testing.T) {
 	if len(vm.deletedUIDs()) != 0 {
 		t.Fatalf("expected no DeleteMicroVM calls for a VM that's already gone, got %v", vm.deletedUIDs())
 	}
-	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0)
+	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
 	if err != nil {
 		t.Fatalf("ListEventsSince: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestSweeper_RetriesPendingDeletionAcrossTicks(t *testing.T) {
 	if _, err := st.GetLease(ctx, "lease-1"); err == nil {
 		t.Fatalf("expected the lease row to already be gone (claimed before the flintlock attempt)")
 	}
-	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0)
+	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
 	if err != nil {
 		t.Fatalf("ListEventsSince: %v", err)
 	}
@@ -300,7 +300,7 @@ func TestSweeper_RetriesPendingDeletionAcrossTicks(t *testing.T) {
 	if _, err := st.GetVM(ctx, "vm-1"); err == nil {
 		t.Fatalf("expected VM record to be deleted after the retry succeeds")
 	}
-	events, err = st.ListEventsSince(ctx, "pool-a", "default", 0)
+	events, err = st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
 	if err != nil {
 		t.Fatalf("ListEventsSince: %v", err)
 	}

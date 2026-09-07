@@ -57,7 +57,13 @@ type Store interface {
 	DeleteLeaseIfExpired(ctx context.Context, leaseID string, now time.Time) (*poolmgrv1alpha1.LeaseRecord, error)
 
 	AppendEvent(ctx context.Context, e *poolmgrv1alpha1.Event) error
-	ListEventsSince(ctx context.Context, poolName, poolNamespace string, sinceID int64) ([]*poolmgrv1alpha1.Event, error)
+	// ListEventsSince returns up to limit events for (poolName, poolNamespace) with id >
+	// sinceID, ordered by id. Callers paging through a large outbox should re-call with
+	// sinceID advanced to the last returned event's id until fewer than limit rows come back.
+	ListEventsSince(ctx context.Context, poolName, poolNamespace string, sinceID int64, limit int) ([]*poolmgrv1alpha1.Event, error)
+	// ListAllEventsSince returns up to limit events for every pool with id > sinceID, ordered
+	// by id, for subscribers with no pool filter. See ListEventsSince re: paging.
+	ListAllEventsSince(ctx context.Context, sinceID int64, limit int) ([]*poolmgrv1alpha1.Event, error)
 
 	// ListVMsByPhase returns all VMs (across all pools) currently in phase.
 	ListVMsByPhase(ctx context.Context, phase poolmgrv1alpha1.VMPhase) ([]*poolmgrv1alpha1.VMRecord, error)

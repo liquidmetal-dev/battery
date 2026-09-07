@@ -89,7 +89,7 @@ func TestFinishVMDeletion_InfersExpiry(t *testing.T) {
 	notifier := &spyNotifier{}
 	reconciler.FinishVMDeletion(ctx, st, pool, vm, notifier)
 
-	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0)
+	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
 	if err != nil {
 		t.Fatalf("ListEventsSince: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestFinishVMDeletion_InfersRelease(t *testing.T) {
 	if _, err := st.GetLease(ctx, "lease-1"); err != store.ErrNotFound {
 		t.Fatalf("expected lease to be deleted, GetLease error = %v", err)
 	}
-	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0)
+	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
 	if err != nil {
 		t.Fatalf("ListEventsSince: %v", err)
 	}
