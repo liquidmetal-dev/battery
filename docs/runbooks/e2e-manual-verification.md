@@ -13,13 +13,22 @@ the `poolmgr-hostagent`/vsock-connect path (see [#29](https://github.com/liquidm
 ## Status of this runbook
 
 - **Runnable today**: flintlockd's `MicroVMExec`/`MicroVMSSHProxy` (steps 2–4), `poolmgrd`'s
-  `/metrics` startup check and `PoolAdmin` CRUD (steps 5–6), and an `Events.Subscribe`
-  connectivity check (step 7).
-- **Blocked on [#40](https://github.com/liquidmetal-dev/battery/issues/40)** ("Dynamic per-pool
-  Reconciler lifecycle"): nothing starts a `Reconciler` per pool yet, so `CreatePool` never
-  provisions a VM or marks one `AVAILABLE`. `ClaimVM` therefore always fails
-  `RESOURCE_EXHAUSTED`, and `Heartbeat`/`ReleaseVM`/lease-expiry/replenishment can't be exercised
-  through the real API. Step 8 documents the commands to run once that lands.
+  `/metrics` startup check and `PoolAdmin` CRUD (steps 5–6), an `Events.Subscribe` connectivity
+  check (step 7), and the claim/heartbeat/release/replenishment flow (step 8) — now that
+  [#40](https://github.com/liquidmetal-dev/battery/issues/40) ("Dynamic per-pool Reconciler
+  lifecycle") has landed, `CreatePool` provisions VMs and `ClaimVM` succeeds once one is
+  `AVAILABLE`.
+- **Automated, in software**: `cmd/poolmgrd/e2e_test.go` (`go test -tags e2e ./... -run TestE2E
+  -v`, or the `E2E` GitHub Actions workflow) now covers this runbook's steps 5–8 end-to-end against
+  a fake flintlock — `poolmgrd`'s own CreatePool → provision → ClaimVM → Heartbeat → ReleaseVM →
+  replenishment logic, driven purely through its public gRPC API. This runbook's remaining, unique
+  role is verifying against a **real** `flintlockd`/Firecracker host: steps 1–4 (`MicroVMExec`/
+  `MicroVMSSHProxy` against a real guest OS) can't be faked, and steps 5–8 are worth re-running
+  manually whenever real-host behavior specifically is in question.
+- **Still blocked**: lease expiry (step 9). `cmd/poolmgrd/main.go` never constructs or runs
+  `reconciler.Sweeper`, so a lease left without heartbeats is never expired -
+  `VM_DELETED_DUE_TO_EXPIRY` can't be exercised through the real API yet, manually or in the new
+  automated suite.
 
 ## Prerequisites
 
@@ -287,21 +296,20 @@ grpcurl -d '{"ref": {"name": "e2e-pool", "namespace": "e2e"}}' \
 grpcurl -d '{"namespace": "e2e"}' -plaintext localhost:9091 poolmgr.v1alpha1.PoolAdmin/ListPools
 ```
 
-`GetPool`/`ListPools` should return the spec with a `status` object whose counts are all `0` —
-that's expected today (see [Status of this runbook](#status-of-this-runbook)), not a bug: nothing
-provisions VMs against a pool until #40 starts a `Reconciler` for it. Now that a pool exists, its
-`poolmgr_pool_*` gauges should also appear:
+`GetPool`/`ListPools` should return the spec with a `status` object whose counts start at `0` and,
+within a reconciler tick or two, show `available: 1` as the pool provisions up to its `min_size`.
+Now that a pool exists, its `poolmgr_pool_*` gauges should also appear:
 
 ```sh
 curl -s localhost:9092/metrics | grep '^poolmgr_pool_'
 # poolmgr_pool_size{pool_name="e2e-pool",pool_namespace="e2e"} 1
-# poolmgr_pool_available{pool_name="e2e-pool",pool_namespace="e2e"} 0
+# poolmgr_pool_available{pool_name="e2e-pool",pool_namespace="e2e"} 1
 # poolmgr_pool_leased{pool_name="e2e-pool",pool_namespace="e2e"} 0
 # poolmgr_pool_provisioning{pool_name="e2e-pool",pool_namespace="e2e"} 0
 # poolmgr_pool_quarantined{pool_name="e2e-pool",pool_namespace="e2e"} 0
 ```
 
-Leave `e2e-pool` in place — step 8 reuses it once #40 lands. (If you're not continuing to step 8
+Leave `e2e-pool` in place — step 8 reuses it. (If you're not continuing to step 8
 right now, clean it up with `DeletePool`:
 `grpcurl -d '{"ref": {"name": "e2e-pool", "namespace": "e2e"}}' -plaintext localhost:9091 poolmgr.v1alpha1.PoolAdmin/DeletePool`.)
 
@@ -317,25 +325,20 @@ In another, poke the store with a throwaway pool (using a different name so `e2e
 is left untouched — step 8 needs it):
 
 ```sh
-grpcurl -d '{"spec": {"name": "e2e-events-poke", "namespace": "e2e", "microvm_template": {"vcpu": 1, "memory_in_mb": 1024, "root_volume": {"id": "root", "is_read_only": false, "source": {"container_source": "docker.io/richardcase/ubuntu-bionic-test:cloudimage_v0.0.1"}}, "interfaces": [{"device_id": "eth1", "type": 1, "address": {"address": "192.168.100.32/32"}}]}, "size": 0, "flintlock_hosts": ["host-a"], "replenishment_strategy": {"type": "MIN_SIZE_THRESHOLD", "min_size": 0}, "hook_failure_policy": "DELETE_AND_REPLACE"}}' \
+grpcurl -d '{"spec": {"name": "e2e-events-poke", "namespace": "e2e", "microvm_template": {"vcpu": 1, "memory_in_mb": 1024, "root_volume": {"id": "root", "is_read_only": false, "source": {"container_source": "docker.io/richardcase/ubuntu-bionic-test:cloudimage_v0.0.1"}}, "interfaces": [{"device_id": "eth1", "type": 1, "address": {"address": "192.168.100.32/32"}}]}, "size": 0, "flintlock_hosts": ["host-a"], "replenishment_strategy": {"type": "MIN_SIZE_THRESHOLD", "min_size": 1}, "hook_failure_policy": "DELETE_AND_REPLACE"}}' \
   -plaintext localhost:9091 poolmgr.v1alpha1.PoolAdmin/CreatePool
 
 grpcurl -d '{"ref": {"name": "e2e-events-poke", "namespace": "e2e"}}' \
   -plaintext localhost:9091 poolmgr.v1alpha1.PoolAdmin/DeletePool
 ```
 
-Confirm the stream stays open and doesn't error. No `Event` message is expected yet: every
-`EventType` in `api/proto/poolmgr/v1alpha1/types.proto` originates from a successful
-`ClaimVM`/`ReleaseVM` or from reconciler-driven provisioning, neither of which run without #40 —
-this step only proves the subscription itself works.
+Confirm the stream stays open and doesn't error.
 
-## 8. Blocked: claim / heartbeat / release / expiry
+## 8. Claim / heartbeat / release
 
-Blocked on [#40](https://github.com/liquidmetal-dev/battery/issues/40). Once a `Reconciler` is
-started per pool and a `CreatePool` call actually provisions VMs, come back and run these against
-`e2e-pool` from step 6 — its `microvm_template` is a real, provisionable spec (unlike a token
-`{vcpu, memory_in_mb}` template, it'll actually pass flintlock's create validation and reach
-`AVAILABLE`):
+Run these against `e2e-pool` from step 6 — its `microvm_template` is a real, provisionable spec
+(unlike a token `{vcpu, memory_in_mb}` template, it'll actually pass flintlock's create validation
+and reach `AVAILABLE`):
 
 ```sh
 # Expect a real lease_id + vm_uid once a VM is AVAILABLE (RESOURCE_EXHAUSTED until then).
@@ -350,14 +353,25 @@ grpcurl -d '{"lease_id": "<lease_id>"}' \
 ```
 
 While the `Events.Subscribe` stream from step 7 is open, confirm the expected sequence appears:
-`VM_PROVISIONED → VM_AVAILABLE → VM_CLAIMED → ... → VM_DELETED_ON_RELEASE` (or
-`VM_DELETED_DUE_TO_EXPIRY` if the lease is left to expire instead of released explicitly), plus
+`VM_PROVISIONED → VM_AVAILABLE → VM_CLAIMED → VM_DELETED_ON_RELEASE`, plus
 `POOL_REPLENISHING`/`POOL_SIZE_BELOW_TARGET` around replenishment.
+
+## 9. Blocked: lease expiry
+
+Blocked: `cmd/poolmgrd/main.go` never constructs or runs `reconciler.Sweeper`, so a claimed lease
+left without heartbeats is never expired — no VM is deleted and no `VM_DELETED_DUE_TO_EXPIRY`
+event is emitted. (`internal/reconciler/sweeper.go`'s `Sweeper` exists and is unit-tested, but
+nothing in the daemon starts one yet.) This suite's `TestE2E_PoolLifecycle` only exercises explicit
+`ReleaseVM`, so it doesn't cover expiry either. Come back and exercise this once a `Sweeper` is
+wired into `poolmgrd` startup: claim a VM, don't heartbeat it, and wait past
+`heartbeat_expiry_threshold` for `VM_DELETED_DUE_TO_EXPIRY` on the `Events.Subscribe` stream from
+step 7 and the VM's replacement to appear.
 
 ## Troubleshooting
 
-- **`ClaimVM` returns `RESOURCE_EXHAUSTED`**: expected today — see
-  [#40](https://github.com/liquidmetal-dev/battery/issues/40). Not a bug until that lands.
+- **`ClaimVM` returns `RESOURCE_EXHAUSTED`**: expected until a pool has an `AVAILABLE` VM — check
+  `GetPool`/`ListPools`' `status.available` count and give the reconciler a tick to provision (see
+  step 6).
 - **`ExecCommand`/`SSHProxy` errors or hangs**: check, in order — was the VM created with
   `"allow_guest_agent": true`? Is `GetMicroVM` reporting `state: CREATED`? Was `flintlockd`
   started with `--enable-exec-api`/`--enable-ssh-proxy-api`?
