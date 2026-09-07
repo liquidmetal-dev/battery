@@ -37,7 +37,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("poolmgrd: open store: %v", err)
 	}
-	defer st.Close()
+	defer func() {
+		if err := st.Close(); err != nil {
+			log.Printf("poolmgrd: close store: %v", err)
+		}
+	}()
 
 	reg := metrics.NewRegistry()
 	reg.RegisterPoolCollector(st)
