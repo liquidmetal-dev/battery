@@ -8,6 +8,7 @@ import (
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 
 	"github.com/liquidmetal-dev/battery/internal/flintlockclient"
+	"github.com/liquidmetal-dev/battery/internal/metrics"
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
 
@@ -50,6 +51,7 @@ type Sweeper struct {
 	tickInterval  time.Duration
 	warningWindow time.Duration
 	notifier      SweeperNotifier
+	metrics       *metrics.Registry
 
 	mu sync.Mutex
 	// warned tracks, per lease ID, the expires_at (UnixNano) value we've
@@ -60,8 +62,9 @@ type Sweeper struct {
 
 // NewSweeper returns a Sweeper backed by st and flint. Zero-valued
 // tickInterval/warningWindow are replaced with the Default* constants. If
-// notifier is nil, it's a no-op.
-func NewSweeper(st store.Store, flint *flintlockclient.Pool, tickInterval, warningWindow time.Duration, notifier SweeperNotifier) *Sweeper {
+// notifier is nil, it's a no-op. If m is nil, a fresh unshared
+// metrics.Registry is used (see NewProvisioner).
+func NewSweeper(st store.Store, flint *flintlockclient.Pool, tickInterval, warningWindow time.Duration, notifier SweeperNotifier, m *metrics.Registry) *Sweeper {
 	if tickInterval <= 0 {
 		tickInterval = DefaultSweepInterval
 	}
@@ -71,12 +74,16 @@ func NewSweeper(st store.Store, flint *flintlockclient.Pool, tickInterval, warni
 	if notifier == nil {
 		notifier = noopSweeperNotifier{}
 	}
+	if m == nil {
+		m = metrics.NewRegistry()
+	}
 	return &Sweeper{
 		store:         st,
 		flint:         flint,
 		tickInterval:  tickInterval,
 		warningWindow: warningWindow,
 		notifier:      notifier,
+		metrics:       m,
 		warned:        make(map[string]int64),
 	}
 }
@@ -154,7 +161,7 @@ func (s *Sweeper) retryPendingDeletions(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		FinishVMDeletion(ctx, s.store, pool, vm, s.notifier)
+		FinishVMDeletion(ctx, s.store, pool, vm, s.notifier, s.metrics)
 	}
 }
 
@@ -199,5 +206,5 @@ func (s *Sweeper) beginExpiry(ctx context.Context, l *poolmgrv1alpha1.LeaseRecor
 	if err := EnsureVMDeleted(ctx, s.store, s.flint, vm); err != nil {
 		return // left DELETING; retryPendingDeletions will pick it up next tick
 	}
-	FinishVMDeletion(ctx, s.store, pool, vm, s.notifier)
+	FinishVMDeletion(ctx, s.store, pool, vm, s.notifier, s.metrics)
 }

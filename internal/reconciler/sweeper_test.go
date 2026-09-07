@@ -64,7 +64,7 @@ func TestSweeper_ExpiresLeaseWithNoHeartbeat(t *testing.T) {
 	}
 
 	notifier := &spyNotifier{}
-	sweeper := reconciler.NewSweeper(st, flint, time.Second, 30*time.Second, notifier)
+	sweeper := reconciler.NewSweeper(st, flint, time.Second, 30*time.Second, notifier, nil)
 	sweeper.Tick(ctx, now)
 
 	if _, err := st.GetVM(ctx, "vm-1"); err == nil {
@@ -112,7 +112,7 @@ func TestSweeper_WarnsOnceUntilHeartbeatResets(t *testing.T) {
 		t.Fatalf("CreateLease: %v", err)
 	}
 
-	sweeper := reconciler.NewSweeper(st, flint, time.Second, 30*time.Second, nil)
+	sweeper := reconciler.NewSweeper(st, flint, time.Second, 30*time.Second, nil, nil)
 
 	sweeper.Tick(ctx, now)
 	sweeper.Tick(ctx, now.Add(time.Second))
@@ -166,7 +166,7 @@ func TestSweeper_SkipsVMAlreadyReleased(t *testing.T) {
 		t.Fatalf("CreateLease: %v", err)
 	}
 
-	sweeper := reconciler.NewSweeper(st, flint, time.Second, 30*time.Second, nil)
+	sweeper := reconciler.NewSweeper(st, flint, time.Second, 30*time.Second, nil, nil)
 	sweeper.Tick(ctx, now)
 
 	if _, err := st.GetLease(ctx, "lease-1"); err == nil {
@@ -219,7 +219,7 @@ func TestSweeper_HeartbeatDuringSweepIsNotLost(t *testing.T) {
 		t.Fatalf("UpdateLeaseHeartbeat: %v", err)
 	}
 
-	sweeper := reconciler.NewSweeper(st, flint, time.Second, 30*time.Second, nil)
+	sweeper := reconciler.NewSweeper(st, flint, time.Second, 30*time.Second, nil, nil)
 	sweeper.Tick(ctx, now)
 
 	gotVM, err := st.GetVM(ctx, "vm-1")
@@ -267,7 +267,7 @@ func TestSweeper_RetriesPendingDeletionAcrossTicks(t *testing.T) {
 	}
 
 	notifier := &spyNotifier{}
-	sweeper := reconciler.NewSweeper(st, flint, time.Second, 30*time.Second, notifier)
+	sweeper := reconciler.NewSweeper(st, flint, time.Second, 30*time.Second, notifier, nil)
 
 	// First tick: the lease is correctly claimed and deleted, but flintlock
 	// fails once - the VM must be left DELETING, not silently forgotten.

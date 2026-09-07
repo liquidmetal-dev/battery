@@ -2,14 +2,32 @@ package reconciler_test
 
 import (
 	"context"
+	"io"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 
+	"github.com/liquidmetal-dev/battery/internal/metrics"
 	"github.com/liquidmetal-dev/battery/internal/reconciler"
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
+
+// scrapeMetrics renders reg's metrics through its HTTP handler and returns
+// the exposition-format body.
+func scrapeMetrics(t *testing.T, reg *metrics.Registry) string {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	w := httptest.NewRecorder()
+	reg.Handler().ServeHTTP(w, req)
+	body, err := io.ReadAll(w.Result().Body)
+	if err != nil {
+		t.Fatalf("read scrape body: %v", err)
+	}
+	return string(body)
+}
 
 func TestEnsureVMDeleted_Success(t *testing.T) {
 	vm := &fakeMicroVM{}
@@ -87,7 +105,8 @@ func TestFinishVMDeletion_InfersExpiry(t *testing.T) {
 	vm.LeaseId = &leaseID
 
 	notifier := &spyNotifier{}
-	reconciler.FinishVMDeletion(ctx, st, pool, vm, notifier)
+	reg := metrics.NewRegistry()
+	reconciler.FinishVMDeletion(ctx, st, pool, vm, notifier, reg)
 
 	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
 	if err != nil {
@@ -98,6 +117,11 @@ func TestFinishVMDeletion_InfersExpiry(t *testing.T) {
 	}
 	if len(notifier.deleted) != 1 || notifier.deleted[0] != "default/pool-a" {
 		t.Fatalf("expected NotifyVMDeleted(pool-a) once, got %v", notifier.deleted)
+	}
+
+	body := scrapeMetrics(t, reg)
+	if !strings.Contains(body, `poolmgr_vm_releases_total{pool_name="pool-a",reason="expiry"} 1`) {
+		t.Fatalf("expected expiry release metric, got:\n%s", body)
 	}
 }
 
@@ -118,7 +142,8 @@ func TestFinishVMDeletion_InfersRelease(t *testing.T) {
 	vm.LeaseId = &leaseID
 
 	notifier := &spyNotifier{}
-	reconciler.FinishVMDeletion(ctx, st, pool, vm, notifier)
+	reg := metrics.NewRegistry()
+	reconciler.FinishVMDeletion(ctx, st, pool, vm, notifier, reg)
 
 	if _, err := st.GetLease(ctx, "lease-1"); err != store.ErrNotFound {
 		t.Fatalf("expected lease to be deleted, GetLease error = %v", err)
@@ -132,5 +157,13 @@ func TestFinishVMDeletion_InfersRelease(t *testing.T) {
 	}
 	if len(notifier.deleted) != 1 || notifier.deleted[0] != "default/pool-a" {
 		t.Fatalf("expected NotifyVMDeleted(pool-a) once, got %v", notifier.deleted)
+	}
+
+	body := scrapeMetrics(t, reg)
+	if !strings.Contains(body, `poolmgr_vm_releases_total{pool_name="pool-a",reason="api"} 1`) {
+		t.Fatalf("expected api release metric, got:\n%s", body)
+	}
+	if !strings.Contains(body, `poolmgr_lease_duration_seconds_count{pool_name="pool-a"} 1`) {
+		t.Fatalf("expected lease duration observation, got:\n%s", body)
 	}
 }

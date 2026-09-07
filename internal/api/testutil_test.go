@@ -3,7 +3,9 @@ package api_test
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
+	"net/http/httptest"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -21,8 +23,23 @@ import (
 
 	"github.com/liquidmetal-dev/battery/internal/config"
 	"github.com/liquidmetal-dev/battery/internal/flintlockclient"
+	"github.com/liquidmetal-dev/battery/internal/metrics"
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
+
+// scrapeMetrics renders reg's metrics through its HTTP handler and returns
+// the exposition-format body.
+func scrapeMetrics(t *testing.T, reg *metrics.Registry) string {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	w := httptest.NewRecorder()
+	reg.Handler().ServeHTTP(w, req)
+	body, err := io.ReadAll(w.Result().Body)
+	if err != nil {
+		t.Fatalf("read scrape body: %v", err)
+	}
+	return string(body)
+}
 
 // openTestStore returns a fresh SQLite-backed Store in a temp dir, closed
 // automatically at the end of the test.

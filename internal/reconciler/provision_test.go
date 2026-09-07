@@ -3,6 +3,7 @@ package reconciler_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/liquidmetal-dev/battery/internal/flintlockclient"
+	"github.com/liquidmetal-dev/battery/internal/metrics"
 	"github.com/liquidmetal-dev/battery/internal/reconciler"
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
@@ -44,7 +46,8 @@ func TestProvision_HappyPath(t *testing.T) {
 	pool.CreateCommands = []string{"echo hi", "echo bye"}
 	pool.HookFailurePolicy = poolmgrv1alpha1.HookFailurePolicy_DELETE_AND_REPLACE
 
-	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig())
+	reg := metrics.NewRegistry()
+	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), reg)
 	if err := p.Provision(context.Background(), pool); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
@@ -64,6 +67,14 @@ func TestProvision_HappyPath(t *testing.T) {
 	if len(events) != 2 || events[0].GetType() != poolmgrv1alpha1.EventType_VM_PROVISIONED || events[1].GetType() != poolmgrv1alpha1.EventType_VM_AVAILABLE {
 		t.Fatalf("unexpected events: %+v", events)
 	}
+
+	body := scrapeMetrics(t, reg)
+	if !strings.Contains(body, `poolmgr_vm_provision_duration_seconds_count{pool_name="pool-a"} 1`) {
+		t.Fatalf("expected 1 provision duration observation, got:\n%s", body)
+	}
+	if !strings.Contains(body, `poolmgr_hook_duration_seconds_count{hook="create",pool_name="pool-a"} 1`) {
+		t.Fatalf("expected 1 create hook duration observation, got:\n%s", body)
+	}
 }
 
 func TestProvision_CreatePollTimeout(t *testing.T) {
@@ -77,7 +88,7 @@ func TestProvision_CreatePollTimeout(t *testing.T) {
 
 	cfg := fastProvisionConfig()
 	cfg.CreatePollTimeout = 50 * time.Millisecond
-	p := reconciler.NewProvisioner(st, flint, cfg)
+	p := reconciler.NewProvisioner(st, flint, cfg, nil)
 
 	err := p.Provision(context.Background(), pool)
 	if !errors.Is(err, reconciler.ErrCreateTimedOut) {
@@ -99,7 +110,7 @@ func TestProvision_CreateFailedState(t *testing.T) {
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-a"})
 	pool.HookFailurePolicy = poolmgrv1alpha1.HookFailurePolicy_DELETE_AND_REPLACE
 
-	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig())
+	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), nil)
 	err := p.Provision(context.Background(), pool)
 	if !errors.Is(err, reconciler.ErrCreateFailed) {
 		t.Fatalf("Provision() error = %v, want ErrCreateFailed", err)
@@ -128,7 +139,7 @@ func TestProvision_GuestAgentNeverReady(t *testing.T) {
 
 	cfg := fastProvisionConfig()
 	cfg.GuestAgentTimeout = 50 * time.Millisecond
-	p := reconciler.NewProvisioner(st, flint, cfg)
+	p := reconciler.NewProvisioner(st, flint, cfg, nil)
 
 	err := p.Provision(context.Background(), pool)
 	if !errors.Is(err, reconciler.ErrHookFailed) {
@@ -160,7 +171,8 @@ func TestProvision_CreateCommandNonZeroExit_DeleteAndReplace(t *testing.T) {
 	pool.CreateCommands = []string{"false"}
 	pool.HookFailurePolicy = poolmgrv1alpha1.HookFailurePolicy_DELETE_AND_REPLACE
 
-	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig())
+	reg := metrics.NewRegistry()
+	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), reg)
 	err := p.Provision(context.Background(), pool)
 	if !errors.Is(err, reconciler.ErrHookFailed) {
 		t.Fatalf("Provision() error = %v, want ErrHookFailed", err)
@@ -180,6 +192,10 @@ func TestProvision_CreateCommandNonZeroExit_DeleteAndReplace(t *testing.T) {
 	if len(events) != 2 || events[1].GetType() != poolmgrv1alpha1.EventType_VM_HOOK_FAILED {
 		t.Fatalf("unexpected events: %+v", events)
 	}
+
+	if body := scrapeMetrics(t, reg); !strings.Contains(body, `poolmgr_hook_failures_total{hook="create",pool_name="pool-a"} 1`) {
+		t.Fatalf("expected 1 create hook failure recorded, got:\n%s", body)
+	}
 }
 
 func vmPhasePtr(p poolmgrv1alpha1.VMPhase) *poolmgrv1alpha1.VMPhase { return &p }
@@ -192,7 +208,7 @@ func TestProvision_CreateVMStoreFailure_CleansUpOrphanedMicrovm(t *testing.T) {
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-a"})
 
-	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig())
+	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), nil)
 	err := p.Provision(context.Background(), pool)
 	if !errors.Is(err, errInjected) {
 		t.Fatalf("Provision() error = %v, want wrapped errInjected", err)
@@ -228,7 +244,7 @@ func TestProvision_UpdatePhaseFailure_AppliesHookFailurePolicy(t *testing.T) {
 			pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-a"})
 			pool.HookFailurePolicy = tt.policy
 
-			p := reconciler.NewProvisioner(st, flint, fastProvisionConfig())
+			p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), nil)
 			err := p.Provision(context.Background(), pool)
 			if !errors.Is(err, errInjected) {
 				t.Fatalf("Provision() error = %v, want wrapped errInjected", err)
@@ -260,7 +276,7 @@ func TestProvision_UnknownHost(t *testing.T) {
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-does-not-exist"})
 
-	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig())
+	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), nil)
 	err := p.Provision(context.Background(), pool)
 	if !errors.Is(err, flintlockclient.ErrUnknownHost) {
 		t.Fatalf("Provision() error = %v, want ErrUnknownHost", err)

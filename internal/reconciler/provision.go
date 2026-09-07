@@ -15,7 +15,16 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/liquidmetal-dev/battery/internal/flintlockclient"
+	"github.com/liquidmetal-dev/battery/internal/metrics"
 	"github.com/liquidmetal-dev/battery/internal/store"
+)
+
+// hookCreate/hookPreLease name the two hooks metrics are labeled by,
+// matching the design doc's poolmgr_hook_duration_seconds{hook} and
+// poolmgr_hook_failures_total{hook} label values.
+const (
+	hookCreate   = "create"
+	hookPreLease = "pre_lease"
 )
 
 // ErrCreateTimedOut is returned when a newly created microvm doesn't reach
@@ -60,14 +69,17 @@ func DefaultProvisionConfig() ProvisionConfig {
 // microvm in flintlock, wait for it to boot, wait for the guest-agent, run
 // the pool's create_commands, and apply hook_failure_policy on any failure.
 type Provisioner struct {
-	store store.Store
-	flint *flintlockclient.Pool
-	cfg   ProvisionConfig
+	store   store.Store
+	flint   *flintlockclient.Pool
+	cfg     ProvisionConfig
+	metrics *metrics.Registry
 }
 
 // NewProvisioner returns a Provisioner backed by st and flint. Zero-valued
-// fields of cfg are replaced with DefaultProvisionConfig's values.
-func NewProvisioner(st store.Store, flint *flintlockclient.Pool, cfg ProvisionConfig) *Provisioner {
+// fields of cfg are replaced with DefaultProvisionConfig's values. If m is
+// nil, a fresh unshared Registry is used (metrics recorded but never
+// scraped) - most tests use this since they don't assert on metrics.
+func NewProvisioner(st store.Store, flint *flintlockclient.Pool, cfg ProvisionConfig, m *metrics.Registry) *Provisioner {
 	def := DefaultProvisionConfig()
 	if cfg.CreatePollInterval <= 0 {
 		cfg.CreatePollInterval = def.CreatePollInterval
@@ -81,7 +93,10 @@ func NewProvisioner(st store.Store, flint *flintlockclient.Pool, cfg ProvisionCo
 	if cfg.GuestAgentTimeout <= 0 {
 		cfg.GuestAgentTimeout = def.GuestAgentTimeout
 	}
-	return &Provisioner{store: st, flint: flint, cfg: cfg}
+	if m == nil {
+		m = metrics.NewRegistry()
+	}
+	return &Provisioner{store: st, flint: flint, cfg: cfg, metrics: m}
 }
 
 // Provision runs the full pipeline for one new VM in pool, placing it on
@@ -91,6 +106,9 @@ func NewProvisioner(st store.Store, flint *flintlockclient.Pool, cfg ProvisionCo
 // VM_HOOK_FAILED event is emitted) and also returned as an error for the
 // caller to log.
 func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolSpec) error {
+	start := time.Now()
+	defer func() { p.metrics.ObserveProvisionDuration(pool.GetName(), time.Since(start)) }()
+
 	host, err := PickHost(ctx, p.store, pool)
 	if err != nil {
 		return err
@@ -136,7 +154,7 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 	EmitEvent(ctx, p.store, pool, uid, poolmgrv1alpha1.EventType_VM_PROVISIONED)
 
 	if err := p.waitCreated(ctx, client, uid); err != nil {
-		ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm)
+		ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm, hookCreate, p.metrics)
 		return err
 	}
 
@@ -147,7 +165,7 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 	execClient, err := p.flint.ExecClient(host)
 	if err != nil {
 		err = fmt.Errorf("reconciler: provision: %w", err)
-		ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm)
+		ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm, hookCreate, p.metrics)
 		return err
 	}
 
@@ -156,23 +174,25 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 	cancel()
 	if err != nil {
 		err = fmt.Errorf("%w: guest-agent not ready: %w", ErrHookFailed, err)
-		ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm)
+		ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm, hookCreate, p.metrics)
 		return err
 	}
 
+	hookStart := time.Now()
 	for _, cmd := range pool.GetCreateCommands() {
 		result, err := flintlockclient.Exec(ctx, execClient, uid, cmd, flintlockclient.ExecOptions{TimeoutSeconds: p.cfg.ExecTimeoutSeconds})
 		if err != nil {
 			err = fmt.Errorf("%w: %q: %w", ErrHookFailed, cmd, err)
-			ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm)
+			ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm, hookCreate, p.metrics)
 			return err
 		}
 		if result.ExitCode != 0 {
 			err = fmt.Errorf("%w: %q: exit code %d", ErrHookFailed, cmd, result.ExitCode)
-			ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm)
+			ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm, hookCreate, p.metrics)
 			return err
 		}
 	}
+	p.metrics.ObserveHookDuration(hookCreate, pool.GetName(), time.Since(hookStart))
 
 	if err := p.updatePhase(ctx, pool, vm, poolmgrv1alpha1.VMPhase_AVAILABLE); err != nil {
 		return err
@@ -191,7 +211,7 @@ func (p *Provisioner) updatePhase(ctx context.Context, pool *poolmgrv1alpha1.Poo
 	vm.UpdatedAt = timestamppb.Now()
 	if err := p.store.UpdateVM(ctx, vm); err != nil {
 		err = fmt.Errorf("reconciler: provision: UpdateVM: %w", err)
-		ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm)
+		ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm, hookCreate, p.metrics)
 		return err
 	}
 	return nil
@@ -240,8 +260,11 @@ func (p *Provisioner) waitCreated(ctx context.Context, client microvmv1alpha1.Mi
 // failure (a create-hook failure during provisioning, or a pre-lease-hook
 // failure during ClaimVM), and emits VM_HOOK_FAILED. Store/flintlock errors
 // here are best-effort: the original failure cause is what the caller
-// should return/log.
-func ApplyHookFailurePolicy(ctx context.Context, st store.Store, flint *flintlockclient.Pool, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord) {
+// should return/log. hook ("create" or "pre_lease") and m label/record
+// poolmgr_hook_failures_total; every failure path in Provision and
+// runPreLeaseHooks funnels through here, so this is the single place that
+// metric is recorded rather than duplicating it at each call site.
+func ApplyHookFailurePolicy(ctx context.Context, st store.Store, flint *flintlockclient.Pool, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord, hook string, m *metrics.Registry) {
 	switch pool.GetHookFailurePolicy() {
 	case poolmgrv1alpha1.HookFailurePolicy_QUARANTINE:
 		vm.Phase = poolmgrv1alpha1.VMPhase_QUARANTINED
@@ -253,6 +276,9 @@ func ApplyHookFailurePolicy(ctx context.Context, st store.Store, flint *flintloc
 			_, _ = client.DeleteMicroVM(ctx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: vm.GetUid()})
 		}
 		_ = st.DeleteVM(ctx, vm.GetUid())
+	}
+	if m != nil {
+		m.RecordHookFailure(hook, pool.GetName())
 	}
 	EmitEvent(ctx, st, pool, vm.GetUid(), poolmgrv1alpha1.EventType_VM_HOOK_FAILED)
 }
@@ -309,19 +335,30 @@ func EnsureVMDeleted(ctx context.Context, st store.Store, flint *flintlockclient
 // succeeded for vm: it deletes any lease row still referencing vm (a
 // release whose flintlock call initially failed keeps its lease row in
 // place until deletion is confirmed), emits the appropriate VM_DELETED_*
-// event, and notifies notifier (nil-safe). The event type is inferred from
-// durable state rather than tracked separately: an expiry-triggered
-// deletion has already deleted its lease row up front (via
+// event, records poolmgr_vm_releases_total/poolmgr_lease_duration_seconds
+// (m, nil-safe), and notifies notifier (nil-safe). The event type/release
+// reason is inferred from durable state rather than tracked separately: an
+// expiry-triggered deletion has already deleted its lease row up front (via
 // store.DeleteLeaseIfExpired) by the time this runs, while a
 // release-triggered one keeps its lease row until here - so a lease row
-// still being present for vm.GetLeaseId() means this was a release.
-func FinishVMDeletion(ctx context.Context, st store.Store, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord, notifier DeletionNotifier) {
+// still being present for vm.GetLeaseId() means this was a release. Lease
+// duration is only observable in that release case: an expiry-triggered
+// deletion's lease row (and its ClaimedAt) is already gone by this point.
+func FinishVMDeletion(ctx context.Context, st store.Store, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord, notifier DeletionNotifier, m *metrics.Registry) {
 	eventType := poolmgrv1alpha1.EventType_VM_DELETED_DUE_TO_EXPIRY
+	reason := "expiry"
 	if leaseID := vm.GetLeaseId(); leaseID != "" {
-		if _, err := st.GetLease(ctx, leaseID); err == nil {
+		if lease, err := st.GetLease(ctx, leaseID); err == nil {
 			eventType = poolmgrv1alpha1.EventType_VM_DELETED_ON_RELEASE
+			reason = "api"
+			if m != nil {
+				m.ObserveLeaseDuration(pool.GetName(), time.Since(lease.GetClaimedAt().AsTime()))
+			}
 			_ = st.DeleteLease(ctx, leaseID)
 		}
+	}
+	if m != nil {
+		m.RecordVMRelease(pool.GetName(), reason)
 	}
 	EmitEvent(ctx, st, pool, vm.GetUid(), eventType)
 	if notifier != nil {

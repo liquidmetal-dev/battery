@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/liquidmetal-dev/battery/internal/api"
+	"github.com/liquidmetal-dev/battery/internal/metrics"
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
 
@@ -30,7 +32,8 @@ func TestClaimVM_Success(t *testing.T) {
 	}
 
 	notifier := &spyNotifier{}
-	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, notifier)
+	reg := metrics.NewRegistry()
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, notifier, reg)
 
 	resp, err := s.ClaimVM(ctx, &poolmgrv1alpha1.ClaimVMRequest{Pool: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}})
 	if err != nil {
@@ -73,6 +76,10 @@ func TestClaimVM_Success(t *testing.T) {
 	if len(notifier.claimed) != 1 || notifier.claimed[0] != "default/pool-a" {
 		t.Fatalf("expected NotifyVMClaimed(pool-a) once, got %v", notifier.claimed)
 	}
+
+	if body := scrapeMetrics(t, reg); !strings.Contains(body, `poolmgr_vm_claims_total{pool_name="pool-a"} 1`) {
+		t.Fatalf("expected 1 vm claim recorded, got:\n%s", body)
+	}
 }
 
 func TestClaimVM_NoAvailableVM(t *testing.T) {
@@ -87,7 +94,7 @@ func TestClaimVM_NoAvailableVM(t *testing.T) {
 		t.Fatalf("CreatePool: %v", err)
 	}
 
-	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil)
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil, nil)
 	_, err := s.ClaimVM(ctx, &poolmgrv1alpha1.ClaimVMRequest{Pool: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}})
 	if status.Code(err) != codes.ResourceExhausted {
 		t.Fatalf("expected ResourceExhausted, got %v", err)
@@ -101,7 +108,7 @@ func TestClaimVM_UnknownPool(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()
 
-	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil)
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil, nil)
 	_, err := s.ClaimVM(ctx, &poolmgrv1alpha1.ClaimVMRequest{Pool: &poolmgrv1alpha1.PoolRef{Name: "does-not-exist", Namespace: "default"}})
 	if status.Code(err) != codes.NotFound {
 		t.Fatalf("expected NotFound, got %v", err)
@@ -126,7 +133,7 @@ func TestClaimVM_PreLeaseHookFailure_Quarantine(t *testing.T) {
 	}
 
 	notifier := &spyNotifier{}
-	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, notifier)
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, notifier, nil)
 	_, err := s.ClaimVM(ctx, &poolmgrv1alpha1.ClaimVMRequest{Pool: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}})
 	if status.Code(err) != codes.Internal {
 		t.Fatalf("expected Internal, got %v", err)
@@ -198,7 +205,7 @@ func TestClaimVM_CleanupSurvivesCancellationAfterClaim(t *testing.T) {
 	defer cancel()
 	cancelingStore := cancelAfterClaimStore{Store: st, cancel: cancel}
 
-	s := api.NewLeaseServer(cancelingStore, flint, api.HookExecConfig{}, nil)
+	s := api.NewLeaseServer(cancelingStore, flint, api.HookExecConfig{}, nil, nil)
 	if _, err := s.ClaimVM(ctx, &poolmgrv1alpha1.ClaimVMRequest{Pool: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}}); err == nil {
 		t.Fatalf("expected ClaimVM to fail once the context is cancelled mid-flow")
 	}
@@ -245,7 +252,7 @@ func TestClaimVM_CleanupSurvivesCancellationDuringHook(t *testing.T) {
 	defer cancel()
 
 	notifier := &spyNotifier{}
-	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, notifier)
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, notifier, nil)
 	if _, err := s.ClaimVM(ctx, &poolmgrv1alpha1.ClaimVMRequest{Pool: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}}); err == nil {
 		t.Fatalf("expected ClaimVM to fail")
 	}
@@ -276,7 +283,7 @@ func TestClaimVM_PreLeaseHookFailure_DeleteAndReplace(t *testing.T) {
 	}
 
 	notifier := &spyNotifier{}
-	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, notifier)
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, notifier, nil)
 	_, err := s.ClaimVM(ctx, &poolmgrv1alpha1.ClaimVMRequest{Pool: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}})
 	if status.Code(err) != codes.Internal {
 		t.Fatalf("expected Internal, got %v", err)
@@ -308,7 +315,7 @@ func TestHeartbeat_Success(t *testing.T) {
 		t.Fatalf("CreateVM: %v", err)
 	}
 
-	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil)
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil, nil)
 	claimResp, err := s.ClaimVM(ctx, &poolmgrv1alpha1.ClaimVMRequest{Pool: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}})
 	if err != nil {
 		t.Fatalf("ClaimVM: %v", err)
@@ -344,7 +351,7 @@ func TestHeartbeat_UnknownLease(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()
 
-	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil)
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil, nil)
 	_, err := s.Heartbeat(ctx, &poolmgrv1alpha1.HeartbeatRequest{LeaseId: "missing"})
 	if status.Code(err) != codes.NotFound {
 		t.Fatalf("expected NotFound, got %v", err)
@@ -367,7 +374,7 @@ func TestReleaseVM_Success(t *testing.T) {
 	}
 
 	notifier := &spyNotifier{}
-	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, notifier)
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, notifier, nil)
 	claimResp, err := s.ClaimVM(ctx, &poolmgrv1alpha1.ClaimVMRequest{Pool: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}})
 	if err != nil {
 		t.Fatalf("ClaimVM: %v", err)
@@ -416,7 +423,7 @@ func TestReleaseVM_FlintlockDeleteFails_LeavesPendingForRetry(t *testing.T) {
 	}
 
 	notifier := &spyNotifier{}
-	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, notifier)
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, notifier, nil)
 	claimResp, err := s.ClaimVM(ctx, &poolmgrv1alpha1.ClaimVMRequest{Pool: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}})
 	if err != nil {
 		t.Fatalf("ClaimVM: %v", err)
@@ -453,7 +460,7 @@ func TestReleaseVM_UnknownLease(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()
 
-	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil)
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil, nil)
 	_, err := s.ReleaseVM(ctx, &poolmgrv1alpha1.ReleaseVMRequest{LeaseId: "missing"})
 	if status.Code(err) != codes.NotFound {
 		t.Fatalf("expected NotFound, got %v", err)

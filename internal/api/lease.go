@@ -18,6 +18,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/liquidmetal-dev/battery/internal/flintlockclient"
+	"github.com/liquidmetal-dev/battery/internal/metrics"
 	"github.com/liquidmetal-dev/battery/internal/reconciler"
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
@@ -70,18 +71,23 @@ type LeaseServer struct {
 	flint    *flintlockclient.Pool
 	cfg      HookExecConfig
 	notifier ReconcilerNotifier
+	metrics  *metrics.Registry
 }
 
 // NewLeaseServer returns a LeaseServer backed by st and flint. If notifier
-// is nil, NoopNotifier{} is used.
-func NewLeaseServer(st store.Store, flint *flintlockclient.Pool, cfg HookExecConfig, notifier ReconcilerNotifier) *LeaseServer {
+// is nil, NoopNotifier{} is used. If m is nil, a fresh unshared
+// metrics.Registry is used (see reconciler.NewProvisioner).
+func NewLeaseServer(st store.Store, flint *flintlockclient.Pool, cfg HookExecConfig, notifier ReconcilerNotifier, m *metrics.Registry) *LeaseServer {
 	if notifier == nil {
 		notifier = NoopNotifier{}
 	}
 	if cfg.CleanupTimeout <= 0 {
 		cfg.CleanupTimeout = DefaultCleanupTimeout
 	}
-	return &LeaseServer{store: st, flint: flint, cfg: cfg, notifier: notifier}
+	if m == nil {
+		m = metrics.NewRegistry()
+	}
+	return &LeaseServer{store: st, flint: flint, cfg: cfg, notifier: notifier, metrics: m}
 }
 
 // ClaimVM atomically claims an AVAILABLE VM from the named pool, runs the
@@ -141,6 +147,7 @@ func (s *LeaseServer) ClaimVM(ctx context.Context, req *poolmgrv1alpha1.ClaimVMR
 	}
 
 	reconciler.EmitEvent(ctx, s.store, pool, vm.GetUid(), poolmgrv1alpha1.EventType_VM_CLAIMED)
+	s.metrics.RecordVMClaim(poolName)
 	s.notifier.NotifyVMClaimed(poolName, poolNS)
 
 	// Best-effort: the lease is already committed at this point, so a
@@ -179,6 +186,7 @@ func (s *LeaseServer) runPreLeaseHooks(ctx context.Context, pool *poolmgrv1alpha
 		return fmt.Errorf("exec client: %w", err)
 	}
 
+	start := time.Now()
 	for _, cmd := range pool.GetPreLeaseCommands() {
 		result, err := flintlockclient.Exec(ctx, execClient, vm.GetUid(), cmd, flintlockclient.ExecOptions{TimeoutSeconds: s.cfg.ExecTimeoutSeconds})
 		if err != nil {
@@ -190,6 +198,7 @@ func (s *LeaseServer) runPreLeaseHooks(ctx context.Context, pool *poolmgrv1alpha
 			return fmt.Errorf("exec %q: exit code %d", cmd, result.ExitCode)
 		}
 	}
+	s.metrics.ObserveHookDuration("pre_lease", pool.GetName(), time.Since(start))
 	return nil
 }
 
@@ -209,7 +218,7 @@ func (s *LeaseServer) applyHookFailurePolicy(ctx context.Context, pool *poolmgrv
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.CleanupTimeout)
 	defer cancel()
 
-	reconciler.ApplyHookFailurePolicy(cleanupCtx, s.store, s.flint, pool, vm)
+	reconciler.ApplyHookFailurePolicy(cleanupCtx, s.store, s.flint, pool, vm, "pre_lease", s.metrics)
 	if pool.GetHookFailurePolicy() != poolmgrv1alpha1.HookFailurePolicy_QUARANTINE {
 		s.notifier.NotifyVMDeleted(pool.GetName(), pool.GetNamespace())
 	}
@@ -273,7 +282,7 @@ func (s *LeaseServer) ReleaseVM(ctx context.Context, req *poolmgrv1alpha1.Releas
 		if perr != nil {
 			return nil, status.Errorf(codes.Internal, "get pool: %v", perr)
 		}
-		reconciler.FinishVMDeletion(ctx, s.store, pool, vm, s.notifier)
+		reconciler.FinishVMDeletion(ctx, s.store, pool, vm, s.notifier, s.metrics)
 		return &emptypb.Empty{}, nil
 	}
 
