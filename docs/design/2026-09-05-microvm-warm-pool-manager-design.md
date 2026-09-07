@@ -252,6 +252,7 @@ unacked rows replayed, keyed by a monotonic id per pool).
 /internal/hostagent         — hostagent gRPC server impl (wraps vsock-connect locally)
 /internal/store             — SQLite repository (pools, vms, leases, events)
 /internal/api               — gRPC service implementations
+/internal/server            — API server construction: TLS/mTLS creds + optional basic-auth
 /internal/config            — config loading, TLS setup (mirrors flintlock's cmdflags pattern)
 /deploy                     — Dockerfile, example k8s manifests (non-binding)
 /.github/workflows          — ci.yml (lint/test/build), release.yml (goreleaser on tag)
