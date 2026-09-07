@@ -5,6 +5,7 @@ import (
 	"net"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -118,6 +119,46 @@ func TestBuildGRPCServer_RegistersReflection(t *testing.T) {
 	}
 	if _, err := stream.Recv(); err != nil {
 		t.Fatalf("recv: %v", err)
+	}
+}
+
+func TestServeGRPC_ShutsDownWithActiveStream(t *testing.T) {
+	st := openTestStore(t)
+	reg := metrics.NewRegistry()
+	cfg := config.APIServerConfig{Addr: ":0", TLS: config.ServerTLSConfig{Insecure: true}}
+
+	srv, err := buildGRPCServer(cfg, st, nil, reg)
+	if err != nil {
+		t.Fatalf("buildGRPCServer: %v", err)
+	}
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serveGRPC(runCtx, srv, lis) }()
+
+	conn := dialInsecure(t, lis.Addr().String())
+	watchStream, err := grpc_health_v1.NewHealthClient(conn).Watch(context.Background(), &grpc_health_v1.HealthCheckRequest{})
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	if _, err := watchStream.Recv(); err != nil {
+		t.Fatalf("Watch Recv (initial status): %v", err)
+	}
+
+	// The Watch stream above is still open (its own context is independent
+	// of runCtx). Cancelling runCtx must still make serveGRPC return
+	// promptly instead of hanging on GracefulStop waiting for the stream.
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(grpcShutdownTimeout + 2*time.Second):
+		t.Fatalf("serveGRPC did not return within grpcShutdownTimeout of an active stream blocking GracefulStop")
 	}
 }
 

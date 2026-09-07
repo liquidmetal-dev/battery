@@ -131,7 +131,15 @@ func buildGRPCServer(cfg config.APIServerConfig, st store.Store, flint *flintloc
 	return srv, nil
 }
 
-// serveGRPC runs grpcSrv on lis until ctx is done, then stops it gracefully.
+// grpcShutdownTimeout bounds serveGRPC's graceful stop: a long-lived stream
+// (Events.Subscribe, the health service's Watch) stays open until its
+// client disconnects and would otherwise block GracefulStop indefinitely,
+// since cancelling ctx does not cancel those RPCs' own contexts.
+const grpcShutdownTimeout = 5 * time.Second
+
+// serveGRPC runs grpcSrv on lis until ctx is done, then stops it: gracefully
+// if that completes within grpcShutdownTimeout, otherwise it force-closes
+// any still-active connections/streams via Stop.
 func serveGRPC(ctx context.Context, grpcSrv *grpc.Server, lis net.Listener) error {
 	errCh := make(chan error, 1)
 	go func() {
@@ -145,7 +153,20 @@ func serveGRPC(ctx context.Context, grpcSrv *grpc.Server, lis net.Listener) erro
 	case <-ctx.Done():
 	}
 
-	grpcSrv.GracefulStop()
+	stopped := make(chan struct{})
+	go func() {
+		grpcSrv.GracefulStop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+	case <-time.After(grpcShutdownTimeout):
+		log.Printf("poolmgrd: graceful stop exceeded %s, forcing shutdown", grpcShutdownTimeout)
+		grpcSrv.Stop()
+		<-stopped
+	}
+
 	return ctx.Err()
 }
 
