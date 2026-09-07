@@ -10,6 +10,8 @@ import (
 	"os"
 
 	microvmv1alpha1 "github.com/liquidmetal-dev/flintlock/api/services/microvm/v1alpha1"
+	microvmexecv1alpha1 "github.com/liquidmetal-dev/flintlock/api/services/microvmexec/v1alpha1"
+	microvmsshproxyv1alpha1 "github.com/liquidmetal-dev/flintlock/api/services/microvmsshproxy/v1alpha1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -21,11 +23,14 @@ import (
 // isn't in the pool's configuration.
 var ErrUnknownHost = errors.New("flintlockclient: unknown host")
 
-// Pool holds one MicroVMClient (backed by one grpc.ClientConn) per
-// configured flintlock host, keyed by the host's config Name.
+// Pool holds one MicroVMClient, MicroVMExecClient, and MicroVMSSHProxyClient
+// (all backed by the same grpc.ClientConn) per configured flintlock host,
+// keyed by the host's config Name.
 type Pool struct {
-	conns   map[string]*grpc.ClientConn
-	clients map[string]microvmv1alpha1.MicroVMClient
+	conns           map[string]*grpc.ClientConn
+	clients         map[string]microvmv1alpha1.MicroVMClient
+	execClients     map[string]microvmexecv1alpha1.MicroVMExecClient
+	sshProxyClients map[string]microvmsshproxyv1alpha1.MicroVMSSHProxyClient
 }
 
 // New dials every host in cfg and returns a Pool. On any dial/TLS-setup
@@ -39,8 +44,10 @@ func New(cfg *config.Config) (*Pool, error) {
 	}
 
 	p := &Pool{
-		conns:   make(map[string]*grpc.ClientConn, len(cfg.Hosts)),
-		clients: make(map[string]microvmv1alpha1.MicroVMClient, len(cfg.Hosts)),
+		conns:           make(map[string]*grpc.ClientConn, len(cfg.Hosts)),
+		clients:         make(map[string]microvmv1alpha1.MicroVMClient, len(cfg.Hosts)),
+		execClients:     make(map[string]microvmexecv1alpha1.MicroVMExecClient, len(cfg.Hosts)),
+		sshProxyClients: make(map[string]microvmsshproxyv1alpha1.MicroVMSSHProxyClient, len(cfg.Hosts)),
 	}
 
 	for _, host := range cfg.Hosts {
@@ -58,6 +65,8 @@ func New(cfg *config.Config) (*Pool, error) {
 
 		p.conns[host.Name] = conn
 		p.clients[host.Name] = microvmv1alpha1.NewMicroVMClient(conn)
+		p.execClients[host.Name] = microvmexecv1alpha1.NewMicroVMExecClient(conn)
+		p.sshProxyClients[host.Name] = microvmsshproxyv1alpha1.NewMicroVMSSHProxyClient(conn)
 	}
 
 	return p, nil
@@ -67,6 +76,26 @@ func New(cfg *config.Config) (*Pool, error) {
 // no such host was configured.
 func (p *Pool) Client(hostName string) (microvmv1alpha1.MicroVMClient, error) {
 	client, ok := p.clients[hostName]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", ErrUnknownHost, hostName)
+	}
+	return client, nil
+}
+
+// ExecClient returns the MicroVMExecClient for the named host, or
+// ErrUnknownHost if no such host was configured.
+func (p *Pool) ExecClient(hostName string) (microvmexecv1alpha1.MicroVMExecClient, error) {
+	client, ok := p.execClients[hostName]
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", ErrUnknownHost, hostName)
+	}
+	return client, nil
+}
+
+// SSHProxyClient returns the MicroVMSSHProxyClient for the named host, or
+// ErrUnknownHost if no such host was configured.
+func (p *Pool) SSHProxyClient(hostName string) (microvmsshproxyv1alpha1.MicroVMSSHProxyClient, error) {
+	client, ok := p.sshProxyClients[hostName]
 	if !ok {
 		return nil, fmt.Errorf("%w: %q", ErrUnknownHost, hostName)
 	}
