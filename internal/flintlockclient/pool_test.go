@@ -224,6 +224,31 @@ func TestPool_ClientUnknownHost(t *testing.T) {
 	}
 }
 
+func TestPool_Address(t *testing.T) {
+	addr := startFakeServer(t, nil, 1)
+	cfg := &config.Config{Hosts: []config.HostConfig{
+		{Name: "host-a", Address: addr, TLS: config.TLSConfig{Insecure: true}},
+	}}
+
+	pool, err := flintlockclient.New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+
+	got, err := pool.Address("host-a")
+	if err != nil {
+		t.Fatalf("Address: %v", err)
+	}
+	if got != addr {
+		t.Fatalf("expected address %s, got %s", addr, got)
+	}
+
+	if _, err := pool.Address("does-not-exist"); !errors.Is(err, flintlockclient.ErrUnknownHost) {
+		t.Fatalf("expected ErrUnknownHost, got %v", err)
+	}
+}
+
 func TestPool_Hosts(t *testing.T) {
 	addrA := startFakeServer(t, nil, 1)
 	addrB := startFakeServer(t, nil, 1)

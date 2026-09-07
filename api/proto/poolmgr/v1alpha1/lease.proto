@@ -31,6 +31,17 @@ message ClaimVMResponse {
   // NetworkInterfaces is copied from flintlock's MicroVMStatus.network_interfaces so the
   // consumer can reach the VM.
   map<string, flintlock.types.NetworkInterfaceStatus> network_interfaces = 3;
+
+  // Host identifies the flintlock host the VM was claimed from.
+  HostInfo host = 4;
+}
+
+message HostInfo {
+  // Name is the flintlock host's configured name.
+  string name = 1;
+  // Address is the flintlock host's gRPC endpoint. MicroVM, MicroVMExec, and
+  // MicroVMSSHProxy are all served on this same address.
+  string address = 2;
 }
 
 message HeartbeatRequest {
