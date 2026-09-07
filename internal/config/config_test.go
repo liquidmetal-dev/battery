@@ -281,12 +281,13 @@ func TestAPIServerConfig_Validate(t *testing.T) {
 	}{
 		{
 			name:    "valid insecure, no basic auth",
-			apiCfg:  config.APIServerConfig{TLS: config.ServerTLSConfig{Insecure: true}},
+			apiCfg:  config.APIServerConfig{Addr: ":8443", TLS: config.ServerTLSConfig{Insecure: true}},
 			wantErr: false,
 		},
 		{
 			name: "valid insecure with basic auth token",
 			apiCfg: config.APIServerConfig{
+				Addr:           ":8443",
 				TLS:            config.ServerTLSConfig{Insecure: true},
 				BasicAuthToken: "s3cret",
 			},
@@ -295,6 +296,11 @@ func TestAPIServerConfig_Validate(t *testing.T) {
 		{
 			name:    "invalid tls propagates",
 			apiCfg:  config.APIServerConfig{TLS: config.ServerTLSConfig{}},
+			wantErr: true,
+		},
+		{
+			name:    "missing addr is invalid",
+			apiCfg:  config.APIServerConfig{Addr: "", TLS: config.ServerTLSConfig{Insecure: true}},
 			wantErr: true,
 		},
 	}
@@ -327,7 +333,7 @@ func TestConfig_Validate_APIServer(t *testing.T) {
 	t.Run("valid api server", func(t *testing.T) {
 		cfg := &config.Config{
 			Hosts:     validHosts,
-			APIServer: &config.APIServerConfig{TLS: config.ServerTLSConfig{Insecure: true}},
+			APIServer: &config.APIServerConfig{Addr: ":8443", TLS: config.ServerTLSConfig{Insecure: true}},
 		}
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -350,7 +356,7 @@ func TestLoad_ValidAPIServerInsecure(t *testing.T) {
 		"hosts": [
 			{"name": "host-a", "address": "10.0.0.1:9090", "tls": {"insecure": true}}
 		],
-		"api_server": {"tls": {"insecure": true}}
+		"api_server": {"addr": ":8443", "tls": {"insecure": true}}
 	}`)
 
 	cfg, err := config.Load(path)
@@ -360,6 +366,9 @@ func TestLoad_ValidAPIServerInsecure(t *testing.T) {
 	if cfg.APIServer == nil || !cfg.APIServer.TLS.Insecure {
 		t.Fatalf("unexpected api server config: %+v", cfg.APIServer)
 	}
+	if cfg.APIServer.Addr != ":8443" {
+		t.Fatalf("unexpected api server addr: %q", cfg.APIServer.Addr)
+	}
 }
 
 func TestLoad_ValidAPIServerMTLS(t *testing.T) {
@@ -368,6 +377,7 @@ func TestLoad_ValidAPIServerMTLS(t *testing.T) {
 			{"name": "host-a", "address": "10.0.0.1:9090", "tls": {"insecure": true}}
 		],
 		"api_server": {
+			"addr": ":8443",
 			"tls": {
 				"cert_file": "/etc/pool/server.pem",
 				"key_file": "/etc/pool/server-key.pem",
@@ -413,6 +423,7 @@ func TestHostConfigJSONTags(t *testing.T) {
 
 func TestAPIServerConfigJSONTags(t *testing.T) {
 	b, err := json.Marshal(config.APIServerConfig{
+		Addr: ":8443",
 		TLS: config.ServerTLSConfig{
 			CertFile: "cert.pem", KeyFile: "key.pem",
 			ValidateClient: true, ClientCAFile: "ca.pem",
@@ -425,6 +436,9 @@ func TestAPIServerConfigJSONTags(t *testing.T) {
 	var m map[string]any
 	if err := json.Unmarshal(b, &m); err != nil {
 		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := m["addr"]; !ok {
+		t.Fatalf("expected addr json tag, got: %s", b)
 	}
 	if _, ok := m["basic_auth_token"]; !ok {
 		t.Fatalf("expected lower-case json tags, got: %s", b)

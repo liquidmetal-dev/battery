@@ -130,7 +130,7 @@ func callGetMicroVM(ctx context.Context, client microvmv1alpha1.MicroVMClient) e
 }
 
 func TestNew_Insecure_AcceptsPlaintext(t *testing.T) {
-	addr := startServer(t, config.APIServerConfig{TLS: config.ServerTLSConfig{Insecure: true}})
+	addr := startServer(t, config.APIServerConfig{Addr: ":0", TLS: config.ServerTLSConfig{Insecure: true}})
 	client := dial(t, addr, insecure.NewCredentials())
 
 	if err := callGetMicroVM(context.Background(), client); err != nil {
@@ -141,7 +141,8 @@ func TestNew_Insecure_AcceptsPlaintext(t *testing.T) {
 func TestNew_TLS_AcceptsMatchingCA(t *testing.T) {
 	certPath, keyPath := genSelfSignedCert(t)
 	addr := startServer(t, config.APIServerConfig{
-		TLS: config.ServerTLSConfig{CertFile: certPath, KeyFile: keyPath},
+		Addr: ":0",
+		TLS:  config.ServerTLSConfig{CertFile: certPath, KeyFile: keyPath},
 	})
 
 	clientCreds := tlsClientCreds(t, certPath, nil)
@@ -155,7 +156,8 @@ func TestNew_TLS_AcceptsMatchingCA(t *testing.T) {
 func TestNew_TLS_RejectsPlaintext(t *testing.T) {
 	certPath, keyPath := genSelfSignedCert(t)
 	addr := startServer(t, config.APIServerConfig{
-		TLS: config.ServerTLSConfig{CertFile: certPath, KeyFile: keyPath},
+		Addr: ":0",
+		TLS:  config.ServerTLSConfig{CertFile: certPath, KeyFile: keyPath},
 	})
 
 	client := dial(t, addr, insecure.NewCredentials())
@@ -170,6 +172,7 @@ func TestNew_MTLS_AcceptsValidClientCert(t *testing.T) {
 	clientCertPath, clientKeyPath := genSelfSignedCert(t)
 
 	addr := startServer(t, config.APIServerConfig{
+		Addr: ":0",
 		TLS: config.ServerTLSConfig{
 			CertFile: serverCertPath, KeyFile: serverKeyPath,
 			ValidateClient: true, ClientCAFile: clientCertPath,
@@ -193,6 +196,7 @@ func TestNew_MTLS_RejectsMissingClientCert(t *testing.T) {
 	clientCACertPath, _ := genSelfSignedCert(t)
 
 	addr := startServer(t, config.APIServerConfig{
+		Addr: ":0",
 		TLS: config.ServerTLSConfig{
 			CertFile: serverCertPath, KeyFile: serverKeyPath,
 			ValidateClient: true, ClientCAFile: clientCACertPath,
@@ -209,6 +213,7 @@ func TestNew_MTLS_RejectsMissingClientCert(t *testing.T) {
 
 func TestNew_BasicAuth_AcceptsCorrectToken(t *testing.T) {
 	addr := startServer(t, config.APIServerConfig{
+		Addr:           ":0",
 		TLS:            config.ServerTLSConfig{Insecure: true},
 		BasicAuthToken: "s3cret",
 	})
@@ -222,6 +227,7 @@ func TestNew_BasicAuth_AcceptsCorrectToken(t *testing.T) {
 
 func TestNew_BasicAuth_RejectsWrongToken(t *testing.T) {
 	addr := startServer(t, config.APIServerConfig{
+		Addr:           ":0",
 		TLS:            config.ServerTLSConfig{Insecure: true},
 		BasicAuthToken: "s3cret",
 	})
@@ -235,6 +241,7 @@ func TestNew_BasicAuth_RejectsWrongToken(t *testing.T) {
 
 func TestNew_BasicAuth_RejectsMissingToken(t *testing.T) {
 	addr := startServer(t, config.APIServerConfig{
+		Addr:           ":0",
 		TLS:            config.ServerTLSConfig{Insecure: true},
 		BasicAuthToken: "s3cret",
 	})
@@ -247,7 +254,7 @@ func TestNew_BasicAuth_RejectsMissingToken(t *testing.T) {
 
 func TestNew_InvalidServerCertPath_ReturnsError(t *testing.T) {
 	dir := t.TempDir()
-	cfg := config.APIServerConfig{TLS: config.ServerTLSConfig{
+	cfg := config.APIServerConfig{Addr: ":0", TLS: config.ServerTLSConfig{
 		CertFile: filepath.Join(dir, "missing-cert.pem"),
 		KeyFile:  filepath.Join(dir, "missing-key.pem"),
 	}}
@@ -259,7 +266,7 @@ func TestNew_InvalidServerCertPath_ReturnsError(t *testing.T) {
 
 func TestNew_InvalidClientCAPath_ReturnsError(t *testing.T) {
 	certPath, keyPath := genSelfSignedCert(t)
-	cfg := config.APIServerConfig{TLS: config.ServerTLSConfig{
+	cfg := config.APIServerConfig{Addr: ":0", TLS: config.ServerTLSConfig{
 		CertFile: certPath, KeyFile: keyPath,
 		ValidateClient: true, ClientCAFile: filepath.Join(t.TempDir(), "missing-ca.pem"),
 	}}
@@ -269,9 +276,38 @@ func TestNew_InvalidClientCAPath_ReturnsError(t *testing.T) {
 	}
 }
 
+func TestNew_ExtraServerOptions_Applied(t *testing.T) {
+	var called bool
+	extra := grpc.UnaryInterceptor(func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		called = true
+		return handler(ctx, req)
+	})
+
+	srv, err := server.New(config.APIServerConfig{Addr: ":0", TLS: config.ServerTLSConfig{Insecure: true}}, extra)
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+	microvmv1alpha1.RegisterMicroVMServer(srv, &fakeMicroVMServer{})
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	client := dial(t, lis.Addr().String(), insecure.NewCredentials())
+	if err := callGetMicroVM(context.Background(), client); err != nil {
+		t.Fatalf("GetMicroVM: %v", err)
+	}
+	if !called {
+		t.Fatalf("expected extra server option's interceptor to be invoked")
+	}
+}
+
 func TestNew_InvalidConfig_ReturnsError(t *testing.T) {
 	// Insecure with a stray cert file is invalid per config.ServerTLSConfig.Validate.
-	cfg := config.APIServerConfig{TLS: config.ServerTLSConfig{Insecure: true, CertFile: "cert.pem"}}
+	cfg := config.APIServerConfig{Addr: ":0", TLS: config.ServerTLSConfig{Insecure: true, CertFile: "cert.pem"}}
 
 	if _, err := server.New(cfg); err == nil {
 		t.Fatalf("expected error for invalid config, got nil")
