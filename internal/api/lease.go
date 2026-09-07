@@ -41,12 +41,24 @@ func (NoopNotifier) NotifyVMClaimed(string, string) {}
 // NotifyVMDeleted does nothing.
 func (NoopNotifier) NotifyVMDeleted(string, string) {}
 
+// DefaultCleanupTimeout bounds hook-failure cleanup when HookExecConfig
+// doesn't set CleanupTimeout.
+const DefaultCleanupTimeout = 30 * time.Second
+
 // HookExecConfig bounds pre-lease-hook execution, mirroring the
 // exec-related fields of reconciler.ProvisionConfig.
 type HookExecConfig struct {
 	// ExecTimeoutSeconds bounds each pre_lease_command's server-side run
 	// time. 0 means no server-side timeout.
 	ExecTimeoutSeconds int32
+	// CleanupTimeout bounds hook-failure cleanup (quarantine/delete via
+	// reconciler.ApplyHookFailurePolicy) after ClaimAvailableVM has
+	// committed. Cleanup runs on a context detached from the RPC's own
+	// context (see applyHookFailurePolicy) so a caller cancelling or the
+	// RPC deadline expiring can't strand a VM LEASED/PRE_LEASE_HOOK_RUNNING
+	// with no lease; this timeout bounds that detached cleanup instead.
+	// Zero uses DefaultCleanupTimeout.
+	CleanupTimeout time.Duration
 }
 
 // LeaseServer implements poolmgrv1alpha1.LeaseServer: ClaimVM, Heartbeat,
@@ -65,6 +77,9 @@ type LeaseServer struct {
 func NewLeaseServer(st store.Store, flint *flintlockclient.Pool, cfg HookExecConfig, notifier ReconcilerNotifier) *LeaseServer {
 	if notifier == nil {
 		notifier = NoopNotifier{}
+	}
+	if cfg.CleanupTimeout <= 0 {
+		cfg.CleanupTimeout = DefaultCleanupTimeout
 	}
 	return &LeaseServer{store: st, flint: flint, cfg: cfg, notifier: notifier}
 }
@@ -182,8 +197,19 @@ func (s *LeaseServer) runPreLeaseHooks(ctx context.Context, pool *poolmgrv1alpha
 // delete) and, if the policy actually deleted the VM, notifies so
 // REPLACE_ON_DELETE pools can replenish - reconciler.ApplyHookFailurePolicy
 // itself has no notifier, so this wraps it for every ClaimVM call site.
+//
+// Cleanup runs on a context detached from ctx (context.WithoutCancel) and
+// bounded by s.cfg.CleanupTimeout, not on ctx itself: by the time this is
+// called, ClaimAvailableVM has already committed the VM as claimed, so if
+// the RPC's own context is cancelled or its deadline expires (the caller
+// disconnected, or cancelled after a hook failure), cleanup must still be
+// able to quarantine or delete the VM rather than leaving it stranded
+// LEASED/PRE_LEASE_HOOK_RUNNING with no lease and nothing to retry it.
 func (s *LeaseServer) applyHookFailurePolicy(ctx context.Context, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord) {
-	reconciler.ApplyHookFailurePolicy(ctx, s.store, s.flint, pool, vm)
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.CleanupTimeout)
+	defer cancel()
+
+	reconciler.ApplyHookFailurePolicy(cleanupCtx, s.store, s.flint, pool, vm)
 	if pool.GetHookFailurePolicy() != poolmgrv1alpha1.HookFailurePolicy_QUARANTINE {
 		s.notifier.NotifyVMDeleted(pool.GetName(), pool.GetNamespace())
 	}

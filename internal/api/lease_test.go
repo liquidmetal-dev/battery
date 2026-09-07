@@ -158,6 +158,106 @@ func TestClaimVM_PreLeaseHookFailure_Quarantine(t *testing.T) {
 	}
 }
 
+// cancelAfterClaimStore wraps a store.Store and cancels a context right
+// after ClaimAvailableVM succeeds, simulating a caller disconnecting (or a
+// deadline expiring) at exactly that instant - the earliest point cleanup
+// must survive, since the VM is already committed as claimed.
+type cancelAfterClaimStore struct {
+	store.Store
+	cancel context.CancelFunc
+}
+
+func (s cancelAfterClaimStore) ClaimAvailableVM(ctx context.Context, poolName, poolNamespace string) (*poolmgrv1alpha1.VMRecord, error) {
+	vm, err := s.Store.ClaimAvailableVM(ctx, poolName, poolNamespace)
+	if err == nil {
+		s.cancel()
+	}
+	return vm, err
+}
+
+// TestClaimVM_CleanupSurvivesCancellationAfterClaim reproduces cancelling
+// the RPC's context immediately after ClaimAvailableVM commits (before any
+// pre-lease hook runs): cleanup must still quarantine/delete the VM rather
+// than leaving it LEASED with no lease and nothing to retry it.
+func TestClaimVM_CleanupSurvivesCancellationAfterClaim(t *testing.T) {
+	vm := &fakeMicroVM{}
+	exec := &fakeMicroVMExec{}
+	flint := startFakeFlintlock(t, vm, exec)
+	st := openTestStore(t)
+	setupCtx := context.Background()
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	if err := st.CreatePool(setupCtx, pool); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
+	if err := st.CreateVM(setupCtx, sampleAvailableVM("vm-1", "pool-a")); err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cancelingStore := cancelAfterClaimStore{Store: st, cancel: cancel}
+
+	s := api.NewLeaseServer(cancelingStore, flint, api.HookExecConfig{}, nil)
+	if _, err := s.ClaimVM(ctx, &poolmgrv1alpha1.ClaimVMRequest{Pool: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}}); err == nil {
+		t.Fatalf("expected ClaimVM to fail once the context is cancelled mid-flow")
+	}
+
+	gotVM, err := st.GetVM(setupCtx, "vm-1")
+	if err != nil {
+		t.Fatalf("GetVM: %v", err)
+	}
+	if gotVM.GetPhase() != poolmgrv1alpha1.VMPhase_QUARANTINED {
+		t.Fatalf("expected cleanup to still quarantine the VM despite a cancelled context, got phase %v", gotVM.GetPhase())
+	}
+	if gotVM.GetLeaseId() != "" {
+		t.Fatalf("expected lease_id to be cleared, got %q", gotVM.GetLeaseId())
+	}
+}
+
+// TestClaimVM_CleanupSurvivesCancellationDuringHook reproduces the RPC's
+// context being cancelled while a pre-lease hook is failing (e.g. the
+// caller disconnected right as the hook errored): cleanup must still run
+// to completion on a context independent of the cancelled one.
+func TestClaimVM_CleanupSurvivesCancellationDuringHook(t *testing.T) {
+	vm := &fakeMicroVM{}
+	var cancel context.CancelFunc
+	exec := &fakeMicroVMExec{
+		respond: func(*microvmexecv1alpha1.ExecStart) (int32, string) {
+			cancel() // simulate the client disconnecting right as the hook fails
+			return 1, ""
+		},
+	}
+	flint := startFakeFlintlock(t, vm, exec)
+	st := openTestStore(t)
+	setupCtx := context.Background()
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_DELETE_AND_REPLACE, []string{"do-thing"})
+	if err := st.CreatePool(setupCtx, pool); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
+	if err := st.CreateVM(setupCtx, sampleAvailableVM("vm-1", "pool-a")); err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+
+	var ctx context.Context
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+
+	notifier := &spyNotifier{}
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, notifier)
+	if _, err := s.ClaimVM(ctx, &poolmgrv1alpha1.ClaimVMRequest{Pool: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}}); err == nil {
+		t.Fatalf("expected ClaimVM to fail")
+	}
+
+	if _, err := st.GetVM(setupCtx, "vm-1"); err != store.ErrNotFound {
+		t.Fatalf("expected cleanup to still delete the VM despite cancellation mid-hook, GetVM error = %v", err)
+	}
+	if len(notifier.deleted) != 1 {
+		t.Fatalf("expected NotifyVMDeleted despite cancellation mid-hook, got %v", notifier.deleted)
+	}
+}
+
 func TestClaimVM_PreLeaseHookFailure_DeleteAndReplace(t *testing.T) {
 	vm := &fakeMicroVM{}
 	exec := &fakeMicroVMExec{
