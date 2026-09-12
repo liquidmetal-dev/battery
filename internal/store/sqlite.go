@@ -64,11 +64,13 @@ func (s *sqliteStore) CreatePool(ctx context.Context, p *poolmgrv1alpha1.PoolSpe
 		INSERT INTO pools (
 			name, namespace, size, flintlock_hosts, microvm_template,
 			replenishment_strategy, create_commands, pre_lease_commands,
-			hook_failure_policy, heartbeat_interval_ns, heartbeat_expiry_threshold_ns
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			hook_failure_policy, heartbeat_interval_ns, heartbeat_expiry_threshold_ns,
+			autoscaling_policy
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.name, row.namespace, row.size, row.flintlockHosts, row.microvmTemplate,
 		row.replenishmentStrategy, row.createCommands, row.preLeaseCommands,
 		row.hookFailurePolicy, row.heartbeatIntervalNs, row.heartbeatExpiryThresholdNs,
+		row.autoscalingPolicy,
 	)
 	if err != nil {
 		return fmt.Errorf("store: insert pool: %w", err)
@@ -80,13 +82,15 @@ func (s *sqliteStore) GetPool(ctx context.Context, name, namespace string) (*poo
 	r := s.db.QueryRowContext(ctx, `
 		SELECT name, namespace, size, flintlock_hosts, microvm_template,
 			replenishment_strategy, create_commands, pre_lease_commands,
-			hook_failure_policy, heartbeat_interval_ns, heartbeat_expiry_threshold_ns
+			hook_failure_policy, heartbeat_interval_ns, heartbeat_expiry_threshold_ns,
+			autoscaling_policy
 		FROM pools WHERE name = ? AND namespace = ?`, name, namespace)
 
 	var row poolRow
 	err := r.Scan(&row.name, &row.namespace, &row.size, &row.flintlockHosts, &row.microvmTemplate,
 		&row.replenishmentStrategy, &row.createCommands, &row.preLeaseCommands,
-		&row.hookFailurePolicy, &row.heartbeatIntervalNs, &row.heartbeatExpiryThresholdNs)
+		&row.hookFailurePolicy, &row.heartbeatIntervalNs, &row.heartbeatExpiryThresholdNs,
+		&row.autoscalingPolicy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -101,7 +105,8 @@ func (s *sqliteStore) ListPools(ctx context.Context) ([]*poolmgrv1alpha1.PoolSpe
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT name, namespace, size, flintlock_hosts, microvm_template,
 			replenishment_strategy, create_commands, pre_lease_commands,
-			hook_failure_policy, heartbeat_interval_ns, heartbeat_expiry_threshold_ns
+			hook_failure_policy, heartbeat_interval_ns, heartbeat_expiry_threshold_ns,
+			autoscaling_policy
 		FROM pools ORDER BY namespace, name`)
 	if err != nil {
 		return nil, fmt.Errorf("store: query pools: %w", err)
@@ -113,7 +118,8 @@ func (s *sqliteStore) ListPools(ctx context.Context) ([]*poolmgrv1alpha1.PoolSpe
 		var row poolRow
 		if err := rows.Scan(&row.name, &row.namespace, &row.size, &row.flintlockHosts, &row.microvmTemplate,
 			&row.replenishmentStrategy, &row.createCommands, &row.preLeaseCommands,
-			&row.hookFailurePolicy, &row.heartbeatIntervalNs, &row.heartbeatExpiryThresholdNs); err != nil {
+			&row.hookFailurePolicy, &row.heartbeatIntervalNs, &row.heartbeatExpiryThresholdNs,
+			&row.autoscalingPolicy); err != nil {
 			return nil, fmt.Errorf("store: scan pool: %w", err)
 		}
 		p, err := rowToPool(row)
@@ -138,11 +144,13 @@ func (s *sqliteStore) UpdatePool(ctx context.Context, p *poolmgrv1alpha1.PoolSpe
 		UPDATE pools SET
 			size = ?, flintlock_hosts = ?, microvm_template = ?,
 			replenishment_strategy = ?, create_commands = ?, pre_lease_commands = ?,
-			hook_failure_policy = ?, heartbeat_interval_ns = ?, heartbeat_expiry_threshold_ns = ?
+			hook_failure_policy = ?, heartbeat_interval_ns = ?, heartbeat_expiry_threshold_ns = ?,
+			autoscaling_policy = ?
 		WHERE name = ? AND namespace = ?`,
 		row.size, row.flintlockHosts, row.microvmTemplate,
 		row.replenishmentStrategy, row.createCommands, row.preLeaseCommands,
 		row.hookFailurePolicy, row.heartbeatIntervalNs, row.heartbeatExpiryThresholdNs,
+		row.autoscalingPolicy,
 		row.name, row.namespace,
 	)
 	if err != nil {

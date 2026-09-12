@@ -8,6 +8,7 @@ import (
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	microvmexecv1alpha1 "github.com/liquidmetal-dev/flintlock/api/services/microvmexec/v1alpha1"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/liquidmetal-dev/battery/internal/reconciler"
 	"github.com/liquidmetal-dev/battery/internal/store"
@@ -153,4 +154,88 @@ func TestReconciler_ReplaceOnDelete_OnlyOnDeleteNotification(t *testing.T) {
 
 	r.NotifyVMDeleted()
 	waitForVMs(t, st, "pool-a", 1, 2*time.Second)
+}
+
+func TestReconciler_Autoscaler_TickDrivenScaleUp(t *testing.T) {
+	vm := &fakeMicroVM{}
+	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 2, []string{"host-a"})
+	pool.ReplenishmentStrategy.MinSize = int32Ptr(1)
+	pool.AutoscalingPolicy = &poolmgrv1alpha1.AutoscalingPolicy{
+		Enabled:               true,
+		MinSize:               2,
+		MaxSize:               5,
+		ScaleStep:             1,
+		ScaleUpClaimsPerSec:   0.5,
+		ScaleDownClaimsPerSec: 0.01,
+		ClaimRateWindow:       durationpb.New(time.Second),
+		Cooldown:              durationpb.New(0),
+	}
+	if err := st.CreatePool(ctx, pool); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
+
+	r, err := reconciler.New(pool, st, flint, 10*time.Millisecond, fastProvisionConfig(), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = r.Run(runCtx) }()
+
+	for i := 0; i < 5; i++ {
+		r.NotifyVMClaimed()
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		got, err := st.GetPool(ctx, "pool-a", "default")
+		if err != nil {
+			t.Fatalf("GetPool: %v", err)
+		}
+		if got.Size == 3 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for autoscaled size to reach 3")
+}
+
+func TestReconciler_Autoscaler_Disabled_SizeNeverChanges(t *testing.T) {
+	vm := &fakeMicroVM{}
+	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 2, []string{"host-a"})
+	pool.ReplenishmentStrategy.MinSize = int32Ptr(1)
+	if err := st.CreatePool(ctx, pool); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
+
+	r, err := reconciler.New(pool, st, flint, 10*time.Millisecond, fastProvisionConfig(), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = r.Run(runCtx) }()
+
+	for i := 0; i < 5; i++ {
+		r.NotifyVMClaimed()
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	got, err := st.GetPool(ctx, "pool-a", "default")
+	if err != nil {
+		t.Fatalf("GetPool: %v", err)
+	}
+	if got.Size != 2 {
+		t.Fatalf("GetPool() size = %d, want unchanged 2 (no autoscaling policy)", got.Size)
+	}
 }

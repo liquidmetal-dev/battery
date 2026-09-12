@@ -5,11 +5,13 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"time"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/liquidmetal-dev/battery/internal/reconciler"
 	"github.com/liquidmetal-dev/battery/internal/store"
@@ -22,6 +24,9 @@ import (
 type PoolLifecycle interface {
 	StartReconciler(spec *poolmgrv1alpha1.PoolSpec) error
 	StopReconciler(name, namespace string)
+	// AutoscalerSnapshot reports (name, namespace)'s current observed claim rate and the time
+	// of its last autoscaling action. ok is false if no reconciler for that pool is running.
+	AutoscalerSnapshot(name, namespace string) (claimsPerSec float64, lastScaledAt time.Time, ok bool)
 }
 
 // NoopPoolLifecycle implements PoolLifecycle by doing nothing. Used when
@@ -33,6 +38,11 @@ func (NoopPoolLifecycle) StartReconciler(*poolmgrv1alpha1.PoolSpec) error { retu
 
 // StopReconciler does nothing.
 func (NoopPoolLifecycle) StopReconciler(string, string) {}
+
+// AutoscalerSnapshot always reports no reconciler running.
+func (NoopPoolLifecycle) AutoscalerSnapshot(string, string) (float64, time.Time, bool) {
+	return 0, time.Time{}, false
+}
 
 // PoolAdminServer implements poolmgrv1alpha1.PoolAdminServer: the CRUD
 // lifecycle of pool definitions.
@@ -175,7 +185,7 @@ func (s *PoolAdminServer) ListPools(ctx context.Context, req *poolmgrv1alpha1.Li
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "count vms: %v", err)
 		}
-		resp.Pools = append(resp.Pools, &poolmgrv1alpha1.Pool{Spec: spec, Status: countsToStatus(counts)})
+		resp.Pools = append(resp.Pools, &poolmgrv1alpha1.Pool{Spec: spec, Status: s.poolStatus(counts, spec.GetName(), spec.GetNamespace())})
 	}
 	return resp, nil
 }
@@ -218,7 +228,7 @@ func (s *PoolAdminServer) UpdatePool(ctx context.Context, req *poolmgrv1alpha1.U
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "count vms: %v", err)
 	}
-	return &poolmgrv1alpha1.Pool{Spec: spec, Status: countsToStatus(counts)}, nil
+	return &poolmgrv1alpha1.Pool{Spec: spec, Status: s.poolStatus(counts, spec.GetName(), spec.GetNamespace())}, nil
 }
 
 // DeletePool deletes the named pool. It fails with FailedPrecondition if the
@@ -270,14 +280,27 @@ func (s *PoolAdminServer) getPool(ctx context.Context, name, namespace string) (
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "count vms: %v", err)
 	}
-	return &poolmgrv1alpha1.Pool{Spec: spec, Status: countsToStatus(counts)}, nil
+	return &poolmgrv1alpha1.Pool{Spec: spec, Status: s.poolStatus(counts, name, namespace)}, nil
 }
 
-func countsToStatus(c reconciler.VMCounts) *poolmgrv1alpha1.PoolStatus {
-	return &poolmgrv1alpha1.PoolStatus{
+// poolStatus builds a PoolStatus from c plus the pool's live autoscaler state, as reported by
+// poolMgr for (name, namespace). A pool with no running reconciler or no autoscaling policy
+// gets a zero-valued last_scaled_at/observed_claims_per_sec, same as one that's never scaled.
+func (s *PoolAdminServer) poolStatus(c reconciler.VMCounts, name, namespace string) *poolmgrv1alpha1.PoolStatus {
+	st := &poolmgrv1alpha1.PoolStatus{
 		AvailableCount:    int32(c.Available),
 		LeasedCount:       int32(c.Leased),
 		ProvisioningCount: int32(c.Provisioning),
 		QuarantinedCount:  int32(c.Quarantined),
 	}
+
+	claimsPerSec, lastScaledAt, ok := s.poolMgr.AutoscalerSnapshot(name, namespace)
+	if !ok {
+		return st
+	}
+	st.ObservedClaimsPerSec = claimsPerSec
+	if !lastScaledAt.IsZero() {
+		st.LastScaledAt = timestamppb.New(lastScaledAt)
+	}
+	return st
 }
