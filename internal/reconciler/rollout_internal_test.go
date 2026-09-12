@@ -32,10 +32,28 @@ func TestResolveBatchSize(t *testing.T) {
 			want:   3,
 		},
 		{
-			name:   "count <= 0 falls back to 1",
+			name:   "count 0 is an intentional pause, not a default",
 			policy: &poolmgrv1alpha1.RolloutPolicy{MaxUnavailable: &poolmgrv1alpha1.RolloutPolicy_Count{Count: 0}},
 			size:   10,
+			want:   0,
+		},
+		{
+			name:   "negative count falls back to the default of 1",
+			policy: &poolmgrv1alpha1.RolloutPolicy{MaxUnavailable: &poolmgrv1alpha1.RolloutPolicy_Count{Count: -3}},
+			size:   10,
 			want:   1,
+		},
+		{
+			name:   "count is clamped to pool size",
+			policy: &poolmgrv1alpha1.RolloutPolicy{MaxUnavailable: &poolmgrv1alpha1.RolloutPolicy_Count{Count: 100}},
+			size:   10,
+			want:   10,
+		},
+		{
+			name:   "percent over 100 is clamped to pool size",
+			policy: &poolmgrv1alpha1.RolloutPolicy{MaxUnavailable: &poolmgrv1alpha1.RolloutPolicy_Percent{Percent: 500}},
+			size:   10,
+			want:   10,
 		},
 		{
 			name:   "percent rounds up",

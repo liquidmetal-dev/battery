@@ -2,6 +2,7 @@ package reconciler
 
 import (
 	"context"
+	"errors"
 	"math"
 	"sort"
 	"sync"
@@ -129,7 +130,19 @@ func (c *RolloutController) Tick(ctx context.Context, _ time.Time) {
 			candidates = candidates[:budget]
 		}
 		for _, vm := range candidates {
-			if err := EnsureVMDeleted(ctx, c.store, c.flint, vm); err != nil {
+			// EnsureVMDeletedIfPhase (not EnsureVMDeleted) guards the DELETING
+			// transition against candidates being a possibly-stale snapshot:
+			// vm may have been concurrently claimed (AVAILABLE -> LEASED) by
+			// ClaimAvailableVM between the ListVMsByPool call above and here.
+			err := EnsureVMDeletedIfPhase(ctx, c.store, c.flint, vm, poolmgrv1alpha1.VMPhase_AVAILABLE)
+			if errors.Is(err, store.ErrPhaseChanged) || errors.Is(err, store.ErrNotFound) {
+				// Someone else already changed (or removed) this VM between
+				// our snapshot and now - it's no longer a rollout candidate.
+				// Leave it completely untouched; a later Tick re-evaluates it
+				// from a fresh snapshot if it's still stale and AVAILABLE.
+				continue
+			}
+			if err != nil {
 				continue // left DELETING; retried by Sweeper.retryPendingDeletions or a later Tick
 			}
 			FinishVMDeletion(ctx, c.store, c.pool, vm, c.notifier, c.metrics, poolmgrv1alpha1.EventType_VM_DELETED_FOR_ROLLOUT)
@@ -144,23 +157,40 @@ func (c *RolloutController) Tick(ctx context.Context, _ time.Time) {
 }
 
 // resolveBatchSize resolves how many stale VMs may be deleted in a single
-// tick from policy, against a pool of the given size. A nil policy, or one
-// whose oneof is unset, defaults to 1. A percent is resolved against size,
-// rounded up, minimum 1.
+// tick from policy, against a pool of the given size.
+//
+//   - A nil policy, or one whose oneof is unset, defaults to 1.
+//   - An explicit count of 0 is an intentional pause: 0 VMs may be deleted
+//     this tick. A negative count is invalid input that shouldn't have
+//     reached here (validated pools shouldn't produce one); it falls back to
+//     the same default of 1 as an unset policy, rather than pausing.
+//   - A percent is resolved against size, rounded up, minimum 1.
+//   - The result is clamped to size (a percent > 100, or a count > size,
+//     can't usefully unavail more VMs than the pool has), except when size
+//     itself is 0 - a pool with no target size at all shouldn't force the
+//     minimum-1 floors above down to 0.
 func resolveBatchSize(policy *poolmgrv1alpha1.RolloutPolicy, size int32) int32 {
+	var n int32
 	switch mu := policy.GetMaxUnavailable().(type) {
 	case *poolmgrv1alpha1.RolloutPolicy_Count:
-		if mu.Count < 1 {
-			return 1
+		switch {
+		case mu.Count == 0:
+			return 0
+		case mu.Count < 0:
+			n = 1
+		default:
+			n = mu.Count
 		}
-		return mu.Count
 	case *poolmgrv1alpha1.RolloutPolicy_Percent:
-		n := int32(math.Ceil(float64(size) * float64(mu.Percent) / 100))
+		n = int32(math.Ceil(float64(size) * float64(mu.Percent) / 100))
 		if n < 1 {
-			return 1
+			n = 1
 		}
-		return n
 	default:
-		return 1
+		n = 1
 	}
+	if size > 0 && n > size {
+		return size
+	}
+	return n
 }

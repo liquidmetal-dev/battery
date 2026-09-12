@@ -272,6 +272,37 @@ func (s *sqliteStore) DeleteVM(ctx context.Context, uid string) error {
 	return checkRowsAffected(res)
 }
 
+func (s *sqliteStore) UpdateVMPhaseIfCurrent(ctx context.Context, uid string, expectedPhase, newPhase poolmgrv1alpha1.VMPhase) error {
+	now := time.Now().UnixNano()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE vms SET phase = ?, updated_at = ? WHERE uid = ? AND phase = ?`,
+		int32(newPhase), now, uid, int32(expectedPhase),
+	)
+	if err != nil {
+		return fmt.Errorf("store: update vm phase if current: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: update vm phase if current rows affected: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+
+	// No rows matched: either uid doesn't exist, or its phase already moved
+	// away from expectedPhase (e.g. a concurrent ClaimAvailableVM) - tell
+	// the two apart for the caller.
+	var exists int
+	err = s.db.QueryRowContext(ctx, `SELECT 1 FROM vms WHERE uid = ?`, uid).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("store: check vm exists: %w", err)
+	}
+	return ErrPhaseChanged
+}
+
 func (s *sqliteStore) ClaimAvailableVM(ctx context.Context, poolName, poolNamespace string) (*poolmgrv1alpha1.VMRecord, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
