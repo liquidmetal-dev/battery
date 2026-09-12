@@ -27,6 +27,7 @@ type poolRow struct {
 	hookFailurePolicy          int32
 	heartbeatIntervalNs        int64
 	heartbeatExpiryThresholdNs int64
+	templateHash               string
 }
 
 // requireDuration rejects a nil duration instead of letting AsDuration() silently return 0:
@@ -88,6 +89,7 @@ func poolToRow(p *poolmgrv1alpha1.PoolSpec) (poolRow, error) {
 		hookFailurePolicy:          int32(p.GetHookFailurePolicy()),
 		heartbeatIntervalNs:        heartbeatInterval.Nanoseconds(),
 		heartbeatExpiryThresholdNs: heartbeatExpiryThreshold.Nanoseconds(),
+		templateHash:               p.GetTemplateHash(),
 	}, nil
 }
 
@@ -127,6 +129,7 @@ func rowToPool(row poolRow) (*poolmgrv1alpha1.PoolSpec, error) {
 		HookFailurePolicy:        poolmgrv1alpha1.HookFailurePolicy(row.hookFailurePolicy),
 		HeartbeatInterval:        durationpb.New(nanoseconds(row.heartbeatIntervalNs)),
 		HeartbeatExpiryThreshold: durationpb.New(nanoseconds(row.heartbeatExpiryThresholdNs)),
+		TemplateHash:             row.templateHash,
 	}, nil
 }
 
@@ -149,6 +152,7 @@ type vmRow struct {
 	flintlockHost string
 	phase         int32
 	leaseID       sql.NullString
+	templateHash  string
 	createdAt     int64
 	updatedAt     int64
 }
@@ -169,6 +173,7 @@ func vmToRow(v *poolmgrv1alpha1.VMRecord) (vmRow, error) {
 		poolNamespace: v.GetPoolNamespace(),
 		flintlockHost: v.GetFlintlockHost(),
 		phase:         int32(v.GetPhase()),
+		templateHash:  v.GetTemplateHash(),
 		createdAt:     createdAt.UnixNano(),
 		updatedAt:     updatedAt.UnixNano(),
 	}
@@ -185,6 +190,7 @@ func rowToVM(row vmRow) *poolmgrv1alpha1.VMRecord {
 		PoolNamespace: row.poolNamespace,
 		FlintlockHost: row.flintlockHost,
 		Phase:         poolmgrv1alpha1.VMPhase(row.phase),
+		TemplateHash:  row.templateHash,
 		CreatedAt:     timestamppb.New(time.Unix(0, row.createdAt)),
 		UpdatedAt:     timestamppb.New(time.Unix(0, row.updatedAt)),
 	}
