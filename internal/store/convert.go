@@ -28,6 +28,7 @@ type poolRow struct {
 	heartbeatIntervalNs        int64
 	heartbeatExpiryThresholdNs int64
 	templateHash               string
+	rolloutPolicy              sql.NullString
 }
 
 // requireDuration rejects a nil duration instead of letting AsDuration() silently return 0:
@@ -77,6 +78,15 @@ func poolToRow(p *poolmgrv1alpha1.PoolSpec) (poolRow, error) {
 		return poolRow{}, fmt.Errorf("marshal pre_lease_commands: %w", err)
 	}
 
+	var rolloutPolicy sql.NullString
+	if p.GetRolloutPolicy() != nil {
+		policy, err := marshalProtoJSON(p.GetRolloutPolicy())
+		if err != nil {
+			return poolRow{}, fmt.Errorf("marshal rollout_policy: %w", err)
+		}
+		rolloutPolicy = sql.NullString{String: policy, Valid: true}
+	}
+
 	return poolRow{
 		name:                       p.GetName(),
 		namespace:                  p.GetNamespace(),
@@ -90,6 +100,7 @@ func poolToRow(p *poolmgrv1alpha1.PoolSpec) (poolRow, error) {
 		heartbeatIntervalNs:        heartbeatInterval.Nanoseconds(),
 		heartbeatExpiryThresholdNs: heartbeatExpiryThreshold.Nanoseconds(),
 		templateHash:               p.GetTemplateHash(),
+		rolloutPolicy:              rolloutPolicy,
 	}, nil
 }
 
@@ -117,6 +128,14 @@ func rowToPool(row poolRow) (*poolmgrv1alpha1.PoolSpec, error) {
 		return nil, fmt.Errorf("store: unmarshal pre_lease_commands: %w", err)
 	}
 
+	var rolloutPolicy *poolmgrv1alpha1.RolloutPolicy
+	if row.rolloutPolicy.Valid {
+		rolloutPolicy = &poolmgrv1alpha1.RolloutPolicy{}
+		if err := unmarshalProtoJSON(row.rolloutPolicy.String, rolloutPolicy); err != nil {
+			return nil, fmt.Errorf("store: unmarshal rollout_policy: %w", err)
+		}
+	}
+
 	return &poolmgrv1alpha1.PoolSpec{
 		Name:                     row.name,
 		Namespace:                row.namespace,
@@ -130,6 +149,7 @@ func rowToPool(row poolRow) (*poolmgrv1alpha1.PoolSpec, error) {
 		HeartbeatInterval:        durationpb.New(nanoseconds(row.heartbeatIntervalNs)),
 		HeartbeatExpiryThreshold: durationpb.New(nanoseconds(row.heartbeatExpiryThresholdNs)),
 		TemplateHash:             row.templateHash,
+		RolloutPolicy:            rolloutPolicy,
 	}, nil
 }
 

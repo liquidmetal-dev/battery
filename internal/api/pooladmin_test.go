@@ -40,6 +40,48 @@ func TestCreateGetPool(t *testing.T) {
 	}
 }
 
+// TestCreateGetPool_RolloutPolicyPersists reproduces the bug found in Task 4's review: the
+// CreatePool RPC response looked correct because it echoed the in-memory spec it was handed,
+// but the store never persisted rollout_policy, so a subsequent GetPool (which reloads from
+// the store) silently lost it.
+func TestCreateGetPool_RolloutPolicyPersists(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	s := api.NewPoolAdminServer(st, nil)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	spec.RolloutPolicy = &poolmgrv1alpha1.RolloutPolicy{
+		MaxUnavailable: &poolmgrv1alpha1.RolloutPolicy_Count{Count: 2},
+	}
+	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+
+	got, err := s.GetPool(ctx, &poolmgrv1alpha1.GetPoolRequest{Ref: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}})
+	if err != nil {
+		t.Fatalf("GetPool() error = %v", err)
+	}
+	if got.GetSpec().GetRolloutPolicy().GetCount() != 2 {
+		t.Errorf("GetPool() rollout_policy count = %d, want 2", got.GetSpec().GetRolloutPolicy().GetCount())
+	}
+
+	update := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	update.RolloutPolicy = &poolmgrv1alpha1.RolloutPolicy{
+		MaxUnavailable: &poolmgrv1alpha1.RolloutPolicy_Percent{Percent: 50},
+	}
+	if _, err := s.UpdatePool(ctx, &poolmgrv1alpha1.UpdatePoolRequest{Spec: update}); err != nil {
+		t.Fatalf("UpdatePool() error = %v", err)
+	}
+
+	got, err = s.GetPool(ctx, &poolmgrv1alpha1.GetPoolRequest{Ref: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}})
+	if err != nil {
+		t.Fatalf("GetPool() error = %v", err)
+	}
+	if got.GetSpec().GetRolloutPolicy().GetPercent() != 50 {
+		t.Errorf("GetPool() after UpdatePool rollout_policy percent = %d, want 50", got.GetSpec().GetRolloutPolicy().GetPercent())
+	}
+}
+
 func TestCreatePoolForcesAllowGuestAgent(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
