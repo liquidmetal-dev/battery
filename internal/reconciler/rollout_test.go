@@ -130,6 +130,81 @@ func TestRolloutController_SubtractsInFlightDeletionsFromBudget(t *testing.T) {
 	}
 }
 
+func TestRolloutController_SubtractsUnavailableProvisioningReplacementsFromBudget(t *testing.T) {
+	vm := &fakeMicroVM{}
+	exec := &fakeMicroVMExec{}
+	flint := startFakeFlintlock(t, vm, exec)
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE, 5, []string{"host-a"})
+	pool.TemplateHash = "new-hash"
+	pool.RolloutPolicy = &poolmgrv1alpha1.RolloutPolicy{MaxUnavailable: &poolmgrv1alpha1.RolloutPolicy_Count{Count: 1}}
+	if err := st.CreatePool(ctx, pool); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
+
+	now := time.Now()
+	// One stale AVAILABLE VM (a rollout candidate) and one current-hash
+	// PROVISIONING VM (a replacement from an earlier rollout deletion that
+	// hasn't finished provisioning yet). The already-in-flight replacement
+	// consumes the whole budget of 1, so nothing should be deleted this
+	// tick.
+	stale := staleVM("stale-1", "pool-a", "host-a", poolmgrv1alpha1.VMPhase_AVAILABLE, "old-hash", now.Add(-time.Hour))
+	provisioning := staleVM("provisioning-1", "pool-a", "host-a", poolmgrv1alpha1.VMPhase_PROVISIONING, "new-hash", now)
+
+	for _, v := range []*poolmgrv1alpha1.VMRecord{stale, provisioning} {
+		if err := st.CreateVM(ctx, v); err != nil {
+			t.Fatalf("CreateVM(%s): %v", v.GetUid(), err)
+		}
+	}
+
+	rc := reconciler.NewRolloutController(pool, st, flint, time.Second, nil, metrics.NewRegistry())
+	rc.Tick(ctx, now)
+
+	if _, err := st.GetVM(ctx, "stale-1"); err != nil {
+		t.Errorf("expected stale-1 to survive (budget exhausted by unfinished replacement), GetVM error = %v", err)
+	}
+	if got := vm.deletedUIDs(); len(got) != 0 {
+		t.Fatalf("expected no DeleteMicroVM calls, got %v", got)
+	}
+}
+
+func TestRolloutController_NotifiesOncePerDeletionForBackfill(t *testing.T) {
+	vm := &fakeMicroVM{}
+	exec := &fakeMicroVMExec{}
+	flint := startFakeFlintlock(t, vm, exec)
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE, 5, []string{"host-a"})
+	pool.TemplateHash = "new-hash"
+	pool.RolloutPolicy = &poolmgrv1alpha1.RolloutPolicy{MaxUnavailable: &poolmgrv1alpha1.RolloutPolicy_Count{Count: 2}}
+	if err := st.CreatePool(ctx, pool); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
+
+	now := time.Now()
+	first := staleVM("stale-1", "pool-a", "host-a", poolmgrv1alpha1.VMPhase_AVAILABLE, "old-hash", now.Add(-2*time.Hour))
+	second := staleVM("stale-2", "pool-a", "host-a", poolmgrv1alpha1.VMPhase_AVAILABLE, "old-hash", now.Add(-1*time.Hour))
+	for _, v := range []*poolmgrv1alpha1.VMRecord{first, second} {
+		if err := st.CreateVM(ctx, v); err != nil {
+			t.Fatalf("CreateVM(%s): %v", v.GetUid(), err)
+		}
+	}
+
+	notifier := &spyNotifier{}
+	rc := reconciler.NewRolloutController(pool, st, flint, time.Second, notifier, metrics.NewRegistry())
+	rc.Tick(ctx, now)
+
+	if got := vm.deletedUIDs(); len(got) != 2 {
+		t.Fatalf("expected exactly 2 DeleteMicroVM calls, got %v", got)
+	}
+	if got := len(notifier.deleted); got != 2 {
+		t.Fatalf("expected notifier called exactly once per deletion (2), got %d (%v)", got, notifier.deleted)
+	}
+}
+
 func TestRolloutController_EmitsPoolRolloutCompletedOnceAtZeroTransition(t *testing.T) {
 	vm := &fakeMicroVM{}
 	exec := &fakeMicroVMExec{}
