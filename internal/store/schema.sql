@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS pools (
     hook_failure_policy           INTEGER NOT NULL,
     heartbeat_interval_ns         INTEGER NOT NULL,
     heartbeat_expiry_threshold_ns INTEGER NOT NULL,
+    template_hash                 TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (name, namespace)
 );
 
@@ -20,6 +21,7 @@ CREATE TABLE IF NOT EXISTS vms (
     flintlock_host TEXT NOT NULL,
     phase          INTEGER NOT NULL,
     lease_id       TEXT,
+    template_hash  TEXT NOT NULL DEFAULT '',
     created_at     INTEGER NOT NULL,
     updated_at     INTEGER NOT NULL
 );

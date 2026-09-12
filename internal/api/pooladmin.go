@@ -2,13 +2,18 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
+	flintlocktypes "github.com/liquidmetal-dev/flintlock/api/types"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	"github.com/liquidmetal-dev/battery/internal/reconciler"
@@ -116,6 +121,41 @@ func validatePoolSpec(spec *poolmgrv1alpha1.PoolSpec) error {
 	return nil
 }
 
+// computeTemplateHash returns a deterministic content hash (SHA-256, hex,
+// truncated to 16 chars) of tmpl. MicroVMSpec contains map fields (labels,
+// metadata), which proto.Marshal doesn't guarantee stable byte-for-byte
+// output across calls; protojson.Marshal sorts map keys internally (see
+// order.GenericKeyOrder), so it's used here instead for a marshal that's
+// actually deterministic.
+func computeTemplateHash(tmpl *flintlocktypes.MicroVMSpec) string {
+	b, err := protojson.Marshal(tmpl)
+	if err != nil {
+		// tmpl is always a valid, already-validated proto message; marshal
+		// cannot fail in practice.
+		panic(fmt.Sprintf("pooladmin: marshal microvm_template: %v", err))
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// staleVMCount returns how many of poolName/poolNamespace's VMRecords (any
+// phase) have a template_hash different from currentHash. VMs provisioned
+// before template_hash existed carry the zero value "", which never equals
+// a real hash, so they correctly count as stale too.
+func staleVMCount(ctx context.Context, st store.Store, poolName, poolNamespace, currentHash string) (int32, error) {
+	vms, err := st.ListVMsByPool(ctx, poolName, poolNamespace, nil)
+	if err != nil {
+		return 0, fmt.Errorf("list vms: %w", err)
+	}
+	var stale int32
+	for _, vm := range vms {
+		if vm.GetTemplateHash() != currentHash {
+			stale++
+		}
+	}
+	return stale, nil
+}
+
 // CreatePool validates spec, rejects a name/namespace that already exists,
 // and persists the new pool. The returned Pool has zero-valued status: a
 // freshly created pool has no VMs yet.
@@ -140,6 +180,8 @@ func (s *PoolAdminServer) CreatePool(ctx context.Context, req *poolmgrv1alpha1.C
 		log.ErrorContext(ctx, "pooladmin: CreatePool: get pool failed", "error", err)
 		return nil, status.Errorf(codes.Internal, "get pool: %v", err)
 	}
+
+	spec.TemplateHash = computeTemplateHash(spec.GetMicrovmTemplate())
 
 	if err := s.store.CreatePool(ctx, spec); err != nil {
 		log.ErrorContext(ctx, "pooladmin: CreatePool: store write failed", "error", err)
@@ -191,7 +233,11 @@ func (s *PoolAdminServer) ListPools(ctx context.Context, req *poolmgrv1alpha1.Li
 			log.ErrorContext(ctx, "pooladmin: ListPools: count vms failed", "pool", spec.GetName(), "namespace", spec.GetNamespace(), "error", err)
 			return nil, status.Errorf(codes.Internal, "count vms: %v", err)
 		}
-		resp.Pools = append(resp.Pools, &poolmgrv1alpha1.Pool{Spec: spec, Status: countsToStatus(counts)})
+		stale, err := staleVMCount(ctx, s.store, spec.GetName(), spec.GetNamespace(), spec.GetTemplateHash())
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "count stale vms: %v", err)
+		}
+		resp.Pools = append(resp.Pools, &poolmgrv1alpha1.Pool{Spec: spec, Status: countsToStatus(counts, stale)})
 	}
 	log.DebugContext(ctx, "pooladmin: ListPools completed", "count", len(resp.Pools))
 	return resp, nil
@@ -211,7 +257,8 @@ func (s *PoolAdminServer) UpdatePool(ctx context.Context, req *poolmgrv1alpha1.U
 	unlock := s.lockPool(spec.GetName(), spec.GetNamespace())
 	defer unlock()
 
-	if _, err := s.store.GetPool(ctx, spec.GetName(), spec.GetNamespace()); err != nil {
+	existing, err := s.store.GetPool(ctx, spec.GetName(), spec.GetNamespace())
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			log.WarnContext(ctx, "pooladmin: UpdatePool failed: pool not found")
 			return nil, status.Errorf(codes.NotFound, "pool %s/%s not found", spec.GetNamespace(), spec.GetName())
@@ -219,6 +266,10 @@ func (s *PoolAdminServer) UpdatePool(ctx context.Context, req *poolmgrv1alpha1.U
 		log.ErrorContext(ctx, "pooladmin: UpdatePool: get pool failed", "error", err)
 		return nil, status.Errorf(codes.Internal, "get pool: %v", err)
 	}
+	previousHash := existing.GetTemplateHash()
+
+	spec.TemplateHash = computeTemplateHash(spec.GetMicrovmTemplate())
+	hashChanged := spec.GetTemplateHash() != previousHash
 
 	if err := s.store.UpdatePool(ctx, spec); err != nil {
 		log.ErrorContext(ctx, "pooladmin: UpdatePool: store write failed", "error", err)
@@ -244,7 +295,16 @@ func (s *PoolAdminServer) UpdatePool(ctx context.Context, req *poolmgrv1alpha1.U
 		log.ErrorContext(ctx, "pooladmin: UpdatePool: count vms failed", "error", err)
 		return nil, status.Errorf(codes.Internal, "count vms: %v", err)
 	}
-	return &poolmgrv1alpha1.Pool{Spec: spec, Status: countsToStatus(counts)}, nil
+	stale, err := staleVMCount(ctx, s.store, spec.GetName(), spec.GetNamespace(), spec.GetTemplateHash())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "count stale vms: %v", err)
+	}
+
+	if hashChanged && stale > 0 {
+		reconciler.EmitEvent(ctx, s.store, spec, "", poolmgrv1alpha1.EventType_POOL_ROLLOUT_STARTED)
+	}
+
+	return &poolmgrv1alpha1.Pool{Spec: spec, Status: countsToStatus(counts, stale)}, nil
 }
 
 // DeletePool deletes the named pool. It fails with FailedPrecondition if the
@@ -312,14 +372,19 @@ func (s *PoolAdminServer) getPool(ctx context.Context, name, namespace string) (
 		log.ErrorContext(ctx, "pooladmin: GetPool: count vms failed", "error", err)
 		return nil, status.Errorf(codes.Internal, "count vms: %v", err)
 	}
-	return &poolmgrv1alpha1.Pool{Spec: spec, Status: countsToStatus(counts)}, nil
+	stale, err := staleVMCount(ctx, s.store, name, namespace, spec.GetTemplateHash())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "count stale vms: %v", err)
+	}
+	return &poolmgrv1alpha1.Pool{Spec: spec, Status: countsToStatus(counts, stale)}, nil
 }
 
-func countsToStatus(c reconciler.VMCounts) *poolmgrv1alpha1.PoolStatus {
+func countsToStatus(c reconciler.VMCounts, staleCount int32) *poolmgrv1alpha1.PoolStatus {
 	return &poolmgrv1alpha1.PoolStatus{
 		AvailableCount:    int32(c.Available),
 		LeasedCount:       int32(c.Leased),
 		ProvisioningCount: int32(c.Provisioning),
 		QuarantinedCount:  int32(c.Quarantined),
+		StaleCount:        staleCount,
 	}
 }

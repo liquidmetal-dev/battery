@@ -176,6 +176,7 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 		PoolNamespace: pool.GetNamespace(),
 		FlintlockHost: host,
 		Phase:         poolmgrv1alpha1.VMPhase_PROVISIONING,
+		TemplateHash:  pool.GetTemplateHash(),
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}

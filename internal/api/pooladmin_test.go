@@ -542,3 +542,197 @@ func TestDeletePool_VMsStillPresent_DoesNotStopReconciler(t *testing.T) {
 		t.Fatalf("stopped = %v, want none", lifecycle.stopped)
 	}
 }
+
+func TestCreatePool_SetsTemplateHash(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	s := api.NewPoolAdminServer(st, nil)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	created, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec})
+	if err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+	if created.GetSpec().GetTemplateHash() == "" {
+		t.Fatal("CreatePool() template_hash = \"\", want non-empty")
+	}
+
+	got, err := s.GetPool(ctx, &poolmgrv1alpha1.GetPoolRequest{Ref: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}})
+	if err != nil {
+		t.Fatalf("GetPool() error = %v", err)
+	}
+	if got.GetSpec().GetTemplateHash() != created.GetSpec().GetTemplateHash() {
+		t.Fatalf("GetPool() template_hash = %q, want %q", got.GetSpec().GetTemplateHash(), created.GetSpec().GetTemplateHash())
+	}
+}
+
+func TestCreatePool_IgnoresClientSuppliedTemplateHash(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	s := api.NewPoolAdminServer(st, nil)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	spec.TemplateHash = "client-supplied-garbage"
+
+	created, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec})
+	if err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+	if created.GetSpec().GetTemplateHash() == "client-supplied-garbage" {
+		t.Fatal("CreatePool() trusted client-supplied template_hash, want server-computed")
+	}
+}
+
+func TestUpdatePool_TemplateHashChangesWithTemplate(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	s := api.NewPoolAdminServer(st, nil)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	created, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec})
+	if err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+	originalHash := created.GetSpec().GetTemplateHash()
+
+	update := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	update.MicrovmTemplate.Vcpu = 4
+	updated, err := s.UpdatePool(ctx, &poolmgrv1alpha1.UpdatePoolRequest{Spec: update})
+	if err != nil {
+		t.Fatalf("UpdatePool() error = %v", err)
+	}
+	if updated.GetSpec().GetTemplateHash() == originalHash {
+		t.Fatalf("UpdatePool() template_hash unchanged at %q after template change", originalHash)
+	}
+}
+
+func TestUpdatePool_TemplateHashUnchangedWhenTemplateIdentical(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	s := api.NewPoolAdminServer(st, nil)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	created, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec})
+	if err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+	originalHash := created.GetSpec().GetTemplateHash()
+
+	// Same template, but a different unrelated field, and a different
+	// (client-supplied, should-be-ignored) template_hash.
+	update := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	update.Size = 9
+	update.TemplateHash = "client-supplied-garbage"
+	updated, err := s.UpdatePool(ctx, &poolmgrv1alpha1.UpdatePoolRequest{Spec: update})
+	if err != nil {
+		t.Fatalf("UpdatePool() error = %v", err)
+	}
+	if updated.GetSpec().GetTemplateHash() != originalHash {
+		t.Fatalf("UpdatePool() template_hash = %q, want unchanged %q", updated.GetSpec().GetTemplateHash(), originalHash)
+	}
+}
+
+func TestUpdatePool_EmitsRolloutStartedOnHashChangeWithStaleVMs(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	s := api.NewPoolAdminServer(st, nil)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	created, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec})
+	if err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+	vm := sampleAvailableVM("vm-1", "pool-a")
+	vm.TemplateHash = created.GetSpec().GetTemplateHash()
+	if err := st.CreateVM(ctx, vm); err != nil {
+		t.Fatalf("CreateVM() error = %v", err)
+	}
+
+	update := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	update.MicrovmTemplate.Vcpu = 4
+	if _, err := s.UpdatePool(ctx, &poolmgrv1alpha1.UpdatePoolRequest{Spec: update}); err != nil {
+		t.Fatalf("UpdatePool() error = %v", err)
+	}
+
+	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
+	if err != nil {
+		t.Fatalf("ListEventsSince() error = %v", err)
+	}
+	found := false
+	for _, e := range events {
+		if e.GetType() == poolmgrv1alpha1.EventType_POOL_ROLLOUT_STARTED {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ListEventsSince() = %+v, want a POOL_ROLLOUT_STARTED event", events)
+	}
+}
+
+func TestUpdatePool_NoRolloutStartedWhenHashUnchanged(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	s := api.NewPoolAdminServer(st, nil)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+
+	update := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	update.Size = 9
+	if _, err := s.UpdatePool(ctx, &poolmgrv1alpha1.UpdatePoolRequest{Spec: update}); err != nil {
+		t.Fatalf("UpdatePool() error = %v", err)
+	}
+
+	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
+	if err != nil {
+		t.Fatalf("ListEventsSince() error = %v", err)
+	}
+	for _, e := range events {
+		if e.GetType() == poolmgrv1alpha1.EventType_POOL_ROLLOUT_STARTED {
+			t.Fatalf("ListEventsSince() = %+v, want no POOL_ROLLOUT_STARTED event", events)
+		}
+	}
+}
+
+func TestGetPoolAndListPools_StaleCount(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	s := api.NewPoolAdminServer(st, nil)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	created, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec})
+	if err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+	currentHash := created.GetSpec().GetTemplateHash()
+
+	matching := sampleAvailableVM("vm-matching", "pool-a")
+	matching.TemplateHash = currentHash
+	stale1 := sampleAvailableVM("vm-stale-1", "pool-a")
+	stale1.TemplateHash = "old-hash-1"
+	stale2 := withPhase(sampleAvailableVM("vm-stale-2", "pool-a"), poolmgrv1alpha1.VMPhase_LEASED)
+	stale2.TemplateHash = "old-hash-2"
+	for _, vm := range []*poolmgrv1alpha1.VMRecord{matching, stale1, stale2} {
+		if err := st.CreateVM(ctx, vm); err != nil {
+			t.Fatalf("CreateVM(%s) error = %v", vm.GetUid(), err)
+		}
+	}
+
+	got, err := s.GetPool(ctx, &poolmgrv1alpha1.GetPoolRequest{Ref: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}})
+	if err != nil {
+		t.Fatalf("GetPool() error = %v", err)
+	}
+	if got.GetStatus().GetStaleCount() != 2 {
+		t.Fatalf("GetPool() stale_count = %d, want 2", got.GetStatus().GetStaleCount())
+	}
+
+	list, err := s.ListPools(ctx, &poolmgrv1alpha1.ListPoolsRequest{})
+	if err != nil {
+		t.Fatalf("ListPools() error = %v", err)
+	}
+	if len(list.GetPools()) != 1 || list.GetPools()[0].GetStatus().GetStaleCount() != 2 {
+		t.Fatalf("ListPools() = %+v, want stale_count 2", list.GetPools())
+	}
+}
