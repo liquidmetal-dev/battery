@@ -17,7 +17,7 @@ alongside flintlock and [guest-agent](https://github.com/liquidmetal-dev/guest-a
 
 ## Architecture
 
-battery is made up of two binaries:
+battery is made up of three binaries:
 
 - **`poolmgrd`** (`cmd/poolmgrd`) — the central pool manager daemon. It serves the gRPC
   API defined under `api/proto/poolmgr/v1alpha1`:
@@ -33,6 +33,10 @@ battery is made up of two binaries:
   so this sidecar proxies `exec`/`ping` calls to the in-VM guest-agent on `poolmgrd`'s behalf,
   exposed via the `Hostagent` gRPC service.
 
+- **`poolmgrctl`** (`cmd/poolmgrctl`) — a CLI client for the pool manager's gRPC API. It connects
+  to `poolmgrd` to manage pool definitions (CRUD), claim and release leases, list leases, and
+  subscribe to pool/VM/lease lifecycle events. It holds no server-side state of its own.
+
 See [`docs/design/2026-09-05-microvm-warm-pool-manager-design.md`](docs/design/2026-09-05-microvm-warm-pool-manager-design.md)
 for the full design rationale and decisions, and
 [`docs/runbooks/e2e-manual-verification.md`](docs/runbooks/e2e-manual-verification.md) for the
@@ -46,6 +50,19 @@ manual end-to-end verification runbook against a real flintlockd + Firecracker V
 - [mise](https://mise.jdx.dev/) (recommended) to install pinned tool versions from
   `mise.toml` — [buf](https://buf.build/), golangci-lint, `protoc-gen-go`, and
   `protoc-gen-go-grpc`.
+
+### Using poolmgrctl
+
+`poolmgrctl` is a CLI client that connects to `poolmgrd`'s gRPC API. It can be used to manage
+pools and leases. By default, it connects to `127.0.0.1:9090` — change this with `--addr`.
+Other connection flags include `--insecure` (disable TLS), `--ca-file`, `--cert-file`, and
+`--key-file` (for mTLS):
+
+```sh
+poolmgrctl pool list --addr 127.0.0.1:9090 --insecure
+poolmgrctl lease claim --pool web --namespace default --addr 127.0.0.1:9090 --insecure
+poolmgrctl events tail --pool web --addr 127.0.0.1:9090 --insecure
+```
 
 ### Build and test
 
@@ -70,12 +87,16 @@ The gRPC API is defined in `api/proto` using [buf](https://buf.build/). After ed
 Releases are cut by pushing a semver tag matching `v*.*.*` (e.g. `v0.1.0`)
 to `main`. This triggers `.github/workflows/release.yml`, which:
 
-- builds `poolmgrd` for `linux/amd64` and `linux/arm64` via GoReleaser
-- publishes a multi-arch container image to
-  `ghcr.io/liquidmetal-dev/poolmgrd:<version>` (and `:latest`) — note the
-  image tag drops the leading `v` from the git tag (e.g. tagging `v0.1.0`
-  produces `ghcr.io/liquidmetal-dev/poolmgrd:0.1.0`), unlike the GitHub
-  release itself, which keeps it
+- builds `poolmgrd` and `poolmgrctl` via GoReleaser
+  - `poolmgrd` is built for `linux/amd64` and `linux/arm64` and published as a
+    multi-arch container image to `ghcr.io/liquidmetal-dev/poolmgrd:<version>`
+    (and `:latest`) — note the image tag drops the leading `v` from the git tag
+    (e.g. tagging `v0.1.0` produces `ghcr.io/liquidmetal-dev/poolmgrd:0.1.0`),
+    unlike the GitHub release itself, which keeps it
+  - `poolmgrctl` is built as a CLI binary for `linux/amd64`, `linux/arm64`, and
+    `darwin/amd64`/`darwin/arm64` and made available as archives in the GitHub
+    release. No container image is published for `poolmgrctl` — it is an
+    operator-run client tool
 - creates a GitHub release with a changelog grouped by commit type
 - pushes `api/proto` (`PoolAdmin`/`Lease`/`Events`/`types`) to the Buf
   Schema Registry at `buf.build/liquidmetal-dev/battery`, creating the
