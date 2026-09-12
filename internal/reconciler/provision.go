@@ -119,7 +119,12 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 
 	log := slog.Default().With("pool", pool.GetName(), "namespace", pool.GetNamespace())
 
-	host, err := PickHost(ctx, p.store, pool)
+	drained, err := p.store.ListDrainedHostNames(ctx)
+	if err != nil {
+		return fmt.Errorf("reconciler: provision: %w", err)
+	}
+
+	host, err := PickHost(ctx, p.store, pool, drained)
 	if err != nil {
 		return err
 	}

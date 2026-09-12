@@ -44,6 +44,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	"github.com/liquidmetal-dev/battery/internal/config"
@@ -66,6 +67,7 @@ type e2ePoolmgrd struct {
 	PoolAdmin poolmgrv1alpha1.PoolAdminClient
 	Lease     poolmgrv1alpha1.LeaseClient
 	Events    poolmgrv1alpha1.EventsClient
+	HostAdmin poolmgrv1alpha1.HostAdminClient
 }
 
 // startE2EPoolmgrd builds and serves a real poolmgrd - the same
@@ -80,6 +82,18 @@ func startE2EPoolmgrd(t *testing.T, flint *flintlockclient.Pool) e2ePoolmgrd {
 		t.Fatalf("store.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
+
+	// Seed the host registry the same way main()'s seedHosts does, so
+	// HostAdmin.DrainHost/UndrainHost have a known host to act on. The fake
+	// flintlock started by e2etest.StartFakeFlintlock is always named
+	// "host-a" (see e2etest.StartFakeFlintlock); its real address isn't
+	// needed here since nothing in this suite dials HostAdmin's reported
+	// address directly.
+	if err := st.UpsertHostIfMissing(context.Background(), &poolmgrv1alpha1.Host{
+		Name: "host-a", Address: "host-a", UpdatedAt: timestamppb.Now(),
+	}); err != nil {
+		t.Fatalf("seed host-a: %v", err)
+	}
 
 	reg := metrics.NewRegistry()
 
@@ -111,6 +125,7 @@ func startE2EPoolmgrd(t *testing.T, flint *flintlockclient.Pool) e2ePoolmgrd {
 		PoolAdmin: poolmgrv1alpha1.NewPoolAdminClient(conn),
 		Lease:     poolmgrv1alpha1.NewLeaseClient(conn),
 		Events:    poolmgrv1alpha1.NewEventsClient(conn),
+		HostAdmin: poolmgrv1alpha1.NewHostAdminClient(conn),
 	}
 }
 
@@ -314,5 +329,89 @@ func TestE2E_ClaimFailsOnEmptyPool(t *testing.T) {
 	_, err = pm.PoolAdmin.GetPool(ctx, &poolmgrv1alpha1.GetPoolRequest{Ref: ref})
 	if status.Code(err) != codes.NotFound {
 		t.Fatalf("GetPool after DeletePool: got err=%v, want NotFound", err)
+	}
+}
+
+// assertAvailableStaysZero polls admin every e2ePollInterval for duration
+// and fails the test if ref's available count is ever nonzero, without
+// waiting out the full duration on ctx cancellation.
+func assertAvailableStaysZero(ctx context.Context, t *testing.T, admin poolmgrv1alpha1.PoolAdminClient, ref *poolmgrv1alpha1.PoolRef, duration time.Duration) {
+	t.Helper()
+
+	deadline := time.After(duration)
+	ticker := time.NewTicker(e2ePollInterval)
+	defer ticker.Stop()
+
+	for {
+		pool, err := admin.GetPool(ctx, &poolmgrv1alpha1.GetPoolRequest{Ref: ref})
+		if err != nil {
+			t.Fatalf("GetPool: %v", err)
+		}
+		if got := pool.GetStatus().GetAvailableCount(); got != 0 {
+			t.Fatalf("pool %s/%s available count = %d, want 0 while its only host is drained", ref.GetNamespace(), ref.GetName(), got)
+		}
+
+		select {
+		case <-ctx.Done():
+			t.Fatalf("context done while asserting available stays 0: %v", ctx.Err())
+		case <-deadline:
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// TestE2E_HostDrain drives a pool whose only host is drained via
+// HostAdmin.DrainHost: it must not provision despite wanting to (its
+// MIN_SIZE_THRESHOLD strategy would otherwise top it up immediately), and
+// must resume provisioning once HostAdmin.UndrainHost is called. This is the
+// graceful host maintenance mode flow from issue #66.
+func TestE2E_HostDrain(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), e2eTestTimeout)
+	defer cancel()
+
+	flint := e2etest.StartFakeFlintlock(t)
+	pm := startE2EPoolmgrd(t, flint)
+
+	if _, err := pm.HostAdmin.DrainHost(ctx, &poolmgrv1alpha1.DrainHostRequest{Name: "host-a", Reason: "e2e test"}); err != nil {
+		t.Fatalf("DrainHost: %v", err)
+	}
+
+	spec := e2etest.MinSizeThresholdPoolSpec("e2e-drain-pool", 1, 1)
+	ref := &poolmgrv1alpha1.PoolRef{Name: spec.GetName(), Namespace: spec.GetNamespace()}
+	if _, err := pm.PoolAdmin.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
+
+	// Wait comfortably past one reconciler tick (reconciler.DefaultTickInterval
+	// is 10s) with the pool's only host drained: it must still be at
+	// available=0.
+	assertAvailableStaysZero(ctx, t, pm.PoolAdmin, ref, 12*time.Second)
+
+	if _, err := pm.HostAdmin.UndrainHost(ctx, &poolmgrv1alpha1.UndrainHostRequest{Name: "host-a"}); err != nil {
+		t.Fatalf("UndrainHost: %v", err)
+	}
+
+	waitForAvailable(ctx, t, pm.PoolAdmin, ref, 1)
+
+	hosts, err := pm.HostAdmin.ListHosts(ctx, &poolmgrv1alpha1.ListHostsRequest{})
+	if err != nil {
+		t.Fatalf("ListHosts: %v", err)
+	}
+	var found bool
+	for _, hs := range hosts.GetHosts() {
+		if hs.GetHost().GetName() != "host-a" {
+			continue
+		}
+		found = true
+		if hs.GetHost().GetDrained() {
+			t.Errorf("ListHosts: host-a still reported drained after UndrainHost")
+		}
+		if hs.GetActiveVmCount() != 1 {
+			t.Errorf("ListHosts: host-a active_vm_count = %d, want 1", hs.GetActiveVmCount())
+		}
+	}
+	if !found {
+		t.Errorf("ListHosts: host-a not found in %+v", hosts.GetHosts())
 	}
 }

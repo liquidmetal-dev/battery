@@ -1062,3 +1062,175 @@ func TestListEventsSinceNamespaceIsolation(t *testing.T) {
 		t.Fatalf("ListEventsSince(pool-a, ns-1, 0) = %+v, want [vm-1's event]", got)
 	}
 }
+
+func sampleHost(name string) *poolmgrv1alpha1.Host {
+	now := timestamppb.New(time.Unix(1_700_000_000, 0))
+	return &poolmgrv1alpha1.Host{
+		Name:      name,
+		Address:   name + ".example.com:8443",
+		UpdatedAt: now,
+	}
+}
+
+func TestUpsertHostIfMissing(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	want := sampleHost("host-a")
+	if err := s.UpsertHostIfMissing(ctx, want); err != nil {
+		t.Fatalf("UpsertHostIfMissing() error = %v", err)
+	}
+
+	got, err := s.GetHost(ctx, "host-a")
+	if err != nil {
+		t.Fatalf("GetHost() error = %v", err)
+	}
+	if !proto.Equal(got, want) {
+		t.Errorf("GetHost() = %+v, want %+v", got, want)
+	}
+}
+
+func TestUpsertHostIfMissingNoOpWhenPresent(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if err := s.UpsertHostIfMissing(ctx, sampleHost("host-a")); err != nil {
+		t.Fatalf("UpsertHostIfMissing() error = %v", err)
+	}
+	if _, err := s.SetHostDrained(ctx, "host-a", true, "maintenance"); err != nil {
+		t.Fatalf("SetHostDrained() error = %v", err)
+	}
+
+	// A second seed attempt (e.g. on process restart) must not clobber the
+	// drain state set above.
+	if err := s.UpsertHostIfMissing(ctx, sampleHost("host-a")); err != nil {
+		t.Fatalf("UpsertHostIfMissing() second call error = %v", err)
+	}
+
+	got, err := s.GetHost(ctx, "host-a")
+	if err != nil {
+		t.Fatalf("GetHost() error = %v", err)
+	}
+	if !got.GetDrained() {
+		t.Errorf("GetHost() drained = false after re-seed, want true (drain state preserved)")
+	}
+}
+
+func TestGetHostNotFound(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.GetHost(ctx, "missing"); err != ErrNotFound {
+		t.Errorf("GetHost() error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestListHosts(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup error = %v", err)
+		}
+	}
+	must(s.UpsertHostIfMissing(ctx, sampleHost("host-b")))
+	must(s.UpsertHostIfMissing(ctx, sampleHost("host-a")))
+
+	got, err := s.ListHosts(ctx)
+	if err != nil {
+		t.Fatalf("ListHosts() error = %v", err)
+	}
+	if len(got) != 2 || got[0].GetName() != "host-a" || got[1].GetName() != "host-b" {
+		t.Fatalf("ListHosts() = %+v, want [host-a, host-b] ordered by name", got)
+	}
+}
+
+func TestSetHostDrained(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if err := s.UpsertHostIfMissing(ctx, sampleHost("host-a")); err != nil {
+		t.Fatalf("UpsertHostIfMissing() error = %v", err)
+	}
+
+	drained, err := s.SetHostDrained(ctx, "host-a", true, "kernel upgrade")
+	if err != nil {
+		t.Fatalf("SetHostDrained(true) error = %v", err)
+	}
+	if !drained.GetDrained() || drained.GetDrainedReason() != "kernel upgrade" || drained.GetDrainedAt() == nil {
+		t.Errorf("SetHostDrained(true) = %+v, want drained=true reason=%q drained_at set", drained, "kernel upgrade")
+	}
+
+	undrained, err := s.SetHostDrained(ctx, "host-a", false, "")
+	if err != nil {
+		t.Fatalf("SetHostDrained(false) error = %v", err)
+	}
+	if undrained.GetDrained() || undrained.GetDrainedReason() != "" || undrained.GetDrainedAt() != nil {
+		t.Errorf("SetHostDrained(false) = %+v, want drained=false, reason and drained_at cleared", undrained)
+	}
+}
+
+func TestSetHostDrainedNotFound(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.SetHostDrained(ctx, "missing", true, ""); err != ErrNotFound {
+		t.Errorf("SetHostDrained() error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestListDrainedHostNames(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup error = %v", err)
+		}
+	}
+	must(s.UpsertHostIfMissing(ctx, sampleHost("host-a")))
+	must(s.UpsertHostIfMissing(ctx, sampleHost("host-b")))
+	if _, err := s.SetHostDrained(ctx, "host-a", true, ""); err != nil {
+		t.Fatalf("SetHostDrained() error = %v", err)
+	}
+
+	got, err := s.ListDrainedHostNames(ctx)
+	if err != nil {
+		t.Fatalf("ListDrainedHostNames() error = %v", err)
+	}
+	if len(got) != 1 || !got["host-a"] {
+		t.Fatalf("ListDrainedHostNames() = %v, want {host-a: true}", got)
+	}
+}
+
+func TestCountActiveVMsByHost(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup error = %v", err)
+		}
+	}
+	vm1 := sampleVMRecord("vm-1", "pool-a", "default", poolmgrv1alpha1.VMPhase_AVAILABLE)
+	vm1.FlintlockHost = "host-a"
+	vm2 := sampleVMRecord("vm-2", "pool-a", "default", poolmgrv1alpha1.VMPhase_LEASED)
+	vm2.FlintlockHost = "host-a"
+	vm3 := sampleVMRecord("vm-3", "pool-a", "default", poolmgrv1alpha1.VMPhase_DELETING)
+	vm3.FlintlockHost = "host-a"
+	must(s.CreateVM(ctx, vm1))
+	must(s.CreateVM(ctx, vm2))
+	must(s.CreateVM(ctx, vm3))
+
+	got, err := s.CountActiveVMsByHost(ctx, "host-a")
+	if err != nil {
+		t.Fatalf("CountActiveVMsByHost() error = %v", err)
+	}
+	if got != 2 {
+		t.Errorf("CountActiveVMsByHost() = %d, want 2 (DELETING excluded)", got)
+	}
+}

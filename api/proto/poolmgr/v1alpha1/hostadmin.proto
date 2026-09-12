@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package poolmgr.v1alpha1;
+
+import "poolmgr/v1alpha1/types.proto";
+
+option go_package = "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1;poolmgrv1alpha1";
+
+// HostAdmin manages the drain state of registered flintlock hosts. Draining a host stops
+// the reconciler from placing new VMs there; existing VMs are unaffected and wind down
+// through normal lease expiry or release.
+service HostAdmin {
+  rpc DrainHost(DrainHostRequest) returns (Host);
+  rpc UndrainHost(UndrainHostRequest) returns (Host);
+  rpc ListHosts(ListHostsRequest) returns (ListHostsResponse);
+}
+
+message DrainHostRequest {
+  string name = 1;
+
+  // Reason is an optional free-text note recorded alongside the drain.
+  string reason = 2;
+}
+
+message UndrainHostRequest {
+  string name = 1;
+}
+
+message ListHostsRequest {}
+
+// HostStatus pairs a host's registry record with its current live VM count.
+message HostStatus {
+  Host host = 1;
+
+  // ActiveVmCount is the number of non-terminal (not DELETING/FAILED) VMs currently placed
+  // on this host, across all pools.
+  int32 active_vm_count = 2;
+}
+
+message ListHostsResponse {
+  repeated HostStatus hosts = 1;
+}

@@ -71,5 +71,21 @@ type Store interface {
 	// ListVMsByPhase returns all VMs (across all pools) currently in phase.
 	ListVMsByPhase(ctx context.Context, phase poolmgrv1alpha1.VMPhase) ([]*poolmgrv1alpha1.VMRecord, error)
 
+	// UpsertHostIfMissing inserts a row for host if none exists for its name; otherwise it is a
+	// no-op, preserving any existing drain state. Used to seed the host registry from static
+	// config at startup without clobbering drain state across restarts.
+	UpsertHostIfMissing(ctx context.Context, host *poolmgrv1alpha1.Host) error
+	GetHost(ctx context.Context, name string) (*poolmgrv1alpha1.Host, error)
+	ListHosts(ctx context.Context) ([]*poolmgrv1alpha1.Host, error)
+	// SetHostDrained sets host name's drained state and reason, returning the updated host.
+	// Returns ErrNotFound if no such host is registered.
+	SetHostDrained(ctx context.Context, name string, drained bool, reason string) (*poolmgrv1alpha1.Host, error)
+	// ListDrainedHostNames returns the set of currently-drained host names, for PickHost's
+	// placement filter.
+	ListDrainedHostNames(ctx context.Context) (map[string]bool, error)
+	// CountActiveVMsByHost returns the count of non-terminal (not DELETING/FAILED) VMs
+	// currently placed on host name, across all pools.
+	CountActiveVMsByHost(ctx context.Context, name string) (int32, error)
+
 	Close() error
 }

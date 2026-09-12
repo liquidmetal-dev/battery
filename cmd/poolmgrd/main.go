@@ -18,6 +18,7 @@ import (
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	"github.com/liquidmetal-dev/battery/internal/api"
@@ -80,6 +81,10 @@ func main() {
 			slog.Error("poolmgrd: close store", "error", err)
 		}
 	}()
+
+	if err := seedHosts(ctx, st, cfg); err != nil {
+		fatal("poolmgrd: seed hosts", err)
+	}
 
 	flint, err := flintlockclient.New(cfg)
 	if err != nil {
@@ -166,10 +171,25 @@ func parseLogLevel(s string) (slog.Level, error) {
 	}
 }
 
+// seedHosts upserts a hosts registry row for every host in cfg, so the
+// HostAdmin API has a known-host set to validate Drain/UndrainHost calls
+// against. Existing rows (and any drain state they carry) are left
+// untouched - see store.Store.UpsertHostIfMissing.
+func seedHosts(ctx context.Context, st store.Store, cfg *config.Config) error {
+	now := timestamppb.Now()
+	for _, h := range cfg.Hosts {
+		host := &poolmgrv1alpha1.Host{Name: h.Name, Address: h.Address, UpdatedAt: now}
+		if err := st.UpsertHostIfMissing(ctx, host); err != nil {
+			return fmt.Errorf("seed host %q: %w", h.Name, err)
+		}
+	}
+	return nil
+}
+
 // buildGRPCServer constructs the pool manager's gRPC server per cfg,
-// registers the PoolAdmin, Lease, and Events services (backed by st and
-// flint) plus grpc/health and reflection, and pre-registers reg's gRPC
-// metrics. The caller still needs to net.Listen and Serve it.
+// registers the PoolAdmin, Lease, Events, and HostAdmin services (backed by
+// st and flint) plus grpc/health and reflection, and pre-registers reg's
+// gRPC metrics. The caller still needs to net.Listen and Serve it.
 func buildGRPCServer(cfg config.APIServerConfig, st store.Store, flint *flintlockclient.Pool, reg *metrics.Registry, poolMgr *poolmanager.Manager) (*grpc.Server, error) {
 	srv, err := server.New(cfg, reg.ServerOptions()...)
 	if err != nil {
@@ -179,6 +199,7 @@ func buildGRPCServer(cfg config.APIServerConfig, st store.Store, flint *flintloc
 	poolmgrv1alpha1.RegisterPoolAdminServer(srv, api.NewPoolAdminServer(st, poolMgr))
 	poolmgrv1alpha1.RegisterLeaseServer(srv, api.NewLeaseServer(st, flint, api.HookExecConfig{}, poolMgr, reg))
 	poolmgrv1alpha1.RegisterEventsServer(srv, api.NewEventsServer(st, 0, 0))
+	poolmgrv1alpha1.RegisterHostAdminServer(srv, api.NewHostAdminServer(st))
 
 	healthSrv := health.NewServer()
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)

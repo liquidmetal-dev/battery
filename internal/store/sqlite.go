@@ -547,6 +547,123 @@ func scanEvents(rows *sql.Rows) ([]*poolmgrv1alpha1.Event, error) {
 	return events, nil
 }
 
+func (s *sqliteStore) UpsertHostIfMissing(ctx context.Context, host *poolmgrv1alpha1.Host) error {
+	row, err := hostToRow(host)
+	if err != nil {
+		return fmt.Errorf("store: marshal host: %w", err)
+	}
+
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO hosts (name, address, drained, drained_reason, drained_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT (name) DO NOTHING`,
+		row.name, row.address, row.drained, row.drainedReason, row.drainedAt, row.updatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("store: upsert host: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) GetHost(ctx context.Context, name string) (*poolmgrv1alpha1.Host, error) {
+	r := s.db.QueryRowContext(ctx, `
+		SELECT name, address, drained, drained_reason, drained_at, updated_at
+		FROM hosts WHERE name = ?`, name)
+
+	var row hostRow
+	err := r.Scan(&row.name, &row.address, &row.drained, &row.drainedReason, &row.drainedAt, &row.updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: query host: %w", err)
+	}
+	return rowToHost(row), nil
+}
+
+func (s *sqliteStore) ListHosts(ctx context.Context) ([]*poolmgrv1alpha1.Host, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT name, address, drained, drained_reason, drained_at, updated_at
+		FROM hosts ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("store: query hosts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var hosts []*poolmgrv1alpha1.Host
+	for rows.Next() {
+		var row hostRow
+		if err := rows.Scan(&row.name, &row.address, &row.drained, &row.drainedReason, &row.drainedAt, &row.updatedAt); err != nil {
+			return nil, fmt.Errorf("store: scan host: %w", err)
+		}
+		hosts = append(hosts, rowToHost(row))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate hosts: %w", err)
+	}
+	return hosts, nil
+}
+
+func (s *sqliteStore) SetHostDrained(ctx context.Context, name string, drained bool, reason string) (*poolmgrv1alpha1.Host, error) {
+	now := time.Now()
+
+	var drainedReason sql.NullString
+	var drainedAt sql.NullInt64
+	if drained {
+		if reason != "" {
+			drainedReason = sql.NullString{String: reason, Valid: true}
+		}
+		drainedAt = sql.NullInt64{Int64: now.UnixNano(), Valid: true}
+	}
+
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE hosts SET drained = ?, drained_reason = ?, drained_at = ?, updated_at = ?
+		WHERE name = ?`,
+		drained, drainedReason, drainedAt, now.UnixNano(), name,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: set host drained: %w", err)
+	}
+	if err := checkRowsAffected(res); err != nil {
+		return nil, err
+	}
+
+	return s.GetHost(ctx, name)
+}
+
+func (s *sqliteStore) ListDrainedHostNames(ctx context.Context) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM hosts WHERE drained = 1`)
+	if err != nil {
+		return nil, fmt.Errorf("store: query drained hosts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	drained := make(map[string]bool)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("store: scan drained host: %w", err)
+		}
+		drained[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate drained hosts: %w", err)
+	}
+	return drained, nil
+}
+
+func (s *sqliteStore) CountActiveVMsByHost(ctx context.Context, name string) (int32, error) {
+	var count int32
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM vms WHERE flintlock_host = ? AND phase NOT IN (?, ?)`,
+		name, int32(poolmgrv1alpha1.VMPhase_DELETING), int32(poolmgrv1alpha1.VMPhase_FAILED),
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("store: count active vms by host: %w", err)
+	}
+	return count, nil
+}
+
 func checkRowsAffected(res sql.Result) error {
 	n, err := res.RowsAffected()
 	if err != nil {

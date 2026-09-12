@@ -50,3 +50,12 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_pool_id ON events (pool_namespace, pool_name, id);
+
+CREATE TABLE IF NOT EXISTS hosts (
+    name           TEXT PRIMARY KEY,
+    address        TEXT NOT NULL,
+    drained        INTEGER NOT NULL DEFAULT 0,
+    drained_reason TEXT,
+    drained_at     INTEGER,
+    updated_at     INTEGER NOT NULL
+);
