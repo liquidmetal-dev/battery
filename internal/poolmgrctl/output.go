@@ -179,10 +179,8 @@ func printLeasesTable(w io.Writer, leases []*poolmgrv1alpha1.LeaseRecord) error 
 	return tw.Flush()
 }
 
-// printClaim renders a ClaimVM response to w. Unlike printPool/printLeases,
-// this is table-only - "lease claim" isn't a "list" and doesn't take an
-// -o/--output flag, matching how Task 2 handled "pool create"/"pool
-// delete".
+// printClaim renders a ClaimVM response to w in the given format, following
+// the same table/JSON convention as printPool/printPools/printLeases.
 func printClaim(w io.Writer, resp *poolmgrv1alpha1.ClaimVMResponse, format OutputFormat) error {
 	switch format {
 	case OutputJSON:

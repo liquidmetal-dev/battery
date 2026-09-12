@@ -13,11 +13,64 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/liquidmetal-dev/battery/internal/api"
+	"github.com/liquidmetal-dev/battery/internal/config"
+	"github.com/liquidmetal-dev/battery/internal/flintlockclient"
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
+
+// bufconnLeaseWithFlint is like bufconnLease, but wires a real
+// flintlockclient.Pool (dialed, lazily - grpc.NewClient doesn't block or
+// require anything actually listening) covering a "host-a" host, so a
+// successful ClaimVM (which unconditionally calls flint.ExecClient/
+// flint.Client/flint.Address for its host, even with zero pre-lease
+// commands configured) doesn't nil-panic like it would with bufconnLease's
+// flint: nil.
+func bufconnLeaseWithFlint(t *testing.T) (*grpc.ClientConn, store.Store) {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "poolmgr.db")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	flint, err := flintlockclient.New(&config.Config{Hosts: []config.HostConfig{
+		// Nothing needs to actually be listening here: ExecClient/Client/
+		// Address just look up an already-constructed client by host name,
+		// and any RPC against this address (only attempted best-effort, for
+		// network interfaces) is left to fail harmlessly.
+		{Name: "host-a", Address: "127.0.0.1:1", TLS: config.TLSConfig{Insecure: true}},
+	}})
+	if err != nil {
+		t.Fatalf("flintlockclient.New() error = %v", err)
+	}
+	t.Cleanup(func() { _ = flint.Close() })
+
+	lis := bufconn.Listen(1024 * 1024)
+	t.Cleanup(func() { _ = lis.Close() })
+
+	srv := grpc.NewServer()
+	poolmgrv1alpha1.RegisterLeaseServer(srv, api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil, nil))
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	dialer := func(context.Context, string) (net.Conn, error) { return lis.Dial() }
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(dialer),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient() error = %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	return conn, st
+}
 
 // bufconnLease starts a real api.LeaseServer backed by a temp SQLite store,
 // serves it over an in-memory bufconn listener, and returns both the dialed
@@ -91,6 +144,51 @@ func TestLeaseClaim_ResourceExhausted(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no available vm") {
 		t.Errorf("error = %q, want a readable message about no available vm", err.Error())
+	}
+}
+
+// TestLeaseClaim_OutputJSON proves "lease claim -o json" produces valid,
+// round-trippable protojson output - the plan specifies a -o table|json
+// flag for "lease claim" matching pool/lease list/get, and this is the
+// only exercise of that flag end-to-end through the command (as opposed to
+// output_test.go's direct printClaim() unit tests).
+func TestLeaseClaim_OutputJSON(t *testing.T) {
+	conn, st := bufconnLeaseWithFlint(t)
+	ctx := withTestLeaseClient(conn)
+
+	if err := st.CreatePool(context.Background(), testPoolSpec("pool-a", "default")); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
+	now := time.Now()
+	vm := &poolmgrv1alpha1.VMRecord{
+		Uid:           "vm-1",
+		PoolName:      "pool-a",
+		PoolNamespace: "default",
+		Phase:         poolmgrv1alpha1.VMPhase_AVAILABLE,
+		FlintlockHost: "host-a",
+		CreatedAt:     timestamppb.New(now),
+		UpdatedAt:     timestamppb.New(now),
+	}
+	if err := st.CreateVM(context.Background(), vm); err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+
+	cmd := newLeaseClaimCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetContext(ctx)
+	cmd.SetArgs([]string{"--pool", "pool-a", "--namespace", "default", "-o", "json"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	resp := &poolmgrv1alpha1.ClaimVMResponse{}
+	if err := protojson.Unmarshal(out.Bytes(), resp); err != nil {
+		t.Fatalf("protojson.Unmarshal() error = %v, output:\n%s", err, out.String())
+	}
+	if resp.GetVmUid() != "vm-1" {
+		t.Errorf("resp.VmUid = %q, want %q", resp.GetVmUid(), "vm-1")
 	}
 }
 

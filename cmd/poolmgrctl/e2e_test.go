@@ -240,7 +240,8 @@ func TestE2E_PoolmgrctlLifecycle(t *testing.T) {
 
 	// Step 4: lease claim - capture the lease_id from the table output
 	// (printClaim always renders "LEASE_ID\t<id>" as its first line; "lease
-	// claim" doesn't support -o json per internal/poolmgrctl/output.go).
+	// claim" also supports -o json, but table output is a fine smoke test
+	// here too).
 	out, err = runCLI(ctx, addr, "lease", "claim", "--pool", poolName, "--namespace", poolNS)
 	if err != nil {
 		t.Fatalf("lease claim: %v\noutput:\n%s", err, out)

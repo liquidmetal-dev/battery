@@ -24,12 +24,17 @@ func newLeaseCmd() *cobra.Command {
 }
 
 func newLeaseClaimCmd() *cobra.Command {
-	var pool, namespace string
+	var pool, namespace, output string
 
 	cmd := &cobra.Command{
 		Use:   "claim",
 		Short: "Claim an available VM from a pool",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			format, err := parseOutputFormat(output)
+			if err != nil {
+				return err
+			}
+
 			lease := clientsFromContext(cmd.Context()).lease
 
 			resp, err := lease.ClaimVM(cmd.Context(), &poolmgrv1alpha1.ClaimVMRequest{
@@ -39,12 +44,13 @@ func newLeaseClaimCmd() *cobra.Command {
 				return wrapGRPCErr(err)
 			}
 
-			return printClaim(cmd.OutOrStdout(), resp, OutputTable)
+			return printClaim(cmd.OutOrStdout(), resp, format)
 		},
 	}
 
 	cmd.Flags().StringVar(&pool, "pool", "", "pool name")
 	cmd.Flags().StringVar(&namespace, "namespace", "", "pool namespace")
+	cmd.Flags().StringVarP(&output, "output", "o", string(OutputTable), "output format: table|json")
 	_ = cmd.MarkFlagRequired("pool")
 	_ = cmd.MarkFlagRequired("namespace")
 
