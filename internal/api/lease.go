@@ -301,3 +301,13 @@ func (s *LeaseServer) ReleaseVM(ctx context.Context, req *poolmgrv1alpha1.Releas
 	s.notifier.NotifyVMDeleted(lease.GetPoolName(), lease.GetPoolNamespace())
 	return &emptypb.Empty{}, nil
 }
+
+// ListLeases returns every lease, optionally filtered to one pool. Returns only persisted
+// LeaseRecord fields - no flintlock lookups, unlike ClaimVM's response.
+func (s *LeaseServer) ListLeases(ctx context.Context, req *poolmgrv1alpha1.ListLeasesRequest) (*poolmgrv1alpha1.ListLeasesResponse, error) {
+	leases, err := s.store.ListLeases(ctx, req.GetPoolRef())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list leases: %v", err)
+	}
+	return &poolmgrv1alpha1.ListLeasesResponse{Leases: leases}, nil
+}

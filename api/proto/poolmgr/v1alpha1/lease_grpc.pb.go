@@ -20,9 +20,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Lease_ClaimVM_FullMethodName   = "/poolmgr.v1alpha1.Lease/ClaimVM"
-	Lease_Heartbeat_FullMethodName = "/poolmgr.v1alpha1.Lease/Heartbeat"
-	Lease_ReleaseVM_FullMethodName = "/poolmgr.v1alpha1.Lease/ReleaseVM"
+	Lease_ClaimVM_FullMethodName    = "/poolmgr.v1alpha1.Lease/ClaimVM"
+	Lease_Heartbeat_FullMethodName  = "/poolmgr.v1alpha1.Lease/Heartbeat"
+	Lease_ReleaseVM_FullMethodName  = "/poolmgr.v1alpha1.Lease/ReleaseVM"
+	Lease_ListLeases_FullMethodName = "/poolmgr.v1alpha1.Lease/ListLeases"
 )
 
 // LeaseClient is the client API for Lease service.
@@ -37,6 +38,8 @@ type LeaseClient interface {
 	// Heartbeat is keyed by lease_id and extends the lease's expiry.
 	Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatResponse, error)
 	ReleaseVM(ctx context.Context, in *ReleaseVMRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// ListLeases returns every lease, optionally filtered to one pool.
+	ListLeases(ctx context.Context, in *ListLeasesRequest, opts ...grpc.CallOption) (*ListLeasesResponse, error)
 }
 
 type leaseClient struct {
@@ -77,6 +80,16 @@ func (c *leaseClient) ReleaseVM(ctx context.Context, in *ReleaseVMRequest, opts 
 	return out, nil
 }
 
+func (c *leaseClient) ListLeases(ctx context.Context, in *ListLeasesRequest, opts ...grpc.CallOption) (*ListLeasesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListLeasesResponse)
+	err := c.cc.Invoke(ctx, Lease_ListLeases_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // LeaseServer is the server API for Lease service.
 // All implementations should embed UnimplementedLeaseServer
 // for forward compatibility.
@@ -89,6 +102,8 @@ type LeaseServer interface {
 	// Heartbeat is keyed by lease_id and extends the lease's expiry.
 	Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error)
 	ReleaseVM(context.Context, *ReleaseVMRequest) (*emptypb.Empty, error)
+	// ListLeases returns every lease, optionally filtered to one pool.
+	ListLeases(context.Context, *ListLeasesRequest) (*ListLeasesResponse, error)
 }
 
 // UnimplementedLeaseServer should be embedded to have
@@ -106,6 +121,9 @@ func (UnimplementedLeaseServer) Heartbeat(context.Context, *HeartbeatRequest) (*
 }
 func (UnimplementedLeaseServer) ReleaseVM(context.Context, *ReleaseVMRequest) (*emptypb.Empty, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ReleaseVM not implemented")
+}
+func (UnimplementedLeaseServer) ListLeases(context.Context, *ListLeasesRequest) (*ListLeasesResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListLeases not implemented")
 }
 func (UnimplementedLeaseServer) testEmbeddedByValue() {}
 
@@ -181,6 +199,24 @@ func _Lease_ReleaseVM_Handler(srv interface{}, ctx context.Context, dec func(int
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Lease_ListLeases_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListLeasesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LeaseServer).ListLeases(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Lease_ListLeases_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LeaseServer).ListLeases(ctx, req.(*ListLeasesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Lease_ServiceDesc is the grpc.ServiceDesc for Lease service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -199,6 +235,10 @@ var Lease_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReleaseVM",
 			Handler:    _Lease_ReleaseVM_Handler,
+		},
+		{
+			MethodName: "ListLeases",
+			Handler:    _Lease_ListLeases_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -20,6 +20,17 @@ builds:
     goarch:
       - amd64
       - arm64
+  - id: poolmgrctl
+    main: ./cmd/poolmgrctl
+    binary: poolmgrctl
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
 
 archives:
   - id: poolmgrd
@@ -27,6 +38,13 @@ archives:
       - poolmgrd
     formats:
       - tar.gz
+  - id: poolmgrctl
+    ids:
+      - poolmgrctl
+    formats:
+      - tar.gz
+    name_template: >-
+      poolmgrctl_{{ .Version }}_{{ .Os }}_{{ .Arch }}
 
 checksum:
   name_template: "checksums.txt"

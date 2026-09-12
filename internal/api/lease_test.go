@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -471,5 +472,135 @@ func TestReleaseVM_UnknownLease(t *testing.T) {
 	_, err := s.ReleaseVM(ctx, &poolmgrv1alpha1.ReleaseVMRequest{LeaseId: "missing"})
 	if status.Code(err) != codes.NotFound {
 		t.Fatalf("expected NotFound, got %v", err)
+	}
+}
+
+func TestListLeases_Unfiltered(t *testing.T) {
+	vm := &fakeMicroVM{}
+	exec := &fakeMicroVMExec{}
+	flint := startFakeFlintlock(t, vm, exec)
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	poolA := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	poolB := samplePool("pool-b", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	if err := st.CreatePool(ctx, poolA); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
+	if err := st.CreatePool(ctx, poolB); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
+	if err := st.CreateVM(ctx, sampleAvailableVM("vm-a1", "pool-a")); err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+	if err := st.CreateVM(ctx, sampleAvailableVM("vm-b1", "pool-b")); err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil, nil)
+	claimA, err := s.ClaimVM(ctx, &poolmgrv1alpha1.ClaimVMRequest{Pool: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}})
+	if err != nil {
+		t.Fatalf("ClaimVM(pool-a): %v", err)
+	}
+	claimB, err := s.ClaimVM(ctx, &poolmgrv1alpha1.ClaimVMRequest{Pool: &poolmgrv1alpha1.PoolRef{Name: "pool-b", Namespace: "default"}})
+	if err != nil {
+		t.Fatalf("ClaimVM(pool-b): %v", err)
+	}
+
+	resp, err := s.ListLeases(ctx, &poolmgrv1alpha1.ListLeasesRequest{})
+	if err != nil {
+		t.Fatalf("ListLeases: %v", err)
+	}
+	if len(resp.GetLeases()) != 2 {
+		t.Fatalf("expected 2 leases, got %d: %+v", len(resp.GetLeases()), resp.GetLeases())
+	}
+	gotIDs := map[string]bool{}
+	for _, l := range resp.GetLeases() {
+		gotIDs[l.GetLeaseId()] = true
+	}
+	if !gotIDs[claimA.GetLeaseId()] || !gotIDs[claimB.GetLeaseId()] {
+		t.Fatalf("expected leases from both pools, got %+v", resp.GetLeases())
+	}
+}
+
+func TestListLeases_FilteredByPool(t *testing.T) {
+	vm := &fakeMicroVM{}
+	exec := &fakeMicroVMExec{}
+	flint := startFakeFlintlock(t, vm, exec)
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	poolA := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	poolB := samplePool("pool-b", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	if err := st.CreatePool(ctx, poolA); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
+	if err := st.CreatePool(ctx, poolB); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
+	if err := st.CreateVM(ctx, sampleAvailableVM("vm-a1", "pool-a")); err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+	if err := st.CreateVM(ctx, sampleAvailableVM("vm-b1", "pool-b")); err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil, nil)
+	claimA, err := s.ClaimVM(ctx, &poolmgrv1alpha1.ClaimVMRequest{Pool: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}})
+	if err != nil {
+		t.Fatalf("ClaimVM(pool-a): %v", err)
+	}
+	if _, err := s.ClaimVM(ctx, &poolmgrv1alpha1.ClaimVMRequest{Pool: &poolmgrv1alpha1.PoolRef{Name: "pool-b", Namespace: "default"}}); err != nil {
+		t.Fatalf("ClaimVM(pool-b): %v", err)
+	}
+
+	resp, err := s.ListLeases(ctx, &poolmgrv1alpha1.ListLeasesRequest{PoolRef: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}})
+	if err != nil {
+		t.Fatalf("ListLeases: %v", err)
+	}
+	if len(resp.GetLeases()) != 1 || resp.GetLeases()[0].GetLeaseId() != claimA.GetLeaseId() {
+		t.Fatalf("expected only pool-a's lease, got %+v", resp.GetLeases())
+	}
+}
+
+func TestListLeases_Empty(t *testing.T) {
+	vm := &fakeMicroVM{}
+	exec := &fakeMicroVMExec{}
+	flint := startFakeFlintlock(t, vm, exec)
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil, nil)
+	resp, err := s.ListLeases(ctx, &poolmgrv1alpha1.ListLeasesRequest{})
+	if err != nil {
+		t.Fatalf("ListLeases: %v", err)
+	}
+	if len(resp.GetLeases()) != 0 {
+		t.Fatalf("expected empty result, got %+v", resp.GetLeases())
+	}
+}
+
+// erroringListLeasesStore wraps a store.Store and forces ListLeases to fail,
+// so ListLeases's store-error path can be exercised without a real store
+// failure.
+type erroringListLeasesStore struct {
+	store.Store
+}
+
+func (erroringListLeasesStore) ListLeases(context.Context, *poolmgrv1alpha1.PoolRef) ([]*poolmgrv1alpha1.LeaseRecord, error) {
+	return nil, errors.New("boom")
+}
+
+func TestListLeases_StoreError(t *testing.T) {
+	vm := &fakeMicroVM{}
+	exec := &fakeMicroVMExec{}
+	flint := startFakeFlintlock(t, vm, exec)
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	s := api.NewLeaseServer(erroringListLeasesStore{Store: st}, flint, api.HookExecConfig{}, nil, nil)
+	_, err := s.ListLeases(ctx, &poolmgrv1alpha1.ListLeasesRequest{})
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("expected Internal, got %v", err)
 	}
 }

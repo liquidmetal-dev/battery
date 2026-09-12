@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS leases (
 );
 
 CREATE INDEX IF NOT EXISTS idx_leases_expires_at ON leases (expires_at);
+CREATE INDEX IF NOT EXISTS idx_leases_pool ON leases (pool_namespace, pool_name);
 
 CREATE TABLE IF NOT EXISTS events (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,

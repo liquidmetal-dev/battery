@@ -48,6 +48,9 @@ type Store interface {
 	UpdateLeaseHeartbeat(ctx context.Context, leaseID string, at time.Time, expiresAt time.Time) error
 	DeleteLease(ctx context.Context, leaseID string) error
 	ListExpiredLeases(ctx context.Context, now time.Time) ([]*poolmgrv1alpha1.LeaseRecord, error)
+	// ListLeases returns every lease, optionally filtered to one pool
+	// (poolRef == nil means unfiltered), ordered by lease_id.
+	ListLeases(ctx context.Context, poolRef *poolmgrv1alpha1.PoolRef) ([]*poolmgrv1alpha1.LeaseRecord, error)
 	// DeleteLeaseIfExpired re-checks leaseID's expiry against now and, only if still expired,
 	// deletes the lease row and returns the record as it was just before deletion. Returns
 	// ErrLeaseNotExpired if a heartbeat renewed the lease's expiry since the caller last observed
