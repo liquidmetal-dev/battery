@@ -61,7 +61,7 @@ Other connection flags include `--insecure` (disable TLS), `--ca-file`, `--cert-
 ```sh
 poolmgrctl pool list --addr 127.0.0.1:9090 --insecure
 poolmgrctl lease claim --pool web --namespace default --addr 127.0.0.1:9090 --insecure
-poolmgrctl events tail --pool web --addr 127.0.0.1:9090 --insecure
+poolmgrctl events tail --pool web --namespace default --addr 127.0.0.1:9090 --insecure
 ```
 
 ### Build and test
