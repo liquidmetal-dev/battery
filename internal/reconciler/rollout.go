@@ -100,20 +100,31 @@ func (c *RolloutController) Tick(ctx context.Context, _ time.Time) {
 	}
 
 	var (
-		staleCount int32
-		candidates []*poolmgrv1alpha1.VMRecord
-		inFlight   int32
+		staleCount              int32
+		candidates              []*poolmgrv1alpha1.VMRecord
+		inFlight                int32
+		unavailableProvisioning int32
 	)
 	for _, vm := range vms {
-		if vm.GetTemplateHash() == currentHash {
+		if vm.GetTemplateHash() != currentHash {
+			staleCount++
+			switch vm.GetPhase() {
+			case poolmgrv1alpha1.VMPhase_AVAILABLE:
+				candidates = append(candidates, vm)
+			case poolmgrv1alpha1.VMPhase_DELETING:
+				inFlight++
+			}
 			continue
 		}
-		staleCount++
+		// A current-hash VM still being provisioned is a rollout's own
+		// replacement for a VM already deleted this rollout (see the
+		// package doc for the backfill path) - it counts as unavailable
+		// load just like inFlight, or budget wouldn't bound how many VMs
+		// are simultaneously missing/starting during a rollout. Mirrors
+		// reconciler.CountVMs' PROVISIONING/CREATE_HOOK_RUNNING grouping.
 		switch vm.GetPhase() {
-		case poolmgrv1alpha1.VMPhase_AVAILABLE:
-			candidates = append(candidates, vm)
-		case poolmgrv1alpha1.VMPhase_DELETING:
-			inFlight++
+		case poolmgrv1alpha1.VMPhase_PROVISIONING, poolmgrv1alpha1.VMPhase_CREATE_HOOK_RUNNING:
+			unavailableProvisioning++
 		}
 	}
 
@@ -121,7 +132,10 @@ func (c *RolloutController) Tick(ctx context.Context, _ time.Time) {
 		c.rollingOut = true
 	}
 
-	budget := resolveBatchSize(c.pool.GetRolloutPolicy(), c.pool.GetSize()) - inFlight
+	budget := resolveBatchSize(c.pool.GetRolloutPolicy(), c.pool.GetSize()) - inFlight - unavailableProvisioning
+	if budget < 0 {
+		budget = 0
+	}
 	if budget > 0 && len(candidates) > 0 {
 		sort.Slice(candidates, func(i, j int) bool {
 			return candidates[i].GetCreatedAt().AsTime().Before(candidates[j].GetCreatedAt().AsTime())
