@@ -23,6 +23,12 @@ var ErrNoAvailableVM = errors.New("store: no available vm in pool")
 // expiry was extended (by a Heartbeat) since the caller last observed it.
 var ErrLeaseNotExpired = errors.New("store: lease not expired")
 
+// ErrPhaseChanged is returned by UpdateVMPhaseIfCurrent when the VM's phase
+// is no longer the caller's expected phase - e.g. a concurrent
+// ClaimAvailableVM already moved it AVAILABLE -> LEASED. Distinguished from
+// ErrNotFound so callers can tell "raced" from "already gone".
+var ErrPhaseChanged = errors.New("store: vm phase changed")
+
 // Store is the repository interface for pool manager persistence.
 type Store interface {
 	CreatePool(ctx context.Context, p *poolmgrv1alpha1.PoolSpec) error
@@ -40,6 +46,13 @@ type Store interface {
 	// (poolName, poolNamespace) and marks it LEASED, returning the updated record.
 	// Returns ErrNoAvailableVM if no VM in the pool is currently AVAILABLE.
 	ClaimAvailableVM(ctx context.Context, poolName, poolNamespace string) (*poolmgrv1alpha1.VMRecord, error)
+	// UpdateVMPhaseIfCurrent atomically transitions uid's phase from expectedPhase to
+	// newPhase (and bumps updated_at), guarded the same way ClaimAvailableVM guards its own
+	// UPDATE: the write only takes effect if uid's phase is still expectedPhase at the moment
+	// of the UPDATE. Returns ErrPhaseChanged if a concurrent writer already moved uid to some
+	// other phase (e.g. ClaimAvailableVM racing a rollout-triggered deletion), or ErrNotFound
+	// if uid doesn't exist.
+	UpdateVMPhaseIfCurrent(ctx context.Context, uid string, expectedPhase, newPhase poolmgrv1alpha1.VMPhase) error
 
 	CreateLease(ctx context.Context, l *poolmgrv1alpha1.LeaseRecord) error
 	GetLease(ctx context.Context, leaseID string) (*poolmgrv1alpha1.LeaseRecord, error)

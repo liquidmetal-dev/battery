@@ -179,6 +179,109 @@ func TestRolloutController_EmitsPoolRolloutCompletedOnceAtZeroTransition(t *test
 	}
 }
 
+// raceyClaimStore wraps a real store.Store and, on its first
+// ListVMsByPool call, claims raceUID out from under the caller via a real
+// ClaimAvailableVM - simulating a concurrent ClaimVM winning the race in the
+// window between RolloutController.Tick's snapshot read and its later
+// EnsureVMDeletedIfPhase call on that same (now stale) snapshot.
+type raceyClaimStore struct {
+	store.Store
+	poolName, poolNamespace string
+	triggered               bool
+}
+
+func (r *raceyClaimStore) ListVMsByPool(ctx context.Context, poolName, poolNamespace string, phase *poolmgrv1alpha1.VMPhase) ([]*poolmgrv1alpha1.VMRecord, error) {
+	vms, err := r.Store.ListVMsByPool(ctx, poolName, poolNamespace, phase)
+	if err != nil {
+		return nil, err
+	}
+	if !r.triggered {
+		r.triggered = true
+		if _, err := r.Store.ClaimAvailableVM(ctx, r.poolName, r.poolNamespace); err != nil {
+			panic("raceyClaimStore: test setup: ClaimAvailableVM: " + err.Error())
+		}
+	}
+	return vms, nil
+}
+
+func TestRolloutController_SkipsVMConcurrentlyClaimedDuringTick(t *testing.T) {
+	vm := &fakeMicroVM{}
+	exec := &fakeMicroVMExec{}
+	flint := startFakeFlintlock(t, vm, exec)
+	realStore := openTestStore(t)
+	ctx := context.Background()
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE, 5, []string{"host-a"})
+	pool.TemplateHash = "new-hash"
+	pool.RolloutPolicy = &poolmgrv1alpha1.RolloutPolicy{MaxUnavailable: &poolmgrv1alpha1.RolloutPolicy_Count{Count: 1}}
+	if err := realStore.CreatePool(ctx, pool); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
+
+	now := time.Now()
+	stale := staleVM("stale-1", "pool-a", "host-a", poolmgrv1alpha1.VMPhase_AVAILABLE, "old-hash", now.Add(-time.Hour))
+	if err := realStore.CreateVM(ctx, stale); err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+
+	st := &raceyClaimStore{Store: realStore, poolName: "pool-a", poolNamespace: "default"}
+	rc := reconciler.NewRolloutController(pool, st, flint, time.Second, nil, metrics.NewRegistry())
+	rc.Tick(ctx, now)
+
+	// The VM must survive, and be LEASED (from the simulated concurrent
+	// claim), not deleted by the rollout path racing it.
+	got, err := realStore.GetVM(ctx, "stale-1")
+	if err != nil {
+		t.Fatalf("expected stale-1 to survive the race, GetVM error = %v", err)
+	}
+	if got.GetPhase() != poolmgrv1alpha1.VMPhase_LEASED {
+		t.Fatalf("expected stale-1 to be LEASED (claimed), got phase %v", got.GetPhase())
+	}
+
+	if got := vm.deletedUIDs(); len(got) != 0 {
+		t.Fatalf("expected no DeleteMicroVM calls, got %v", got)
+	}
+
+	events, err := realStore.ListEventsSince(ctx, "pool-a", "default", 0, 100)
+	if err != nil {
+		t.Fatalf("ListEventsSince: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected no events (no deletion happened), got %v", eventTypes(t, events))
+	}
+}
+
+func TestRolloutController_CountZeroPausesDeletions(t *testing.T) {
+	vm := &fakeMicroVM{}
+	exec := &fakeMicroVMExec{}
+	flint := startFakeFlintlock(t, vm, exec)
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE, 5, []string{"host-a"})
+	pool.TemplateHash = "new-hash"
+	pool.RolloutPolicy = &poolmgrv1alpha1.RolloutPolicy{MaxUnavailable: &poolmgrv1alpha1.RolloutPolicy_Count{Count: 0}}
+	if err := st.CreatePool(ctx, pool); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
+
+	now := time.Now()
+	stale := staleVM("stale-1", "pool-a", "host-a", poolmgrv1alpha1.VMPhase_AVAILABLE, "old-hash", now.Add(-time.Hour))
+	if err := st.CreateVM(ctx, stale); err != nil {
+		t.Fatalf("CreateVM: %v", err)
+	}
+
+	rc := reconciler.NewRolloutController(pool, st, flint, time.Second, nil, metrics.NewRegistry())
+	rc.Tick(ctx, now)
+
+	if _, err := st.GetVM(ctx, "stale-1"); err != nil {
+		t.Fatalf("expected stale-1 to survive with rollout paused, GetVM error = %v", err)
+	}
+	if got := vm.deletedUIDs(); len(got) != 0 {
+		t.Fatalf("expected no DeleteMicroVM calls with count:0, got %v", got)
+	}
+}
+
 func TestRolloutController_NoRolloutCompletedWhenNeverStale(t *testing.T) {
 	vm := &fakeMicroVM{}
 	exec := &fakeMicroVMExec{}
