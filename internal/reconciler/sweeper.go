@@ -161,7 +161,7 @@ func (s *Sweeper) retryPendingDeletions(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		FinishVMDeletion(ctx, s.store, pool, vm, s.notifier, s.metrics)
+		FinishVMDeletion(ctx, s.store, pool, vm, s.notifier, s.metrics, poolmgrv1alpha1.EventType_VM_DELETED_DUE_TO_EXPIRY)
 	}
 }
 
@@ -214,5 +214,5 @@ func (s *Sweeper) beginExpiry(ctx context.Context, l *poolmgrv1alpha1.LeaseRecor
 	if err := EnsureVMDeleted(ctx, s.store, s.flint, vm); err != nil {
 		return // left DELETING; retryPendingDeletions will pick it up next tick
 	}
-	FinishVMDeletion(ctx, s.store, pool, vm, s.notifier, s.metrics)
+	FinishVMDeletion(ctx, s.store, pool, vm, s.notifier, s.metrics, poolmgrv1alpha1.EventType_VM_DELETED_DUE_TO_EXPIRY)
 }

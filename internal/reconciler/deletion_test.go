@@ -106,7 +106,7 @@ func TestFinishVMDeletion_InfersExpiry(t *testing.T) {
 
 	notifier := &spyNotifier{}
 	reg := metrics.NewRegistry()
-	reconciler.FinishVMDeletion(ctx, st, pool, vm, notifier, reg)
+	reconciler.FinishVMDeletion(ctx, st, pool, vm, notifier, reg, poolmgrv1alpha1.EventType_VM_DELETED_DUE_TO_EXPIRY)
 
 	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
 	if err != nil {
@@ -147,7 +147,7 @@ func TestFinishVMDeletion_InfersRelease(t *testing.T) {
 
 	notifier := &spyNotifier{}
 	reg := metrics.NewRegistry()
-	reconciler.FinishVMDeletion(ctx, st, pool, vm, notifier, reg)
+	reconciler.FinishVMDeletion(ctx, st, pool, vm, notifier, reg, poolmgrv1alpha1.EventType_VM_DELETED_DUE_TO_EXPIRY)
 
 	if _, err := st.GetLease(ctx, "lease-1"); err != store.ErrNotFound {
 		t.Fatalf("expected lease to be deleted, GetLease error = %v", err)
