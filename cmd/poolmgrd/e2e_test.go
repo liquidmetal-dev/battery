@@ -34,26 +34,20 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
-	microvmv1alpha1 "github.com/liquidmetal-dev/flintlock/api/services/microvm/v1alpha1"
-	microvmexecv1alpha1 "github.com/liquidmetal-dev/flintlock/api/services/microvmexec/v1alpha1"
-	flintlocktypes "github.com/liquidmetal-dev/flintlock/api/types"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/durationpb"
-	"google.golang.org/protobuf/types/known/emptypb"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	"github.com/liquidmetal-dev/battery/internal/config"
+	"github.com/liquidmetal-dev/battery/internal/e2etest"
 	"github.com/liquidmetal-dev/battery/internal/flintlockclient"
 	"github.com/liquidmetal-dev/battery/internal/metrics"
 	"github.com/liquidmetal-dev/battery/internal/poolmanager"
@@ -66,99 +60,6 @@ import (
 const e2eTestTimeout = 40 * time.Second
 
 const e2ePollInterval = 200 * time.Millisecond
-
-// e2eFakeMicroVM is a minimal flintlock MicroVM service that reports every
-// created microvm as CREATED on the very first GetMicroVM call: this suite
-// is proving poolmgrd's own lifecycle logic, not flintlock's provisioning
-// latency.
-type e2eFakeMicroVM struct {
-	microvmv1alpha1.UnimplementedMicroVMServer
-
-	mu      sync.Mutex
-	nextUID int
-}
-
-func (f *e2eFakeMicroVM) CreateMicroVM(_ context.Context, req *microvmv1alpha1.CreateMicroVMRequest) (*microvmv1alpha1.CreateMicroVMResponse, error) {
-	spec, _ := proto.Clone(req.GetMicrovm()).(*flintlocktypes.MicroVMSpec)
-	if spec == nil {
-		spec = &flintlocktypes.MicroVMSpec{}
-	}
-
-	f.mu.Lock()
-	f.nextUID++
-	uid := fmt.Sprintf("e2e-vm-%d", f.nextUID)
-	f.mu.Unlock()
-
-	spec.Uid = &uid
-	return &microvmv1alpha1.CreateMicroVMResponse{
-		Microvm: &flintlocktypes.MicroVM{
-			Spec:   spec,
-			Status: &flintlocktypes.MicroVMStatus{State: flintlocktypes.MicroVMStatus_CREATED},
-		},
-	}, nil
-}
-
-func (f *e2eFakeMicroVM) GetMicroVM(_ context.Context, _ *microvmv1alpha1.GetMicroVMRequest) (*microvmv1alpha1.GetMicroVMResponse, error) {
-	return &microvmv1alpha1.GetMicroVMResponse{
-		Microvm: &flintlocktypes.MicroVM{
-			Status: &flintlocktypes.MicroVMStatus{
-				State: flintlocktypes.MicroVMStatus_CREATED,
-				NetworkInterfaces: map[string]*flintlocktypes.NetworkInterfaceStatus{
-					"eth0": {HostDeviceName: "eth0"},
-				},
-			},
-		},
-	}, nil
-}
-
-func (f *e2eFakeMicroVM) DeleteMicroVM(context.Context, *microvmv1alpha1.DeleteMicroVMRequest) (*emptypb.Empty, error) {
-	return &emptypb.Empty{}, nil
-}
-
-// e2eFakeMicroVMExec is a minimal flintlock MicroVMExec service: every
-// ExecCommand call succeeds immediately with exit code 0, satisfying
-// flintlockclient.WaitReady's guest-agent readiness probe.
-type e2eFakeMicroVMExec struct {
-	microvmexecv1alpha1.UnimplementedMicroVMExecServer
-}
-
-func (f *e2eFakeMicroVMExec) ExecCommand(stream microvmexecv1alpha1.MicroVMExec_ExecCommandServer) error {
-	if _, err := stream.Recv(); err != nil {
-		return err
-	}
-	return stream.Send(&microvmexecv1alpha1.ExecCommandResponse{
-		Payload: &microvmexecv1alpha1.ExecCommandResponse_ExitCode{ExitCode: 0},
-	})
-}
-
-// startE2EFakeFlintlock starts the fake flintlock (MicroVM + MicroVMExec) on
-// a real loopback listener and dials it as a single-host
-// flintlockclient.Pool named "host-a".
-func startE2EFakeFlintlock(t *testing.T) *flintlockclient.Pool {
-	t.Helper()
-
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	t.Cleanup(func() { _ = lis.Close() })
-
-	srv := grpc.NewServer()
-	microvmv1alpha1.RegisterMicroVMServer(srv, &e2eFakeMicroVM{})
-	microvmexecv1alpha1.RegisterMicroVMExecServer(srv, &e2eFakeMicroVMExec{})
-	go func() { _ = srv.Serve(lis) }()
-	t.Cleanup(srv.Stop)
-
-	pool, err := flintlockclient.New(&config.Config{Hosts: []config.HostConfig{
-		{Name: "host-a", Address: lis.Addr().String(), TLS: config.TLSConfig{Insecure: true}},
-	}})
-	if err != nil {
-		t.Fatalf("flintlockclient.New: %v", err)
-	}
-	t.Cleanup(func() { _ = pool.Close() })
-
-	return pool
-}
 
 // e2ePoolmgrd bundles the client stubs a black-box e2e test needs.
 type e2ePoolmgrd struct {
@@ -210,25 +111,6 @@ func startE2EPoolmgrd(t *testing.T, flint *flintlockclient.Pool) e2ePoolmgrd {
 		PoolAdmin: poolmgrv1alpha1.NewPoolAdminClient(conn),
 		Lease:     poolmgrv1alpha1.NewLeaseClient(conn),
 		Events:    poolmgrv1alpha1.NewEventsClient(conn),
-	}
-}
-
-// e2eMinSizeThresholdPool returns a minimal, valid PoolSpec on host-a that
-// keeps exactly minSize VMs warm via MIN_SIZE_THRESHOLD.
-func e2eMinSizeThresholdPool(name string, size, minSize int32) *poolmgrv1alpha1.PoolSpec {
-	return &poolmgrv1alpha1.PoolSpec{
-		Name:            name,
-		Namespace:       "e2e",
-		Size:            size,
-		FlintlockHosts:  []string{"host-a"},
-		MicrovmTemplate: &flintlocktypes.MicroVMSpec{Vcpu: 1, MemoryInMb: 1024},
-		ReplenishmentStrategy: &poolmgrv1alpha1.ReplenishmentStrategy{
-			Type:    poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD,
-			MinSize: proto.Int32(minSize),
-		},
-		HookFailurePolicy:        poolmgrv1alpha1.HookFailurePolicy_DELETE_AND_REPLACE,
-		HeartbeatInterval:        durationpb.New(30 * time.Second),
-		HeartbeatExpiryThreshold: durationpb.New(90 * time.Second),
 	}
 }
 
@@ -335,10 +217,10 @@ func TestE2E_PoolLifecycle(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), e2eTestTimeout)
 	defer cancel()
 
-	flint := startE2EFakeFlintlock(t)
+	flint := e2etest.StartFakeFlintlock(t)
 	pm := startE2EPoolmgrd(t, flint)
 
-	spec := e2eMinSizeThresholdPool("e2e-pool", 1, 1)
+	spec := e2etest.MinSizeThresholdPoolSpec("e2e-pool", 1, 1)
 	ref := &poolmgrv1alpha1.PoolRef{Name: spec.GetName(), Namespace: spec.GetNamespace()}
 
 	if _, err := pm.PoolAdmin.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
@@ -408,10 +290,10 @@ func TestE2E_ClaimFailsOnEmptyPool(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), e2eTestTimeout)
 	defer cancel()
 
-	flint := startE2EFakeFlintlock(t)
+	flint := e2etest.StartFakeFlintlock(t)
 	pm := startE2EPoolmgrd(t, flint)
 
-	spec := e2eMinSizeThresholdPool("e2e-empty-pool", 0, 1)
+	spec := e2etest.MinSizeThresholdPoolSpec("e2e-empty-pool", 0, 1)
 	// A zero-size pool never has an available VM to satisfy min_size=1 with,
 	// so it never provisions - that's the point of this test, not a bug.
 	ref := &poolmgrv1alpha1.PoolRef{Name: spec.GetName(), Namespace: spec.GetNamespace()}
