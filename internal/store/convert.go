@@ -27,6 +27,7 @@ type poolRow struct {
 	hookFailurePolicy          int32
 	heartbeatIntervalNs        int64
 	heartbeatExpiryThresholdNs int64
+	autoscalingPolicy          string
 }
 
 // requireDuration rejects a nil duration instead of letting AsDuration() silently return 0:
@@ -66,6 +67,16 @@ func poolToRow(p *poolmgrv1alpha1.PoolSpec) (poolRow, error) {
 		return poolRow{}, fmt.Errorf("marshal replenishment_strategy: %w", err)
 	}
 
+	// AutoscalingPolicy is optional: an absent policy is stored as an empty string rather than
+	// marshalling a nil message, so rowToPool can tell "no policy" apart from a zero-valued one.
+	var autoscalingPolicy string
+	if p.AutoscalingPolicy != nil {
+		autoscalingPolicy, err = marshalProtoJSON(p.GetAutoscalingPolicy())
+		if err != nil {
+			return poolRow{}, fmt.Errorf("marshal autoscaling_policy: %w", err)
+		}
+	}
+
 	createCommands, err := json.Marshal(p.GetCreateCommands())
 	if err != nil {
 		return poolRow{}, fmt.Errorf("marshal create_commands: %w", err)
@@ -88,6 +99,7 @@ func poolToRow(p *poolmgrv1alpha1.PoolSpec) (poolRow, error) {
 		hookFailurePolicy:          int32(p.GetHookFailurePolicy()),
 		heartbeatIntervalNs:        heartbeatInterval.Nanoseconds(),
 		heartbeatExpiryThresholdNs: heartbeatExpiryThreshold.Nanoseconds(),
+		autoscalingPolicy:          autoscalingPolicy,
 	}, nil
 }
 
@@ -115,7 +127,7 @@ func rowToPool(row poolRow) (*poolmgrv1alpha1.PoolSpec, error) {
 		return nil, fmt.Errorf("store: unmarshal pre_lease_commands: %w", err)
 	}
 
-	return &poolmgrv1alpha1.PoolSpec{
+	p := &poolmgrv1alpha1.PoolSpec{
 		Name:                     row.name,
 		Namespace:                row.namespace,
 		Size:                     row.size,
@@ -127,7 +139,17 @@ func rowToPool(row poolRow) (*poolmgrv1alpha1.PoolSpec, error) {
 		HookFailurePolicy:        poolmgrv1alpha1.HookFailurePolicy(row.hookFailurePolicy),
 		HeartbeatInterval:        durationpb.New(nanoseconds(row.heartbeatIntervalNs)),
 		HeartbeatExpiryThreshold: durationpb.New(nanoseconds(row.heartbeatExpiryThresholdNs)),
-	}, nil
+	}
+
+	if row.autoscalingPolicy != "" {
+		policy := &poolmgrv1alpha1.AutoscalingPolicy{}
+		if err := unmarshalProtoJSON(row.autoscalingPolicy, policy); err != nil {
+			return nil, fmt.Errorf("store: unmarshal autoscaling_policy: %w", err)
+		}
+		p.AutoscalingPolicy = policy
+	}
+
+	return p, nil
 }
 
 // requireTimestamp rejects a nil timestamp instead of letting AsTime() silently return the

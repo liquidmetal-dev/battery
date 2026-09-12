@@ -23,11 +23,13 @@ import (
 // then returns runErr (or ctx.Err() if runErr is unset). NotifyVMClaimed and
 // NotifyVMDeleted just count calls.
 type fakeRunner struct {
-	mu        sync.Mutex
-	cancelled bool
-	claimed   int
-	deleted   int
-	runErr    error
+	mu           sync.Mutex
+	cancelled    bool
+	claimed      int
+	deleted      int
+	runErr       error
+	claimsPerSec float64
+	lastScaledAt time.Time
 }
 
 func (f *fakeRunner) Run(ctx context.Context) error {
@@ -54,6 +56,12 @@ func (f *fakeRunner) NotifyVMDeleted() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deleted++
+}
+
+func (f *fakeRunner) AutoscalerSnapshot() (float64, time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.claimsPerSec, f.lastScaledAt
 }
 
 func (f *fakeRunner) wasCancelled() bool {
@@ -163,6 +171,38 @@ func TestManager_StopReconciler_CancelsAndForgets(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("timed out waiting for fake reconciler to observe cancellation")
+}
+
+func TestManager_AutoscalerSnapshot_ForwardsToRunningPool(t *testing.T) {
+	fakes := map[string]*fakeRunner{}
+	withFakeReconciler(t, fakes)
+
+	m := New(context.Background(), nil, nil, nil)
+	if err := m.StartReconciler(testPool("pool-a")); err != nil {
+		t.Fatalf("StartReconciler: %v", err)
+	}
+
+	lastScaledAt := time.Now()
+	fakes["pool-a"].mu.Lock()
+	fakes["pool-a"].claimsPerSec = 2.5
+	fakes["pool-a"].lastScaledAt = lastScaledAt
+	fakes["pool-a"].mu.Unlock()
+
+	claimsPerSec, got, ok := m.AutoscalerSnapshot("pool-a", "default")
+	if !ok {
+		t.Fatal("expected ok=true for a running pool")
+	}
+	if claimsPerSec != 2.5 || !got.Equal(lastScaledAt) {
+		t.Errorf("AutoscalerSnapshot() = (%v, %v), want (2.5, %v)", claimsPerSec, got, lastScaledAt)
+	}
+}
+
+func TestManager_AutoscalerSnapshot_UnknownPoolReturnsNotOK(t *testing.T) {
+	m := New(context.Background(), nil, nil, nil)
+
+	if _, _, ok := m.AutoscalerSnapshot("missing", "default"); ok {
+		t.Fatal("expected ok=false for an unknown pool")
+	}
 }
 
 func TestManager_StopReconciler_UnknownPoolIsNoop(_ *testing.T) {

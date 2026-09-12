@@ -162,6 +162,62 @@ func TestUpdatePool(t *testing.T) {
 	}
 }
 
+func TestCreateAndGetPool_NoAutoscalingPolicy(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	p := samplePoolSpec("pool-a")
+	if err := s.CreatePool(ctx, p); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+
+	got, err := s.GetPool(ctx, "pool-a", "default")
+	if err != nil {
+		t.Fatalf("GetPool() error = %v", err)
+	}
+	if got.AutoscalingPolicy != nil {
+		t.Errorf("GetPool() autoscaling policy = %+v, want nil", got.AutoscalingPolicy)
+	}
+}
+
+func TestUpdatePool_SetsAutoscalingPolicy(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	p := samplePoolSpec("pool-a")
+	if err := s.CreatePool(ctx, p); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+
+	p.AutoscalingPolicy = &poolmgrv1alpha1.AutoscalingPolicy{
+		Enabled:               true,
+		MinSize:               2,
+		MaxSize:               8,
+		ScaleStep:             1,
+		ScaleUpClaimsPerSec:   1.5,
+		ScaleDownClaimsPerSec: 0.2,
+		ClaimRateWindow:       durationpb.New(time.Minute),
+		Cooldown:              durationpb.New(2 * time.Minute),
+	}
+	if err := s.UpdatePool(ctx, p); err != nil {
+		t.Fatalf("UpdatePool() error = %v", err)
+	}
+
+	got, err := s.GetPool(ctx, "pool-a", "default")
+	if err != nil {
+		t.Fatalf("GetPool() error = %v", err)
+	}
+	if got.AutoscalingPolicy == nil {
+		t.Fatalf("GetPool() autoscaling policy = nil, want set")
+	}
+	if !got.AutoscalingPolicy.Enabled || got.AutoscalingPolicy.MinSize != 2 || got.AutoscalingPolicy.MaxSize != 8 {
+		t.Errorf("GetPool() autoscaling policy = %+v, want enabled with min=2 max=8", got.AutoscalingPolicy)
+	}
+	if got.AutoscalingPolicy.ClaimRateWindow.AsDuration() != time.Minute {
+		t.Errorf("GetPool() claim_rate_window = %v, want 1m", got.AutoscalingPolicy.ClaimRateWindow.AsDuration())
+	}
+}
+
 func TestUpdatePoolNotFound(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

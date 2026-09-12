@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	"google.golang.org/protobuf/proto"
@@ -27,6 +28,7 @@ type reconcilerRunner interface {
 	Run(ctx context.Context) error
 	NotifyVMClaimed()
 	NotifyVMDeleted()
+	AutoscalerSnapshot() (claimsPerSec float64, lastScaledAt time.Time)
 }
 
 // newReconciler builds the reconcilerRunner for a pool. Overridden in tests.
@@ -176,6 +178,18 @@ func (m *Manager) NotifyVMDeleted(poolName, poolNamespace string) {
 	if h, ok := m.handle(poolName, poolNamespace); ok {
 		h.runner.NotifyVMDeleted()
 	}
+}
+
+// AutoscalerSnapshot reports the named pool's current observed claim rate and the time of its
+// last autoscaling action, for callers outside the reconciler control loop (e.g. the PoolAdmin
+// API, to populate PoolStatus). ok is false if no reconciler for (name, namespace) is running.
+func (m *Manager) AutoscalerSnapshot(name, namespace string) (claimsPerSec float64, lastScaledAt time.Time, ok bool) {
+	h, ok := m.handle(name, namespace)
+	if !ok {
+		return 0, time.Time{}, false
+	}
+	claimsPerSec, lastScaledAt = h.runner.AutoscalerSnapshot()
+	return claimsPerSec, lastScaledAt, true
 }
 
 func (m *Manager) handle(name, namespace string) (*reconcilerHandle, bool) {

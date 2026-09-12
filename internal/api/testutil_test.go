@@ -111,6 +111,12 @@ func (f *fakePoolLifecycle) StopReconciler(name, _ string) {
 	f.stopped = append(f.stopped, name)
 }
 
+// AutoscalerSnapshot always reports no reconciler running: fakePoolLifecycle doesn't model any
+// live autoscaler state.
+func (f *fakePoolLifecycle) AutoscalerSnapshot(string, string) (float64, time.Time, bool) {
+	return 0, time.Time{}, false
+}
+
 // sampleAvailableVM returns a minimal AVAILABLE VMRecord for poolName on
 // host-a.
 func sampleAvailableVM(uid, poolName string) *poolmgrv1alpha1.VMRecord {

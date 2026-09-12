@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS pools (
     hook_failure_policy           INTEGER NOT NULL,
     heartbeat_interval_ns         INTEGER NOT NULL,
     heartbeat_expiry_threshold_ns INTEGER NOT NULL,
+    autoscaling_policy            TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (name, namespace)
 );
 

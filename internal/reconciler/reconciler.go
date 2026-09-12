@@ -34,6 +34,7 @@ type Reconciler struct {
 	strategy     Strategy
 	provisioner  *Provisioner
 	tickInterval time.Duration
+	autoscaler   *Autoscaler
 
 	claimed chan struct{}
 	deleted chan struct{}
@@ -60,6 +61,7 @@ func New(pool *poolmgrv1alpha1.PoolSpec, st store.Store, flint *flintlockclient.
 		strategy:     strategy,
 		provisioner:  NewProvisioner(st, flint, pcfg, m),
 		tickInterval: tickInterval,
+		autoscaler:   NewAutoscaler(),
 		claimed:      make(chan struct{}, notifyBuffer),
 		deleted:      make(chan struct{}, notifyBuffer),
 	}, nil
@@ -69,6 +71,7 @@ func New(pool *poolmgrv1alpha1.PoolSpec, st store.Store, flint *flintlockclient.
 // blocks: if a notification is already pending, this is a no-op, since
 // Run's next pass will observe the same underlying state change either way.
 func (r *Reconciler) NotifyVMClaimed() {
+	r.autoscaler.RecordClaim(time.Now())
 	select {
 	case r.claimed <- struct{}{}:
 	default:
@@ -97,6 +100,7 @@ func (r *Reconciler) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
+			r.evaluateAutoscaler(ctx)
 			counts, err := r.countVMs(ctx)
 			if err != nil {
 				slog.ErrorContext(ctx, "reconciler: failed to count VMs", "pool", r.pool.GetName(), "error", err)
@@ -109,6 +113,45 @@ func (r *Reconciler) Run(ctx context.Context) error {
 			r.provisionN(ctx, r.strategy.OnVMDeleted(r.pool))
 		}
 	}
+}
+
+// AutoscalerSnapshot reports the pool's current observed claim rate and the time of its last
+// autoscaling action, for callers outside the control loop (e.g. the PoolAdmin API, to
+// populate PoolStatus). Both are zero-valued for a pool with no autoscaling policy.
+func (r *Reconciler) AutoscalerSnapshot() (claimsPerSec float64, lastScaledAt time.Time) {
+	policy := r.pool.GetAutoscalingPolicy()
+	if !policy.GetEnabled() {
+		return 0, time.Time{}
+	}
+	return r.autoscaler.ClaimsPerSec(time.Now(), policy.GetClaimRateWindow().AsDuration()), r.autoscaler.LastScaledAt()
+}
+
+// evaluateAutoscaler asks the autoscaler whether the pool's autoscaling policy calls for a
+// size change and, if so, applies it: persists the new size, updates the in-memory pool spec
+// so the strategy sees it on this same tick, and emits a POOL_SCALED_UP/DOWN event. A no-op
+// for pools without an enabled AutoscalingPolicy.
+func (r *Reconciler) evaluateAutoscaler(ctx context.Context) {
+	policy := r.pool.GetAutoscalingPolicy()
+	if !policy.GetEnabled() {
+		return
+	}
+
+	newSize, scaled := r.autoscaler.Evaluate(policy, r.pool.GetSize(), time.Now())
+	if !scaled {
+		return
+	}
+
+	eventType := poolmgrv1alpha1.EventType_POOL_SCALED_UP
+	if newSize < r.pool.GetSize() {
+		eventType = poolmgrv1alpha1.EventType_POOL_SCALED_DOWN
+	}
+
+	r.pool.Size = newSize
+	if err := r.store.UpdatePool(ctx, r.pool); err != nil {
+		slog.ErrorContext(ctx, "reconciler: failed to persist autoscaled size", "pool", r.pool.GetName(), "error", err)
+		return
+	}
+	EmitEvent(ctx, r.store, r.pool, "", eventType)
 }
 
 // countVMs summarizes the pool's current VMs into VMCounts.

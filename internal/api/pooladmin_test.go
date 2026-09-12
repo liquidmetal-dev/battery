@@ -312,6 +312,44 @@ func TestGetPoolStatusCounts(t *testing.T) {
 	}
 }
 
+// stubAutoscalerLifecycle is a PoolLifecycle whose AutoscalerSnapshot returns fixed values,
+// for asserting that PoolAdminServer surfaces them in PoolStatus.
+type stubAutoscalerLifecycle struct {
+	fakePoolLifecycle
+	claimsPerSec float64
+	lastScaledAt time.Time
+}
+
+func (s *stubAutoscalerLifecycle) AutoscalerSnapshot(string, string) (float64, time.Time, bool) {
+	return s.claimsPerSec, s.lastScaledAt, true
+}
+
+func TestGetPoolStatus_SurfacesAutoscalerSnapshot(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	lastScaledAt := time.Now().Truncate(time.Second)
+	lifecycle := &stubAutoscalerLifecycle{claimsPerSec: 1.5, lastScaledAt: lastScaledAt}
+	s := api.NewPoolAdminServer(st, lifecycle)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+
+	got, err := s.GetPool(ctx, &poolmgrv1alpha1.GetPoolRequest{Ref: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}})
+	if err != nil {
+		t.Fatalf("GetPool() error = %v", err)
+	}
+
+	status := got.GetStatus()
+	if status.GetObservedClaimsPerSec() != 1.5 {
+		t.Errorf("GetPool() observed_claims_per_sec = %v, want 1.5", status.GetObservedClaimsPerSec())
+	}
+	if !status.GetLastScaledAt().AsTime().Equal(lastScaledAt) {
+		t.Errorf("GetPool() last_scaled_at = %v, want %v", status.GetLastScaledAt().AsTime(), lastScaledAt)
+	}
+}
+
 func withPhase(vm *poolmgrv1alpha1.VMRecord, phase poolmgrv1alpha1.VMPhase) *poolmgrv1alpha1.VMRecord {
 	vm.Phase = phase
 	return vm

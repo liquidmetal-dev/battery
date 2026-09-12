@@ -33,6 +33,30 @@ message ReplenishmentStrategy {
   optional int32 min_size = 2;
 }
 
+// AutoscalingPolicy configures dynamic sizing of a pool's target size, layered on top of
+// its ReplenishmentStrategy: the autoscaler adjusts PoolSpec.size within [min_size, max_size]
+// based on observed claim rate, and the pool's existing replenishment strategy keeps
+// provisioning/holding toward whatever that size currently is.
+message AutoscalingPolicy {
+  bool enabled = 1;
+
+  int32 min_size = 2;
+  int32 max_size = 3;
+
+  // ScaleStep is how many VMs are added or removed per scaling action.
+  int32 scale_step = 4;
+
+  // ScaleUpClaimsPerSec is the claim-rate threshold above which the pool scales up.
+  double scale_up_claims_per_sec = 5;
+  // ScaleDownClaimsPerSec is the claim-rate threshold below which the pool scales down.
+  double scale_down_claims_per_sec = 6;
+
+  // ClaimRateWindow is the rolling window over which claim rate is measured.
+  google.protobuf.Duration claim_rate_window = 7;
+  // Cooldown is the minimum duration between two scaling actions, in either direction.
+  google.protobuf.Duration cooldown = 8;
+}
+
 // HookFailurePolicy decides what happens to a VM whose create or pre-lease hook fails.
 enum HookFailurePolicy {
   // HOOK_FAILURE_POLICY_UNSPECIFIED is the zero value. It is never a valid choice for a pool
@@ -83,6 +107,10 @@ message PoolSpec {
   // HeartbeatExpiryThreshold is how long without a heartbeat before a lease is considered
   // expired.
   google.protobuf.Duration heartbeat_expiry_threshold = 11;
+
+  // AutoscalingPolicy optionally lets the pool's size be adjusted dynamically. When absent
+  // or disabled, size is purely operator-managed as it is today.
+  optional AutoscalingPolicy autoscaling_policy = 12;
 }
 
 // VMPhase is the lifecycle phase of a pool-managed VM.
@@ -143,6 +171,8 @@ enum EventType {
   VM_HOOK_FAILED = 8;
   POOL_REPLENISHING = 9;
   POOL_SIZE_BELOW_TARGET = 10;
+  POOL_SCALED_UP = 11;
+  POOL_SCALED_DOWN = 12;
 }
 
 // Event is a single row from the pool manager's event outbox.
@@ -170,6 +200,13 @@ message PoolStatus {
   int32 leased_count = 2;
   int32 provisioning_count = 3;
   int32 quarantined_count = 4;
+
+  // LastScaledAt is when the autoscaler last changed this pool's size. Unset if the pool has
+  // no autoscaling policy, or it has never scaled.
+  google.protobuf.Timestamp last_scaled_at = 5;
+  // ObservedClaimsPerSec is the autoscaler's current claim-rate reading. Meaningless (zero) for
+  // pools without an enabled AutoscalingPolicy.
+  double observed_claims_per_sec = 6;
 }
 
 // Pool pairs a pool's spec with its current live status.
