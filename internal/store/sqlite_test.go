@@ -700,6 +700,62 @@ func TestListExpiredLeases(t *testing.T) {
 	}
 }
 
+func TestListLeases(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup error = %v", err)
+		}
+	}
+	must(s.CreateLease(ctx, sampleLeaseRecord("lease-a1", "vm-a1", "pool-a", "default", time.Unix(1_700_000_100, 0))))
+	must(s.CreateLease(ctx, sampleLeaseRecord("lease-a2", "vm-a2", "pool-a", "default", time.Unix(1_700_000_200, 0))))
+	must(s.CreateLease(ctx, sampleLeaseRecord("lease-b1", "vm-b1", "pool-b", "default", time.Unix(1_700_000_300, 0))))
+
+	t.Run("unfiltered returns all leases across pools", func(t *testing.T) {
+		got, err := s.ListLeases(ctx, nil)
+		if err != nil {
+			t.Fatalf("ListLeases(nil) error = %v", err)
+		}
+		if len(got) != 3 {
+			t.Fatalf("ListLeases(nil) len = %d, want 3: %+v", len(got), got)
+		}
+		wantIDs := []string{"lease-a1", "lease-a2", "lease-b1"}
+		for i, l := range got {
+			if l.GetLeaseId() != wantIDs[i] {
+				t.Fatalf("ListLeases(nil)[%d] = %q, want %q (order by lease_id)", i, l.GetLeaseId(), wantIDs[i])
+			}
+		}
+	})
+
+	t.Run("filtered to a pool with leases returns only that pool's leases", func(t *testing.T) {
+		got, err := s.ListLeases(ctx, &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"})
+		if err != nil {
+			t.Fatalf("ListLeases(pool-a) error = %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("ListLeases(pool-a) len = %d, want 2: %+v", len(got), got)
+		}
+		for _, l := range got {
+			if l.GetPoolName() != "pool-a" {
+				t.Fatalf("ListLeases(pool-a) returned lease from pool %q", l.GetPoolName())
+			}
+		}
+	})
+
+	t.Run("filtered to a pool with no leases returns an empty slice, not an error", func(t *testing.T) {
+		got, err := s.ListLeases(ctx, &poolmgrv1alpha1.PoolRef{Name: "pool-empty", Namespace: "default"})
+		if err != nil {
+			t.Fatalf("ListLeases(pool-empty) error = %v", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("ListLeases(pool-empty) len = %d, want 0: %+v", len(got), got)
+		}
+	})
+}
+
 func TestDeleteLeaseIfExpired_Success(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

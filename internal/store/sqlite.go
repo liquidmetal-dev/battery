@@ -399,6 +399,35 @@ func (s *sqliteStore) ListExpiredLeases(ctx context.Context, now time.Time) ([]*
 	return leases, nil
 }
 
+func (s *sqliteStore) ListLeases(ctx context.Context, poolRef *poolmgrv1alpha1.PoolRef) ([]*poolmgrv1alpha1.LeaseRecord, error) {
+	query := `SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at FROM leases`
+	var args []any
+	if poolRef != nil {
+		query += ` WHERE pool_name = ? AND pool_namespace = ?`
+		args = append(args, poolRef.GetName(), poolRef.GetNamespace())
+	}
+	query += ` ORDER BY lease_id`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: query leases: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var leases []*poolmgrv1alpha1.LeaseRecord
+	for rows.Next() {
+		var row leaseRow
+		if err := rows.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt); err != nil {
+			return nil, fmt.Errorf("store: scan lease: %w", err)
+		}
+		leases = append(leases, rowToLease(row))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate leases: %w", err)
+	}
+	return leases, nil
+}
+
 func (s *sqliteStore) DeleteLeaseIfExpired(ctx context.Context, leaseID string, now time.Time) (*poolmgrv1alpha1.LeaseRecord, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

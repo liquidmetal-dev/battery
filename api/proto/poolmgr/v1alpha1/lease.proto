@@ -17,6 +17,8 @@ service Lease {
   // Heartbeat is keyed by lease_id and extends the lease's expiry.
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
   rpc ReleaseVM(ReleaseVMRequest) returns (google.protobuf.Empty);
+  // ListLeases returns every lease, optionally filtered to one pool.
+  rpc ListLeases(ListLeasesRequest) returns (ListLeasesResponse);
 }
 
 message ClaimVMRequest {
@@ -54,4 +56,12 @@ message HeartbeatResponse {
 
 message ReleaseVMRequest {
   string lease_id = 1;
+}
+
+message ListLeasesRequest {
+  optional PoolRef pool_ref = 1; // unset = all pools
+}
+
+message ListLeasesResponse {
+  repeated LeaseRecord leases = 1;
 }
