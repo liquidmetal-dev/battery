@@ -3,6 +3,7 @@ package poolmgrctl
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"os"
 
@@ -37,6 +38,10 @@ func dial(cf connFlags) (*grpc.ClientConn, error) {
 func dialCredentials(cf connFlags) (credentials.TransportCredentials, error) {
 	if cf.insecure {
 		return insecure.NewCredentials(), nil
+	}
+
+	if cf.caFile == "" {
+		return nil, errors.New("either --ca-file or --insecure must be set")
 	}
 
 	caPEM, err := os.ReadFile(cf.caFile)

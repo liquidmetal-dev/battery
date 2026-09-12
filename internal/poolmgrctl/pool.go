@@ -55,7 +55,17 @@ func newPoolCreateCmd() *cobra.Command {
 		// Args runs before the root command's PersistentPreRunE (which
 		// dials the gRPC connection), so a bad --spec-file is reported
 		// without ever attempting to connect.
+		//
+		// Args also runs before cobra's own required-flag validation, so if
+		// --spec-file is omitted entirely we must not try to load it here -
+		// doing so would surface a confusing file-read error ("open : no
+		// such file or directory") instead of cobra's standard "required
+		// flag(s) \"spec-file\" not set". Returning nil here lets cobra's
+		// required-flag check run next and produce that message.
 		Args: func(_ *cobra.Command, _ []string) error {
+			if specFile == "" {
+				return nil
+			}
 			loaded, err := loadPoolSpec(specFile)
 			if err != nil {
 				return err
@@ -88,7 +98,20 @@ func newPoolUpdateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "update",
 		Short: "Update a pool from a spec file",
+		// Args runs before the root command's PersistentPreRunE (which
+		// dials the gRPC connection), so a bad --spec-file is reported
+		// without ever attempting to connect.
+		//
+		// Args also runs before cobra's own required-flag validation, so if
+		// --spec-file is omitted entirely we must not try to load it here -
+		// doing so would surface a confusing file-read error ("open : no
+		// such file or directory") instead of cobra's standard "required
+		// flag(s) \"spec-file\" not set". Returning nil here lets cobra's
+		// required-flag check run next and produce that message.
 		Args: func(_ *cobra.Command, _ []string) error {
+			if specFile == "" {
+				return nil
+			}
 			loaded, err := loadPoolSpec(specFile)
 			if err != nil {
 				return err

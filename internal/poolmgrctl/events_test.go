@@ -196,6 +196,26 @@ func TestTailEvents_CancelledContextEndsCleanly(t *testing.T) {
 	}
 }
 
+// TestEventsTailCmd_MissingNamespace_RequiredFlagError proves that
+// "events tail --pool X" without --namespace fails fast with cobra's
+// required-flag error, rather than silently subscribing with
+// namespace="" (which the server filters to zero rows, hanging forever
+// with no output and no error).
+func TestEventsTailCmd_MissingNamespace_RequiredFlagError(t *testing.T) {
+	cmd := newEventsTailCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetContext(withTestEventsClient(nil))
+	cmd.SetArgs([]string{"--pool", "pool-a"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected a required-flag error, got nil")
+	}
+	if !strings.Contains(err.Error(), `"namespace" not set`) {
+		t.Errorf("error = %q, want it to mention the missing namespace flag", err.Error())
+	}
+}
+
 func TestTailEvents_StreamErrorWraps(t *testing.T) {
 	stream := &fakeEventClientStream{results: []fakeRecvResult{{err: errors.New("boom")}}}
 

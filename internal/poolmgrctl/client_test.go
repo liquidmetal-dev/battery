@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -203,5 +204,20 @@ func TestDialCredentials_ClientCert(t *testing.T) {
 func TestDialCredentials_MissingCAFile(t *testing.T) {
 	if _, err := dialCredentials(connFlags{caFile: "/nonexistent/ca.pem"}); err == nil {
 		t.Fatal("expected error for missing ca file, got nil")
+	}
+}
+
+// TestDialCredentials_NoTLSFlags_ClearError proves that dialing with
+// neither --insecure nor --ca-file set (the first-run/no-flags case)
+// produces a clear, actionable error instead of the confusing
+// "read ca file: open : no such file or directory" that os.ReadFile("")
+// would otherwise surface.
+func TestDialCredentials_NoTLSFlags_ClearError(t *testing.T) {
+	_, err := dialCredentials(connFlags{})
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if !strings.Contains(err.Error(), "either --ca-file or --insecure must be set") {
+		t.Errorf("error = %q, want it to mention either --ca-file or --insecure must be set", err.Error())
 	}
 }

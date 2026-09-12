@@ -55,6 +55,67 @@ func TestPoolCreate_InvalidSpecFile_NoDial(t *testing.T) {
 	}
 }
 
+// TestPoolCreate_MissingSpecFile_RequiredFlagError proves that omitting
+// --spec-file entirely produces cobra's standard "required flag(s) not
+// set" error, not the confusing "read spec file : open : no such file or
+// directory" that would result from trying to load an empty path.
+func TestPoolCreate_MissingSpecFile_RequiredFlagError(t *testing.T) {
+	root := NewRootCmd()
+
+	var stderr bytes.Buffer
+	root.SetOut(&bytes.Buffer{})
+	root.SetErr(&stderr)
+	root.SetArgs([]string{"--insecure", "pool", "create"})
+
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if !strings.Contains(err.Error(), `required flag(s) "spec-file" not set`) {
+		t.Errorf("error = %q, want it to mention the required spec-file flag", err.Error())
+	}
+}
+
+// TestPoolUpdate_MissingSpecFile_RequiredFlagError mirrors
+// TestPoolCreate_MissingSpecFile_RequiredFlagError for "pool update".
+func TestPoolUpdate_MissingSpecFile_RequiredFlagError(t *testing.T) {
+	root := NewRootCmd()
+
+	var stderr bytes.Buffer
+	root.SetOut(&bytes.Buffer{})
+	root.SetErr(&stderr)
+	root.SetArgs([]string{"--insecure", "pool", "update"})
+
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if !strings.Contains(err.Error(), `required flag(s) "spec-file" not set`) {
+		t.Errorf("error = %q, want it to mention the required spec-file flag", err.Error())
+	}
+}
+
+// TestPoolList_NoTLSFlags_ClearError proves that running a command with no
+// --insecure and no --ca-file produces the clear "either --ca-file or
+// --insecure must be set" error, rather than a confusing CA-file-read
+// error, on a first run with no connection flags set at all.
+func TestPoolList_NoTLSFlags_ClearError(t *testing.T) {
+	root := NewRootCmd()
+
+	var stderr bytes.Buffer
+	root.SetOut(&bytes.Buffer{})
+	root.SetErr(&stderr)
+	root.SetArgs([]string{"pool", "list"})
+
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if !strings.Contains(err.Error(), "either --ca-file or --insecure must be set") {
+		t.Errorf("error = %q, want it to mention either --ca-file or --insecure must be set", err.Error())
+	}
+}
+
 // bufconnPoolAdmin starts a real api.PoolAdminServer backed by a temp
 // SQLite store, serves it over an in-memory bufconn listener, and returns
 // a dialed *grpc.ClientConn to it.

@@ -4,13 +4,11 @@ package poolmgrctl
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"unicode"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -119,18 +117,17 @@ func snakeCaseCode(c codes.Code) string {
 	return b.String()
 }
 
-// ExitCode maps an error to a process exit code: 2 for cobra's own
-// usage/flag/arg errors, 1 otherwise.
+// ExitCode maps an error to a process exit code: 0 for nil, 1 otherwise.
 //
-// cobra doesn't tag usage errors distinctly from RunE errors by default;
-// pflag.ErrHelp is the one case that's cleanly identifiable without extra
-// plumbing (a FlagErrorFunc/custom error type), so that's what this checks.
+// cobra doesn't tag usage errors distinctly from RunE errors by default, and
+// there's no clean way to distinguish them without extra plumbing (a
+// FlagErrorFunc/custom error type) that isn't worth it for this CLI's
+// scope - pflag.ErrHelp in particular is intercepted internally by cobra's
+// ExecuteC (it prints help and returns nil), so it never even reaches here.
+// So every non-nil error just maps to exit 1.
 func ExitCode(err error) int {
 	if err == nil {
 		return 0
-	}
-	if errors.Is(err, pflag.ErrHelp) {
-		return 2
 	}
 	return 1
 }

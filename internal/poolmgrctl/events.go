@@ -49,6 +49,7 @@ func newEventsTailCmd() *cobra.Command {
 	cmd.Flags().StringVar(&pool, "pool", "", "pool to tail events for")
 	cmd.Flags().StringVar(&namespace, "namespace", "", "namespace of the pool to tail events for")
 	_ = cmd.MarkFlagRequired("pool")
+	_ = cmd.MarkFlagRequired("namespace")
 
 	return cmd
 }
