@@ -368,8 +368,14 @@ func EnsureVMDeleted(ctx context.Context, st store.Store, flint *flintlockclient
 // so Sweeper.beginExpiry records those metrics itself, right when
 // DeleteLeaseIfExpired durably ends the lease - independent of how long
 // this function's caller took to actually finish deleting the VM.
-func FinishVMDeletion(ctx context.Context, st store.Store, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord, notifier DeletionNotifier, m *metrics.Registry) {
-	eventType := poolmgrv1alpha1.EventType_VM_DELETED_DUE_TO_EXPIRY
+//
+// defaultEventType is emitted when vm has no lease row to infer a release
+// from (the common case is VM_DELETED_DUE_TO_EXPIRY; RolloutController
+// passes VM_DELETED_FOR_ROLLOUT for its own deletions of AVAILABLE VMs,
+// which never carry a lease, so the lease-inference branch below never
+// overrides it for that caller).
+func FinishVMDeletion(ctx context.Context, st store.Store, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord, notifier DeletionNotifier, m *metrics.Registry, defaultEventType poolmgrv1alpha1.EventType) {
+	eventType := defaultEventType
 	if leaseID := vm.GetLeaseId(); leaseID != "" {
 		if lease, err := st.GetLease(ctx, leaseID); err == nil {
 			eventType = poolmgrv1alpha1.EventType_VM_DELETED_ON_RELEASE
