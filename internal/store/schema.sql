@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS pools (
     heartbeat_interval_ns         INTEGER NOT NULL,
     heartbeat_expiry_threshold_ns INTEGER NOT NULL,
     template_hash                 TEXT NOT NULL DEFAULT '',
+    rollout_policy                TEXT,
     PRIMARY KEY (name, namespace)
 );
 
