@@ -177,3 +177,22 @@ message Pool {
   PoolSpec spec = 1;
   PoolStatus status = 2;
 }
+
+// Host is the pool manager's registry record for one flintlock host, keyed by name.
+message Host {
+  string name = 1;
+  string address = 2;
+
+  // Drained is true when the host should no longer be selected for new VM placements.
+  // Existing VMs on the host are unaffected and wind down through normal lease expiry
+  // or release.
+  bool drained = 3;
+
+  // DrainedReason is an optional free-text note set when the host was drained.
+  string drained_reason = 4;
+
+  // DrainedAt is when the host was last drained. Unset if the host has never been drained.
+  google.protobuf.Timestamp drained_at = 5;
+
+  google.protobuf.Timestamp updated_at = 6;
+}

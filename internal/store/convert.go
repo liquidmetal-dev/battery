@@ -243,6 +243,53 @@ func rowToLease(row leaseRow) *poolmgrv1alpha1.LeaseRecord {
 	}
 }
 
+// hostRow is the flat column representation of a hosts table row.
+type hostRow struct {
+	name          string
+	address       string
+	drained       bool
+	drainedReason sql.NullString
+	drainedAt     sql.NullInt64
+	updatedAt     int64
+}
+
+func hostToRow(h *poolmgrv1alpha1.Host) (hostRow, error) {
+	updatedAt, err := requireTimestamp("updated_at", h.GetUpdatedAt())
+	if err != nil {
+		return hostRow{}, err
+	}
+
+	row := hostRow{
+		name:      h.GetName(),
+		address:   h.GetAddress(),
+		drained:   h.GetDrained(),
+		updatedAt: updatedAt.UnixNano(),
+	}
+	if h.GetDrainedReason() != "" {
+		row.drainedReason = sql.NullString{String: h.GetDrainedReason(), Valid: true}
+	}
+	if h.GetDrainedAt() != nil {
+		row.drainedAt = sql.NullInt64{Int64: h.GetDrainedAt().AsTime().UnixNano(), Valid: true}
+	}
+	return row, nil
+}
+
+func rowToHost(row hostRow) *poolmgrv1alpha1.Host {
+	h := &poolmgrv1alpha1.Host{
+		Name:      row.name,
+		Address:   row.address,
+		Drained:   row.drained,
+		UpdatedAt: timestamppb.New(time.Unix(0, row.updatedAt)),
+	}
+	if row.drainedReason.Valid {
+		h.DrainedReason = row.drainedReason.String
+	}
+	if row.drainedAt.Valid {
+		h.DrainedAt = timestamppb.New(time.Unix(0, row.drainedAt.Int64))
+	}
+	return h
+}
+
 func marshalProtoJSON(m proto.Message) (string, error) {
 	b, err := protojson.Marshal(m)
 	if err != nil {

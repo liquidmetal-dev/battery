@@ -11,15 +11,21 @@ import (
 )
 
 // ErrNoEligibleHost is returned by PickHost when a pool has no flintlock
-// hosts configured.
+// hosts configured, or every host configured for it is currently drained.
 var ErrNoEligibleHost = errors.New("reconciler: pool has no eligible flintlock hosts")
 
-// PickHost returns the host from pool.FlintlockHosts with the fewest
-// non-terminal VMs currently recorded for the pool, ties broken by the
-// hosts' order in FlintlockHosts. This is deliberately simple: v1 does no
-// real host resource-capacity probing, just even spread by VM count.
-func PickHost(ctx context.Context, st store.Store, pool *poolmgrv1alpha1.PoolSpec) (string, error) {
-	hosts := pool.GetFlintlockHosts()
+// PickHost returns the host from pool.FlintlockHosts, excluding any name
+// present in drained, with the fewest non-terminal VMs currently recorded
+// for the pool, ties broken by the hosts' order in FlintlockHosts. This is
+// deliberately simple: v1 does no real host resource-capacity probing, just
+// even spread by VM count. drained may be nil, meaning no host is drained.
+func PickHost(ctx context.Context, st store.Store, pool *poolmgrv1alpha1.PoolSpec, drained map[string]bool) (string, error) {
+	var hosts []string
+	for _, h := range pool.GetFlintlockHosts() {
+		if !drained[h] {
+			hosts = append(hosts, h)
+		}
+	}
 	if len(hosts) == 0 {
 		return "", fmt.Errorf("%w: pool %s/%s", ErrNoEligibleHost, pool.GetNamespace(), pool.GetName())
 	}
