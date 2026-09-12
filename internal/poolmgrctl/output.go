@@ -3,10 +3,13 @@ package poolmgrctl
 import (
 	"fmt"
 	"io"
+	"sort"
 	"text/tabwriter"
+	"time"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // OutputFormat selects how pool.go's commands render their results.
@@ -121,4 +124,133 @@ func printPoolsTable(w io.Writer, pools []*poolmgrv1alpha1.Pool) error {
 
 func printPoolTable(w io.Writer, pool *poolmgrv1alpha1.Pool) error {
 	return printPoolsTable(w, []*poolmgrv1alpha1.Pool{pool})
+}
+
+// printLeases renders leases to w in the given format, following the same
+// conventions as printPools: JSON mode marshals a single JSON array of
+// protojson objects; table mode prints a header-only table when leases is
+// empty.
+func printLeases(w io.Writer, leases []*poolmgrv1alpha1.LeaseRecord, format OutputFormat) error {
+	switch format {
+	case OutputJSON:
+		return printLeasesJSON(w, leases)
+	case OutputTable, "":
+		return printLeasesTable(w, leases)
+	default:
+		return fmt.Errorf("invalid output format %q", format)
+	}
+}
+
+func printLeasesJSON(w io.Writer, leases []*poolmgrv1alpha1.LeaseRecord) error {
+	marshalOpts := protojson.MarshalOptions{Multiline: true}
+
+	buf := []byte("[")
+	for i, lease := range leases {
+		if i > 0 {
+			buf = append(buf, ',')
+		}
+		b, err := marshalOpts.Marshal(lease)
+		if err != nil {
+			return fmt.Errorf("marshal lease: %w", err)
+		}
+		buf = append(buf, b...)
+	}
+	buf = append(buf, ']')
+
+	if _, err := w.Write(buf); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintln(w)
+	return err
+}
+
+func printLeasesTable(w io.Writer, leases []*poolmgrv1alpha1.LeaseRecord) error {
+	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "LEASE_ID\tPOOL\tNAMESPACE\tVM_UID\tCLAIMED_AT\tEXPIRES_AT"); err != nil {
+		return err
+	}
+	for _, lease := range leases {
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			lease.GetLeaseId(), lease.GetPoolName(), lease.GetPoolNamespace(), lease.GetVmUid(),
+			formatTimestamp(lease.GetClaimedAt()), formatTimestamp(lease.GetExpiresAt())); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+// printClaim renders a ClaimVM response to w. Unlike printPool/printLeases,
+// this is table-only - "lease claim" isn't a "list" and doesn't take an
+// -o/--output flag, matching how Task 2 handled "pool create"/"pool
+// delete".
+func printClaim(w io.Writer, resp *poolmgrv1alpha1.ClaimVMResponse, format OutputFormat) error {
+	switch format {
+	case OutputJSON:
+		return printClaimJSON(w, resp)
+	case OutputTable, "":
+		return printClaimTable(w, resp)
+	default:
+		return fmt.Errorf("invalid output format %q", format)
+	}
+}
+
+func printClaimJSON(w io.Writer, resp *poolmgrv1alpha1.ClaimVMResponse) error {
+	marshalOpts := protojson.MarshalOptions{Multiline: true}
+	b, err := marshalOpts.Marshal(resp)
+	if err != nil {
+		return fmt.Errorf("marshal claim response: %w", err)
+	}
+	if _, err := w.Write(b); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(w)
+	return err
+}
+
+func printClaimTable(w io.Writer, resp *poolmgrv1alpha1.ClaimVMResponse) error {
+	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	if _, err := fmt.Fprintf(tw, "LEASE_ID\t%s\n", resp.GetLeaseId()); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(tw, "VM_UID\t%s\n", resp.GetVmUid()); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(tw, "HOST\t%s (%s)\n", resp.GetHost().GetName(), resp.GetHost().GetAddress()); err != nil {
+		return err
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+
+	ifaces := resp.GetNetworkInterfaces()
+	if len(ifaces) == 0 {
+		return nil
+	}
+
+	names := make([]string, 0, len(ifaces))
+	for name := range ifaces {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	if _, err := fmt.Fprintln(w, "NETWORK_INTERFACES:"); err != nil {
+		return err
+	}
+	for _, name := range names {
+		iface := ifaces[name]
+		if _, err := fmt.Fprintf(w, "  %s: host_device=%s index=%d mac=%s\n",
+			name, iface.GetHostDeviceName(), iface.GetIndex(), iface.GetMacAddress()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// formatTimestamp renders a *timestamppb.Timestamp as RFC3339, or "" if ts
+// is nil/unset.
+func formatTimestamp(ts *timestamppb.Timestamp) string {
+	if ts == nil {
+		return ""
+	}
+	return ts.AsTime().Format(time.RFC3339)
 }

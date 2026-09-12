@@ -82,7 +82,7 @@ func NewRootCmd() *cobra.Command {
 	root.PersistentFlags().StringVar(&cf.certFile, "cert-file", "", "path to a client certificate for mTLS")
 	root.PersistentFlags().StringVar(&cf.keyFile, "key-file", "", "path to the client certificate's private key for mTLS")
 
-	root.AddCommand(newPoolCmd())
+	root.AddCommand(newPoolCmd(), newLeaseCmd(), newEventsCmd())
 
 	return root
 }
