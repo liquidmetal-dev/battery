@@ -71,9 +71,10 @@ type Store interface {
 	// ListVMsByPhase returns all VMs (across all pools) currently in phase.
 	ListVMsByPhase(ctx context.Context, phase poolmgrv1alpha1.VMPhase) ([]*poolmgrv1alpha1.VMRecord, error)
 
-	// UpsertHostIfMissing inserts a row for host if none exists for its name; otherwise it is a
-	// no-op, preserving any existing drain state. Used to seed the host registry from static
-	// config at startup without clobbering drain state across restarts.
+	// UpsertHostIfMissing inserts a row for host if none exists for its name; otherwise it
+	// refreshes the stored address to host.Address (so a host's address in the static config
+	// file is kept current across restarts) while leaving its drain state untouched. Used to
+	// seed the host registry from static config at startup without clobbering drain state.
 	UpsertHostIfMissing(ctx context.Context, host *poolmgrv1alpha1.Host) error
 	GetHost(ctx context.Context, name string) (*poolmgrv1alpha1.Host, error)
 	ListHosts(ctx context.Context) ([]*poolmgrv1alpha1.Host, error)

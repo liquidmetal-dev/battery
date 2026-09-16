@@ -556,7 +556,7 @@ func (s *sqliteStore) UpsertHostIfMissing(ctx context.Context, host *poolmgrv1al
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO hosts (name, address, drained, drained_reason, drained_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT (name) DO NOTHING`,
+		ON CONFLICT (name) DO UPDATE SET address = excluded.address`,
 		row.name, row.address, row.drained, row.drainedReason, row.drainedAt, row.updatedAt,
 	)
 	if err != nil {

@@ -1090,7 +1090,7 @@ func TestUpsertHostIfMissing(t *testing.T) {
 	}
 }
 
-func TestUpsertHostIfMissingNoOpWhenPresent(t *testing.T) {
+func TestUpsertHostIfMissingPreservesDrainState(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
@@ -1113,6 +1113,41 @@ func TestUpsertHostIfMissingNoOpWhenPresent(t *testing.T) {
 	}
 	if !got.GetDrained() {
 		t.Errorf("GetHost() drained = false after re-seed, want true (drain state preserved)")
+	}
+}
+
+// TestUpsertHostIfMissingRefreshesAddress reproduces a reported issue: if a
+// host's address changes in static config between poolmgrd restarts, a
+// reseed must pick up the new address (matching what flintlockclient.New
+// actually dials) while still leaving drain state exactly as it found it.
+func TestUpsertHostIfMissingRefreshesAddress(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	host := sampleHost("host-a")
+	host.Address = "old:8443"
+	if err := s.UpsertHostIfMissing(ctx, host); err != nil {
+		t.Fatalf("UpsertHostIfMissing() error = %v", err)
+	}
+	if _, err := s.SetHostDrained(ctx, "host-a", true, "maintenance"); err != nil {
+		t.Fatalf("SetHostDrained() error = %v", err)
+	}
+
+	reseed := sampleHost("host-a")
+	reseed.Address = "new:8443"
+	if err := s.UpsertHostIfMissing(ctx, reseed); err != nil {
+		t.Fatalf("UpsertHostIfMissing() reseed error = %v", err)
+	}
+
+	got, err := s.GetHost(ctx, "host-a")
+	if err != nil {
+		t.Fatalf("GetHost() error = %v", err)
+	}
+	if got.GetAddress() != "new:8443" {
+		t.Errorf("GetHost() address = %q after reseed, want %q", got.GetAddress(), "new:8443")
+	}
+	if !got.GetDrained() {
+		t.Errorf("GetHost() drained = false after reseed, want true (drain state preserved)")
 	}
 }
 

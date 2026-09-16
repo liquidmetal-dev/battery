@@ -307,6 +307,47 @@ func TestPrintClaimJSON_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestPrintHostTable_NoFabricatedActiveVMsColumn locks in the fix for a
+// reported issue: printHost (used for DrainHost/UndrainHost responses,
+// which carry no VM count) must not render an ACTIVE_VMS column, since any
+// value there would be a fabricated zero rather than the host's real
+// workload.
+func TestPrintHostTable_NoFabricatedActiveVMsColumn(t *testing.T) {
+	host := &poolmgrv1alpha1.Host{Name: "host-a", Address: "host-a.example.com:8443", Drained: true}
+
+	var buf bytes.Buffer
+	if err := printHost(&buf, host, OutputTable); err != nil {
+		t.Fatalf("printHost() error = %v", err)
+	}
+
+	out := buf.String()
+	for _, want := range []string{"NAME", "host-a", "host-a.example.com:8443", "true"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printHost() table output missing %q, got:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "ACTIVE_VMS") {
+		t.Errorf("printHost() table output contains ACTIVE_VMS, want none (no count is available from Drain/UndrainHost), got:\n%s", out)
+	}
+}
+
+func TestPrintHostJSON_RoundTrip(t *testing.T) {
+	host := &poolmgrv1alpha1.Host{Name: "host-a", Address: "host-a.example.com:8443", Drained: true, DrainedReason: "maintenance"}
+
+	var buf bytes.Buffer
+	if err := printHost(&buf, host, OutputJSON); err != nil {
+		t.Fatalf("printHost() error = %v", err)
+	}
+
+	got := &poolmgrv1alpha1.Host{}
+	if err := protojson.Unmarshal(buf.Bytes(), got); err != nil {
+		t.Fatalf("protojson.Unmarshal() error = %v, output:\n%s", err, buf.String())
+	}
+	if !proto.Equal(got, host) {
+		t.Errorf("round-tripped host = %+v, want %+v", got, host)
+	}
+}
+
 func TestParseOutputFormat(t *testing.T) {
 	if _, err := parseOutputFormat("table"); err != nil {
 		t.Errorf("parseOutputFormat(table) error = %v", err)
