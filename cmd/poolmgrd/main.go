@@ -173,8 +173,8 @@ func parseLogLevel(s string) (slog.Level, error) {
 
 // seedHosts upserts a hosts registry row for every host in cfg, so the
 // HostAdmin API has a known-host set to validate Drain/UndrainHost calls
-// against. Existing rows (and any drain state they carry) are left
-// untouched - see store.Store.UpsertHostIfMissing.
+// against. An existing row has its address refreshed to match cfg, but its
+// drain state is left untouched - see store.Store.UpsertHostIfMissing.
 func seedHosts(ctx context.Context, st store.Store, cfg *config.Config) error {
 	now := timestamppb.Now()
 	for _, h := range cfg.Hosts {
