@@ -160,6 +160,14 @@ func (r *Reconciler) provisionN(ctx context.Context, n int) {
 		go func() {
 			defer wg.Done()
 			if err := r.provisioner.Provision(ctx, r.pool); err != nil {
+				if errors.Is(err, ErrNoEligibleHost) {
+					// Every host available to the pool is drained: an expected
+					// steady state during host maintenance, not a failure, so
+					// it's logged quietly and this cycle is simply skipped
+					// rather than escalated like a real provision error.
+					slog.DebugContext(ctx, "reconciler: no eligible host to provision on (all hosts drained?)", "pool", r.pool.GetName())
+					return
+				}
 				slog.ErrorContext(ctx, "reconciler: provision failed", "pool", r.pool.GetName(), "error", err)
 			}
 		}()

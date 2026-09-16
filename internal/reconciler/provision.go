@@ -114,7 +114,12 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 	start := time.Now()
 	defer func() { p.metrics.ObserveProvisionDuration(pool.GetName(), pool.GetNamespace(), time.Since(start)) }()
 
-	host, err := PickHost(ctx, p.store, pool)
+	drained, err := p.store.ListDrainedHostNames(ctx)
+	if err != nil {
+		return fmt.Errorf("reconciler: provision: %w", err)
+	}
+
+	host, err := PickHost(ctx, p.store, pool, drained)
 	if err != nil {
 		return err
 	}

@@ -29,6 +29,7 @@ type apiClients struct {
 	poolAdmin poolmgrv1alpha1.PoolAdminClient
 	lease     poolmgrv1alpha1.LeaseClient
 	events    poolmgrv1alpha1.EventsClient
+	hostAdmin poolmgrv1alpha1.HostAdminClient
 }
 
 type clientsKey struct{}
@@ -60,6 +61,7 @@ func NewRootCmd() *cobra.Command {
 				poolAdmin: poolmgrv1alpha1.NewPoolAdminClient(conn),
 				lease:     poolmgrv1alpha1.NewLeaseClient(conn),
 				events:    poolmgrv1alpha1.NewEventsClient(conn),
+				hostAdmin: poolmgrv1alpha1.NewHostAdminClient(conn),
 			}
 
 			cmd.SetContext(context.WithValue(cmd.Context(), clientsKey{}, clients))
@@ -80,7 +82,7 @@ func NewRootCmd() *cobra.Command {
 	root.PersistentFlags().StringVar(&cf.certFile, "cert-file", "", "path to a client certificate for mTLS")
 	root.PersistentFlags().StringVar(&cf.keyFile, "key-file", "", "path to the client certificate's private key for mTLS")
 
-	root.AddCommand(newPoolCmd(), newLeaseCmd(), newEventsCmd())
+	root.AddCommand(newPoolCmd(), newLeaseCmd(), newEventsCmd(), newHostCmd())
 
 	return root
 }

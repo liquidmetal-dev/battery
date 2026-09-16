@@ -71,6 +71,9 @@ func TestBuildGRPCServer_RegistersApplicationServices(t *testing.T) {
 	if _, err := poolmgrv1alpha1.NewPoolAdminClient(conn).ListPools(context.Background(), &poolmgrv1alpha1.ListPoolsRequest{}); err != nil {
 		t.Fatalf("ListPools: %v", err)
 	}
+	if _, err := poolmgrv1alpha1.NewHostAdminClient(conn).ListHosts(context.Background(), &poolmgrv1alpha1.ListHostsRequest{}); err != nil {
+		t.Fatalf("ListHosts: %v", err)
+	}
 }
 
 func TestBuildGRPCServer_RegistersHealthService(t *testing.T) {
@@ -197,6 +200,52 @@ func TestSweeperRun_ShutsDownOnContextCancel(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("sweeper.Run did not return promptly after context cancellation")
+	}
+}
+
+func TestSeedHosts(t *testing.T) {
+	st := openTestStore(t)
+	cfg := &config.Config{Hosts: []config.HostConfig{
+		{Name: "host-a", Address: "10.0.0.1:8443"},
+		{Name: "host-b", Address: "10.0.0.2:8443"},
+	}}
+
+	if err := seedHosts(context.Background(), st, cfg); err != nil {
+		t.Fatalf("seedHosts: %v", err)
+	}
+
+	hosts, err := st.ListHosts(context.Background())
+	if err != nil {
+		t.Fatalf("ListHosts: %v", err)
+	}
+	if len(hosts) != 2 || hosts[0].GetName() != "host-a" || hosts[1].GetName() != "host-b" {
+		t.Fatalf("ListHosts() = %+v, want [host-a, host-b]", hosts)
+	}
+}
+
+func TestSeedHosts_PreservesExistingDrainState(t *testing.T) {
+	st := openTestStore(t)
+	cfg := &config.Config{Hosts: []config.HostConfig{{Name: "host-a", Address: "10.0.0.1:8443"}}}
+
+	if err := seedHosts(context.Background(), st, cfg); err != nil {
+		t.Fatalf("seedHosts: %v", err)
+	}
+	if _, err := st.SetHostDrained(context.Background(), "host-a", true, "maintenance"); err != nil {
+		t.Fatalf("SetHostDrained: %v", err)
+	}
+
+	// Simulates a poolmgrd restart: seedHosts runs again against the same
+	// (now non-empty) store.
+	if err := seedHosts(context.Background(), st, cfg); err != nil {
+		t.Fatalf("seedHosts (second call): %v", err)
+	}
+
+	host, err := st.GetHost(context.Background(), "host-a")
+	if err != nil {
+		t.Fatalf("GetHost: %v", err)
+	}
+	if !host.GetDrained() {
+		t.Errorf("GetHost() drained = false after re-seed, want true (drain state preserved)")
 	}
 }
 
