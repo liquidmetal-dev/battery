@@ -146,6 +146,7 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 		PoolNamespace: pool.GetNamespace(),
 		FlintlockHost: host,
 		Phase:         poolmgrv1alpha1.VMPhase_PROVISIONING,
+		TemplateHash:  pool.GetTemplateHash(),
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}
@@ -327,6 +328,13 @@ type DeletionNotifier interface {
 // NotFound (already gone), removes vm's store row and returns nil. Any
 // other flintlock/host error leaves vm in the DELETING phase for a later
 // retry (e.g. Sweeper's pending-deletion scan) and returns that error.
+//
+// Every existing caller (Sweeper, LeaseServer) only ever calls this for a VM
+// whose phase can't be concurrently reclaimed by something else (LEASED,
+// already DELETING), so the unguarded UpdateVM here is safe for them. A
+// caller acting on an AVAILABLE VM from an in-memory snapshot (e.g.
+// RolloutController) must use EnsureVMDeletedIfPhase instead, to close the
+// window where ClaimAvailableVM concurrently moves that same VM to LEASED.
 func EnsureVMDeleted(ctx context.Context, st store.Store, flint *flintlockclient.Pool, vm *poolmgrv1alpha1.VMRecord) error {
 	if vm.GetPhase() != poolmgrv1alpha1.VMPhase_DELETING {
 		vm.Phase = poolmgrv1alpha1.VMPhase_DELETING
@@ -335,7 +343,36 @@ func EnsureVMDeleted(ctx context.Context, st store.Store, flint *flintlockclient
 			return fmt.Errorf("reconciler: mark vm deleting: %w", err)
 		}
 	}
+	return deleteFromFlintlockAndStore(ctx, st, flint, vm)
+}
 
+// EnsureVMDeletedIfPhase behaves like EnsureVMDeleted, except the DELETING
+// transition is guarded by store.UpdateVMPhaseIfCurrent instead of an
+// unguarded UpdateVM: it only takes effect if vm's store row is still in
+// expectedPhase at that moment. This closes the TOCTOU window a caller like
+// RolloutController has - it builds its deletion candidates from a
+// ListVMsByPool snapshot taken earlier in the same Tick, which can be stale
+// by the time it gets here (e.g. a concurrent ClaimAvailableVM already moved
+// this same VM AVAILABLE -> LEASED).
+//
+// If the guard fails, this returns store.ErrPhaseChanged (someone else
+// already changed vm's phase - the caller should skip it, untouched, both
+// in-memory and in the store) or store.ErrNotFound (vm's row is already
+// gone) without going anywhere near flintlock or vm's store row.
+func EnsureVMDeletedIfPhase(ctx context.Context, st store.Store, flint *flintlockclient.Pool, vm *poolmgrv1alpha1.VMRecord, expectedPhase poolmgrv1alpha1.VMPhase) error {
+	if vm.GetPhase() != poolmgrv1alpha1.VMPhase_DELETING {
+		if err := st.UpdateVMPhaseIfCurrent(ctx, vm.GetUid(), expectedPhase, poolmgrv1alpha1.VMPhase_DELETING); err != nil {
+			return err
+		}
+		vm.Phase = poolmgrv1alpha1.VMPhase_DELETING
+		vm.UpdatedAt = timestamppb.Now()
+	}
+	return deleteFromFlintlockAndStore(ctx, st, flint, vm)
+}
+
+// deleteFromFlintlockAndStore is EnsureVMDeleted/EnsureVMDeletedIfPhase's
+// shared tail: vm is already durably DELETING by the time either calls this.
+func deleteFromFlintlockAndStore(ctx context.Context, st store.Store, flint *flintlockclient.Pool, vm *poolmgrv1alpha1.VMRecord) error {
 	client, err := flint.Client(vm.GetFlintlockHost())
 	if err != nil {
 		return fmt.Errorf("reconciler: ensure vm deleted: %w", err)
@@ -367,8 +404,14 @@ func EnsureVMDeleted(ctx context.Context, st store.Store, flint *flintlockclient
 // so Sweeper.beginExpiry records those metrics itself, right when
 // DeleteLeaseIfExpired durably ends the lease - independent of how long
 // this function's caller took to actually finish deleting the VM.
-func FinishVMDeletion(ctx context.Context, st store.Store, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord, notifier DeletionNotifier, m *metrics.Registry) {
-	eventType := poolmgrv1alpha1.EventType_VM_DELETED_DUE_TO_EXPIRY
+//
+// defaultEventType is emitted when vm has no lease row to infer a release
+// from (the common case is VM_DELETED_DUE_TO_EXPIRY; RolloutController
+// passes VM_DELETED_FOR_ROLLOUT for its own deletions of AVAILABLE VMs,
+// which never carry a lease, so the lease-inference branch below never
+// overrides it for that caller).
+func FinishVMDeletion(ctx context.Context, st store.Store, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord, notifier DeletionNotifier, m *metrics.Registry, defaultEventType poolmgrv1alpha1.EventType) {
+	eventType := defaultEventType
 	if leaseID := vm.GetLeaseId(); leaseID != "" {
 		if lease, err := st.GetLease(ctx, leaseID); err == nil {
 			eventType = poolmgrv1alpha1.EventType_VM_DELETED_ON_RELEASE

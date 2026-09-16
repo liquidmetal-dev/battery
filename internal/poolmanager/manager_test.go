@@ -16,6 +16,7 @@ import (
 
 	"github.com/liquidmetal-dev/battery/internal/flintlockclient"
 	"github.com/liquidmetal-dev/battery/internal/metrics"
+	"github.com/liquidmetal-dev/battery/internal/reconciler"
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
 
@@ -76,6 +77,30 @@ func withFakeReconciler(t *testing.T, fakes map[string]*fakeRunner) {
 	t.Cleanup(func() { newReconciler = orig })
 }
 
+// fakeRolloutRunner is a rolloutRunner double: Run just blocks until its ctx
+// is done, then returns ctx.Err(). It never touches store or flint, so tests
+// that pass a nil store to New don't risk a real RolloutController.Tick
+// panicking on it.
+type fakeRolloutRunner struct{}
+
+func (fakeRolloutRunner) Run(ctx context.Context) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// withFakeRolloutController overrides the package-level newRolloutController
+// var for the duration of the test, so StartReconciler builds
+// fakeRolloutRunners instead of real reconciler.RolloutControllers - mirrors
+// withFakeReconciler above.
+func withFakeRolloutController(t *testing.T) {
+	t.Helper()
+	orig := newRolloutController
+	newRolloutController = func(_ *poolmgrv1alpha1.PoolSpec, _ store.Store, _ *flintlockclient.Pool, _ reconciler.DeletionNotifier, _ *metrics.Registry) rolloutRunner {
+		return fakeRolloutRunner{}
+	}
+	t.Cleanup(func() { newRolloutController = orig })
+}
+
 func testPool(name string) *poolmgrv1alpha1.PoolSpec {
 	return &poolmgrv1alpha1.PoolSpec{
 		Name:                     name,
@@ -115,6 +140,7 @@ func scrapeBody(t *testing.T, reg *metrics.Registry) string {
 func TestManager_StartReconciler_MarksRunning(t *testing.T) {
 	fakes := map[string]*fakeRunner{}
 	withFakeReconciler(t, fakes)
+	withFakeRolloutController(t)
 
 	m := New(context.Background(), nil, nil, nil)
 	if err := m.StartReconciler(testPool("pool-a")); err != nil {
@@ -129,6 +155,7 @@ func TestManager_StartReconciler_MarksRunning(t *testing.T) {
 func TestManager_StartReconciler_DuplicateReturnsError(t *testing.T) {
 	fakes := map[string]*fakeRunner{}
 	withFakeReconciler(t, fakes)
+	withFakeRolloutController(t)
 
 	m := New(context.Background(), nil, nil, nil)
 	if err := m.StartReconciler(testPool("pool-a")); err != nil {
@@ -143,6 +170,7 @@ func TestManager_StartReconciler_DuplicateReturnsError(t *testing.T) {
 func TestManager_StopReconciler_CancelsAndForgets(t *testing.T) {
 	fakes := map[string]*fakeRunner{}
 	withFakeReconciler(t, fakes)
+	withFakeRolloutController(t)
 
 	m := New(context.Background(), nil, nil, nil)
 	if err := m.StartReconciler(testPool("pool-a")); err != nil {
@@ -197,6 +225,7 @@ func TestManager_Seed_StartsOneReconcilerPerStoredPool(t *testing.T) {
 func TestManager_Notify_ForwardsToRunningPool(t *testing.T) {
 	fakes := map[string]*fakeRunner{}
 	withFakeReconciler(t, fakes)
+	withFakeRolloutController(t)
 
 	m := New(context.Background(), nil, nil, nil)
 	if err := m.StartReconciler(testPool("pool-a")); err != nil {
@@ -222,6 +251,7 @@ func TestManager_Notify_UnknownPoolIsNoop(_ *testing.T) {
 func TestManager_Run_CancelsAllChildrenAndReturnsAfterRootDone(t *testing.T) {
 	fakes := map[string]*fakeRunner{}
 	withFakeReconciler(t, fakes)
+	withFakeRolloutController(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m := New(ctx, nil, nil, nil)
@@ -255,6 +285,7 @@ func TestManager_Run_CancelsAllChildrenAndReturnsAfterRootDone(t *testing.T) {
 func TestManager_UnexpectedExit_RecordsMetric(t *testing.T) {
 	fakes := map[string]*fakeRunner{}
 	withFakeReconciler(t, fakes)
+	withFakeRolloutController(t)
 
 	reg := metrics.NewRegistry()
 	ctx, cancel := context.WithCancel(context.Background())
