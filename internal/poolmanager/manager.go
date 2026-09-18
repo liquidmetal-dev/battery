@@ -124,11 +124,14 @@ func (m *Manager) StartReconciler(spec *poolmgrv1alpha1.PoolSpec) error {
 	childCtx, cancel := context.WithCancel(m.rootCtx)
 	m.handles[key] = &reconcilerHandle{runner: runner, cancel: cancel}
 
+	log := slog.Default().With("pool", key.name, "namespace", key.namespace)
+	log.Info("poolmanager: starting reconciler")
+
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
 		if err := runner.Run(childCtx); err != nil && !errors.Is(err, context.Canceled) {
-			slog.ErrorContext(m.rootCtx, "poolmanager: reconciler exited unexpectedly", "pool", key.name, "namespace", key.namespace, "error", err)
+			log.Error("poolmanager: reconciler exited unexpectedly", "error", err)
 			m.metrics.RecordReconcilerUnexpectedExit(key.name, key.namespace)
 		}
 	}()
@@ -149,6 +152,7 @@ func (m *Manager) StopReconciler(name, namespace string) {
 	m.mu.Unlock()
 
 	if ok {
+		slog.Info("poolmanager: stopping reconciler", "pool", name, "namespace", namespace)
 		h.cancel()
 	}
 }

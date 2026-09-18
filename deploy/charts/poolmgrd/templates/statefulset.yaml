@@ -43,6 +43,7 @@ spec:
           args:
             - -config=/etc/poolmgrd/config.json
             - -db=/data/poolmgr.db
+            - -log-level={{ .Values.logLevel }}
           {{- with .Values.securityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}

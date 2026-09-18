@@ -11,8 +11,10 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -43,6 +45,9 @@ func New(cfg config.APIServerConfig, extraOpts ...grpc.ServerOption) (*grpc.Serv
 		}
 		opts = append(opts, grpc.Creds(creds))
 	}
+
+	logUnary, logStream := loggingInterceptors()
+	opts = append(opts, grpc.ChainUnaryInterceptor(logUnary), grpc.ChainStreamInterceptor(logStream))
 
 	if cfg.BasicAuthToken != "" {
 		unary, stream := basicAuthInterceptors(cfg.BasicAuthToken)
@@ -84,6 +89,37 @@ func loadServerTLS(cfg config.ServerTLSConfig) (credentials.TransportCredentials
 	}
 
 	return credentials.NewTLS(tlsConfig), nil
+}
+
+// loggingInterceptors returns unary and stream server interceptors that log
+// every RPC at Info level on success (method, duration) and Error level on
+// failure (method, duration, gRPC status), giving free per-call
+// instrumentation without touching each service handler.
+func loggingInterceptors() (grpc.UnaryServerInterceptor, grpc.StreamServerInterceptor) {
+	logResult := func(ctx context.Context, method string, start time.Time, err error) {
+		duration := time.Since(start)
+		if err != nil {
+			slog.ErrorContext(ctx, "grpc: request failed", "method", method, "duration", duration, "error", err)
+			return
+		}
+		slog.InfoContext(ctx, "grpc: request completed", "method", method, "duration", duration)
+	}
+
+	unary := func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		start := time.Now()
+		resp, err := handler(ctx, req)
+		logResult(ctx, info.FullMethod, start, err)
+		return resp, err
+	}
+
+	stream := func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		start := time.Now()
+		err := handler(srv, ss)
+		logResult(ss.Context(), info.FullMethod, start, err)
+		return err
+	}
+
+	return unary, stream
 }
 
 var (

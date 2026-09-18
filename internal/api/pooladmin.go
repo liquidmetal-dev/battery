@@ -146,8 +146,11 @@ func (s *PoolAdminServer) CreatePool(ctx context.Context, req *poolmgrv1alpha1.C
 	// that to the caller. Log it as an operational signal instead; the pool
 	// will simply have no reconciler running until poolmgrd restarts (which
 	// re-seeds every pool) or the pool is deleted and recreated.
+	log := slog.Default().With("pool", spec.GetName(), "namespace", spec.GetNamespace())
 	if err := s.poolMgr.StartReconciler(spec); err != nil {
-		slog.ErrorContext(ctx, "pooladmin: start reconciler failed", "pool", spec.GetName(), "namespace", spec.GetNamespace(), "error", err)
+		log.ErrorContext(ctx, "pooladmin: start reconciler failed", "error", err)
+	} else {
+		log.InfoContext(ctx, "pooladmin: pool created")
 	}
 
 	return &poolmgrv1alpha1.Pool{Spec: spec, Status: &poolmgrv1alpha1.PoolStatus{}}, nil
@@ -209,9 +212,12 @@ func (s *PoolAdminServer) UpdatePool(ctx context.Context, req *poolmgrv1alpha1.U
 	// on start failure the pool simply has no reconciler running until
 	// poolmgrd restarts (re-seeds every pool) or another successful
 	// CreatePool/UpdatePool/DeletePool cycle.
+	log := slog.Default().With("pool", spec.GetName(), "namespace", spec.GetNamespace())
 	s.poolMgr.StopReconciler(spec.GetName(), spec.GetNamespace())
 	if err := s.poolMgr.StartReconciler(spec); err != nil {
-		slog.ErrorContext(ctx, "pooladmin: restart reconciler failed", "pool", spec.GetName(), "namespace", spec.GetNamespace(), "error", err)
+		log.ErrorContext(ctx, "pooladmin: restart reconciler failed", "error", err)
+	} else {
+		log.InfoContext(ctx, "pooladmin: pool updated")
 	}
 
 	counts, err := reconciler.CountVMs(ctx, s.store, spec.GetName(), spec.GetNamespace())
@@ -254,6 +260,7 @@ func (s *PoolAdminServer) DeletePool(ctx context.Context, req *poolmgrv1alpha1.D
 	}
 
 	s.poolMgr.StopReconciler(name, ns)
+	slog.Default().With("pool", name, "namespace", ns).InfoContext(ctx, "pooladmin: pool deleted")
 	return &emptypb.Empty{}, nil
 }
 

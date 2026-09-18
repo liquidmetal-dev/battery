@@ -34,6 +34,7 @@ type Reconciler struct {
 	strategy     Strategy
 	provisioner  *Provisioner
 	tickInterval time.Duration
+	log          *slog.Logger
 
 	claimed chan struct{}
 	deleted chan struct{}
@@ -60,6 +61,7 @@ func New(pool *poolmgrv1alpha1.PoolSpec, st store.Store, flint *flintlockclient.
 		strategy:     strategy,
 		provisioner:  NewProvisioner(st, flint, pcfg, m),
 		tickInterval: tickInterval,
+		log:          slog.Default().With("pool", pool.GetName(), "namespace", pool.GetNamespace()),
 		claimed:      make(chan struct{}, notifyBuffer),
 		deleted:      make(chan struct{}, notifyBuffer),
 	}, nil
@@ -92,6 +94,9 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	ticker := time.NewTicker(r.tickInterval)
 	defer ticker.Stop()
 
+	r.log.InfoContext(ctx, "reconciler: started", "tick_interval", r.tickInterval)
+	defer r.log.InfoContext(ctx, "reconciler: stopped")
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -99,7 +104,7 @@ func (r *Reconciler) Run(ctx context.Context) error {
 		case <-ticker.C:
 			counts, err := r.countVMs(ctx)
 			if err != nil {
-				slog.ErrorContext(ctx, "reconciler: failed to count VMs", "pool", r.pool.GetName(), "error", err)
+				r.log.ErrorContext(ctx, "reconciler: failed to count VMs", "error", err)
 				continue
 			}
 			r.provisionN(ctx, r.strategy.DesiredNewVMs(r.pool, counts))
@@ -154,13 +159,15 @@ func (r *Reconciler) provisionN(ctx context.Context, n int) {
 		return
 	}
 
+	r.log.InfoContext(ctx, "reconciler: provisioning VMs", "count", n)
+
 	var wg sync.WaitGroup
 	wg.Add(n)
 	for i := 0; i < n; i++ {
 		go func() {
 			defer wg.Done()
 			if err := r.provisioner.Provision(ctx, r.pool); err != nil {
-				slog.ErrorContext(ctx, "reconciler: provision failed", "pool", r.pool.GetName(), "error", err)
+				r.log.ErrorContext(ctx, "reconciler: provision failed", "error", err)
 			}
 		}()
 	}

@@ -65,9 +65,10 @@ func (c *PoolCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	for _, pool := range pools {
+		log := slog.Default().With("pool", pool.GetName(), "namespace", pool.GetNamespace())
 		counts, err := countVMs(ctx, c.store, pool.GetName(), pool.GetNamespace())
 		if err != nil {
-			slog.ErrorContext(ctx, "metrics: PoolCollector: count VMs failed", "pool", pool.GetName(), "namespace", pool.GetNamespace(), "error", err)
+			log.ErrorContext(ctx, "metrics: PoolCollector: count VMs failed", "error", err)
 			continue
 		}
 
