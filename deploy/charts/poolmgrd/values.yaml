@@ -4,6 +4,9 @@ image:
   tag: ""
   pullPolicy: IfNotPresent
 
+# logLevel controls poolmgrd's -log-level flag: debug, info, warn, or error.
+logLevel: debug
+
 # config is rendered verbatim (as JSON) into poolmgrd's -config file, using
 # poolmgrd's own config schema (see internal/config/config.go) -- the field
 # names below (hosts, api_server, metrics_addr, ...) are exactly the JSON

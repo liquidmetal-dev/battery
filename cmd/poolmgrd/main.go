@@ -6,9 +6,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -29,13 +30,35 @@ import (
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
 
+// fatal logs err (or msg alone, if err is nil) at Error level on the default
+// logger and exits 1. Unlike stdlib log.Fatal, this doesn't run deferred
+// cleanup - callers past the point where st.Close() matters should prefer
+// returning the error up to a single fatal call instead.
+func fatal(msg string, err error) {
+	if err != nil {
+		slog.Error(msg, "error", err)
+	} else {
+		slog.Error(msg)
+	}
+	os.Exit(1)
+}
+
 func main() {
 	configPath := flag.String("config", "", "path to the pool manager's JSON config file")
 	dbPath := flag.String("db", "poolmgr.db", "path to the pool manager's SQLite database")
+	logLevel := flag.String("log-level", "debug", "log verbosity: debug, info, warn, or error")
 	flag.Parse()
 
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+
+	level, err := parseLogLevel(*logLevel)
+	if err != nil {
+		fatal("poolmgrd: "+err.Error(), nil)
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+
 	if *configPath == "" {
-		log.Fatal("poolmgrd: -config is required")
+		fatal("poolmgrd: -config is required", nil)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -43,22 +66,24 @@ func main() {
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("poolmgrd: %v", err)
+		fatal("poolmgrd: load config", err)
 	}
+	slog.Info("poolmgrd: config loaded", "config_path", *configPath)
 
 	st, err := store.Open(*dbPath)
 	if err != nil {
-		log.Fatalf("poolmgrd: open store: %v", err)
+		fatal("poolmgrd: open store", err)
 	}
+	slog.Info("poolmgrd: store opened", "db_path", *dbPath)
 	defer func() {
 		if err := st.Close(); err != nil {
-			log.Printf("poolmgrd: close store: %v", err)
+			slog.Error("poolmgrd: close store", "error", err)
 		}
 	}()
 
 	flint, err := flintlockclient.New(cfg)
 	if err != nil {
-		log.Fatalf("poolmgrd: flintlock client pool: %v", err)
+		fatal("poolmgrd: flintlock client pool", err)
 	}
 
 	reg := metrics.NewRegistry()
@@ -72,8 +97,9 @@ func main() {
 
 	poolMgr := poolmanager.New(runCtx, st, flint, reg)
 	if err := poolMgr.Seed(runCtx); err != nil {
-		log.Fatalf("poolmgrd: %v", err)
+		fatal("poolmgrd: seed pool manager", err)
 	}
+	slog.Info("poolmgrd: pool manager seeded")
 
 	// cfg.Validate (via config.Load) already guarantees these parse cleanly.
 	sweepInterval, _ := time.ParseDuration(cfg.SweepInterval)
@@ -96,12 +122,12 @@ func main() {
 	if cfg.APIServer != nil {
 		grpcSrv, err := buildGRPCServer(*cfg.APIServer, st, flint, reg, poolMgr)
 		if err != nil {
-			log.Fatalf("poolmgrd: %v", err)
+			fatal("poolmgrd: build grpc server", err)
 		}
 
 		lis, err := net.Listen("tcp", cfg.APIServer.Addr)
 		if err != nil {
-			log.Fatalf("poolmgrd: listen on %s: %v", cfg.APIServer.Addr, err)
+			fatal(fmt.Sprintf("poolmgrd: listen on %s", cfg.APIServer.Addr), err)
 		}
 
 		pending++
@@ -109,7 +135,7 @@ func main() {
 			errCh <- serveGRPC(runCtx, grpcSrv, lis)
 		}()
 	} else {
-		log.Println("poolmgrd: no api_server configured, gRPC API is disabled")
+		slog.Warn("poolmgrd: no api_server configured, gRPC API is disabled")
 	}
 
 	var firstErr error
@@ -120,7 +146,23 @@ func main() {
 		}
 	}
 	if firstErr != nil {
-		log.Fatalf("poolmgrd: %v", firstErr)
+		fatal("poolmgrd", firstErr)
+	}
+}
+
+// parseLogLevel maps a -log-level flag value onto a slog.Level.
+func parseLogLevel(s string) (slog.Level, error) {
+	switch s {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return 0, fmt.Errorf("invalid -log-level %q: must be debug, info, warn, or error", s)
 	}
 }
 
@@ -161,7 +203,7 @@ const grpcShutdownTimeout = 5 * time.Second
 func serveGRPC(ctx context.Context, grpcSrv *grpc.Server, lis net.Listener) error {
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("poolmgrd: gRPC API listening on %s", lis.Addr())
+		slog.Info("poolmgrd: gRPC API listening", "addr", lis.Addr().String())
 		errCh <- grpcSrv.Serve(lis)
 	}()
 
@@ -179,8 +221,9 @@ func serveGRPC(ctx context.Context, grpcSrv *grpc.Server, lis net.Listener) erro
 
 	select {
 	case <-stopped:
+		slog.Info("poolmgrd: gRPC API stopped")
 	case <-time.After(grpcShutdownTimeout):
-		log.Printf("poolmgrd: graceful stop exceeded %s, forcing shutdown", grpcShutdownTimeout)
+		slog.Warn("poolmgrd: graceful stop exceeded timeout, forcing shutdown", "timeout", grpcShutdownTimeout)
 		grpcSrv.Stop()
 		<-stopped
 	}
@@ -199,7 +242,7 @@ func serveMetrics(ctx context.Context, addr string, reg *metrics.Registry) error
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("poolmgrd: /metrics listening on %s", addr)
+		slog.Info("poolmgrd: /metrics listening", "addr", addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
@@ -218,5 +261,6 @@ func serveMetrics(ctx context.Context, addr string, reg *metrics.Registry) error
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return err
 	}
+	slog.Info("poolmgrd: /metrics stopped")
 	return ctx.Err()
 }

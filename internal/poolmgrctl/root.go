@@ -5,6 +5,8 @@ package poolmgrctl
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"os"
 	"strings"
 	"unicode"
 
@@ -44,12 +46,20 @@ func clientsFromContext(ctx context.Context) *apiClients {
 // flags, and its command tree.
 func NewRootCmd() *cobra.Command {
 	cf := connFlags{}
+	var verbose bool
 
 	root := &cobra.Command{
 		Use:          "poolmgrctl",
 		Short:        "CLI client for the pool manager gRPC API",
 		SilenceUsage: true,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			level := slog.LevelWarn
+			if verbose {
+				level = slog.LevelDebug
+			}
+			slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+
+			slog.Debug("poolmgrctl: dialing", "addr", cf.addr, "insecure", cf.insecure)
 			conn, err := dial(cf)
 			if err != nil {
 				return fmt.Errorf("dial %s: %w", cf.addr, err)
@@ -74,6 +84,7 @@ func NewRootCmd() *cobra.Command {
 		},
 	}
 
+	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "enable debug logging to stderr")
 	root.PersistentFlags().StringVar(&cf.addr, "addr", defaultAddr, "address of the pool manager's gRPC API")
 	root.PersistentFlags().BoolVar(&cf.insecure, "insecure", false, "disable TLS when dialing the pool manager")
 	root.PersistentFlags().StringVar(&cf.caFile, "ca-file", "", "path to a CA certificate to verify the pool manager's server certificate")
