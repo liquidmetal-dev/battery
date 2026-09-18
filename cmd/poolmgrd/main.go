@@ -46,7 +46,7 @@ func fatal(msg string, err error) {
 func main() {
 	configPath := flag.String("config", "", "path to the pool manager's JSON config file")
 	dbPath := flag.String("db", "poolmgr.db", "path to the pool manager's SQLite database")
-	logLevel := flag.String("log-level", "info", "log verbosity: debug, info, warn, or error")
+	logLevel := flag.String("log-level", "debug", "log verbosity: debug, info, warn, or error")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
