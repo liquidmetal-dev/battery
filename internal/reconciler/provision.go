@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
@@ -114,10 +115,13 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 	start := time.Now()
 	defer func() { p.metrics.ObserveProvisionDuration(pool.GetName(), pool.GetNamespace(), time.Since(start)) }()
 
+	log := slog.Default().With("pool", pool.GetName(), "namespace", pool.GetNamespace())
+
 	host, err := PickHost(ctx, p.store, pool)
 	if err != nil {
 		return err
 	}
+	log = log.With("flintlock_host", host)
 
 	client, err := p.flint.Client(host)
 	if err != nil {
@@ -130,14 +134,18 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 	}
 	spec.AllowGuestAgent = true
 
+	log.InfoContext(ctx, "reconciler: creating microvm")
 	createResp, err := client.CreateMicroVM(ctx, &microvmv1alpha1.CreateMicroVMRequest{Microvm: spec})
 	if err != nil {
+		log.ErrorContext(ctx, "reconciler: CreateMicroVM failed", "error", err)
 		return fmt.Errorf("reconciler: provision: CreateMicroVM: %w", err)
 	}
 	uid := createResp.GetMicrovm().GetSpec().GetUid()
 	if uid == "" {
 		return fmt.Errorf("reconciler: provision: CreateMicroVM returned no uid")
 	}
+	log = log.With("microvm_uid", uid)
+	log.InfoContext(ctx, "reconciler: microvm created")
 
 	now := timestamppb.Now()
 	vm := &poolmgrv1alpha1.VMRecord{
@@ -153,15 +161,18 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 		// No VMRecord was persisted, so there's nothing to quarantine and
 		// hook_failure_policy doesn't apply: best-effort delete the
 		// now-orphaned microvm before returning, regardless of policy.
+		log.WarnContext(ctx, "reconciler: CreateVM failed, deleting orphaned microvm", "error", err)
 		_, _ = client.DeleteMicroVM(ctx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: uid})
 		return fmt.Errorf("reconciler: provision: CreateVM: %w", err)
 	}
 	EmitEvent(ctx, p.store, pool, uid, poolmgrv1alpha1.EventType_VM_PROVISIONED)
 
-	if err := p.waitCreated(ctx, client, uid); err != nil {
+	if err := p.waitCreated(ctx, log, client, uid); err != nil {
+		log.ErrorContext(ctx, "reconciler: microvm did not reach CREATED state", "error", err)
 		ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm, hookCreate, p.metrics)
 		return err
 	}
+	log.InfoContext(ctx, "reconciler: microvm reached CREATED state")
 
 	if err := p.updatePhase(ctx, pool, vm, poolmgrv1alpha1.VMPhase_CREATE_HOOK_RUNNING); err != nil {
 		return err
@@ -174,25 +185,31 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 		return err
 	}
 
+	log.InfoContext(ctx, "reconciler: waiting for guest agent")
 	readyCtx, cancel := context.WithTimeout(ctx, p.cfg.GuestAgentTimeout)
 	err = flintlockclient.WaitReady(readyCtx, execClient, uid, p.cfg.GuestAgentInterval)
 	cancel()
 	if err != nil {
 		err = fmt.Errorf("%w: guest-agent not ready: %w", ErrHookFailed, err)
+		log.ErrorContext(ctx, "reconciler: guest agent not ready", "error", err)
 		ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm, hookCreate, p.metrics)
 		return err
 	}
+	log.InfoContext(ctx, "reconciler: guest agent ready")
 
 	hookStart := time.Now()
 	for _, cmd := range pool.GetCreateCommands() {
+		log.InfoContext(ctx, "reconciler: running create command", "command", cmd)
 		result, err := flintlockclient.Exec(ctx, execClient, uid, cmd, flintlockclient.ExecOptions{TimeoutSeconds: p.cfg.ExecTimeoutSeconds})
 		if err != nil {
 			err = fmt.Errorf("%w: %q: %w", ErrHookFailed, cmd, err)
+			log.ErrorContext(ctx, "reconciler: create command failed", "command", cmd, "error", err)
 			ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm, hookCreate, p.metrics)
 			return err
 		}
 		if result.ExitCode != 0 {
 			err = fmt.Errorf("%w: %q: exit code %d", ErrHookFailed, cmd, result.ExitCode)
+			log.ErrorContext(ctx, "reconciler: create command exited non-zero", "command", cmd, "exit_code", result.ExitCode)
 			ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm, hookCreate, p.metrics)
 			return err
 		}
@@ -203,6 +220,7 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 		return err
 	}
 	EmitEvent(ctx, p.store, pool, uid, poolmgrv1alpha1.EventType_VM_AVAILABLE)
+	log.InfoContext(ctx, "reconciler: microvm provisioned")
 	return nil
 }
 
@@ -224,7 +242,7 @@ func (p *Provisioner) updatePhase(ctx context.Context, pool *poolmgrv1alpha1.Poo
 
 // waitCreated polls GetMicroVM until the microvm's state is CREATED, or
 // returns ErrCreateFailed/ErrCreateTimedOut.
-func (p *Provisioner) waitCreated(ctx context.Context, client microvmv1alpha1.MicroVMClient, uid string) error {
+func (p *Provisioner) waitCreated(ctx context.Context, log *slog.Logger, client microvmv1alpha1.MicroVMClient, uid string) error {
 	ctx, cancel := context.WithTimeout(ctx, p.cfg.CreatePollTimeout)
 	defer cancel()
 
@@ -246,11 +264,13 @@ func (p *Provisioner) waitCreated(ctx context.Context, client microvmv1alpha1.Mi
 			}
 			return fmt.Errorf("reconciler: GetMicroVM: %w", err)
 		}
-		switch resp.GetMicrovm().GetStatus().GetState() {
+		switch state := resp.GetMicrovm().GetStatus().GetState(); state {
 		case flintlocktypes.MicroVMStatus_CREATED:
 			return nil
 		case flintlocktypes.MicroVMStatus_FAILED:
 			return fmt.Errorf("%w: %s", ErrCreateFailed, uid)
+		default:
+			log.DebugContext(ctx, "reconciler: waiting for microvm to be created", "state", state)
 		}
 
 		select {
@@ -284,15 +304,21 @@ func ApplyHookFailurePolicy(ctx context.Context, st store.Store, flint *flintloc
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hookFailureCleanupTimeout)
 	defer cancel()
 
+	log := slog.Default().With("pool", pool.GetName(), "namespace", pool.GetNamespace(), "microvm_uid", vm.GetUid(), "flintlock_host", vm.GetFlintlockHost())
+
 	switch pool.GetHookFailurePolicy() {
 	case poolmgrv1alpha1.HookFailurePolicy_QUARANTINE:
+		log.WarnContext(ctx, "reconciler: quarantining microvm after hook failure", "hook", hook)
 		vm.Phase = poolmgrv1alpha1.VMPhase_QUARANTINED
 		vm.LeaseId = nil // no lease exists for a hook failure; don't leave a dangling reference
 		vm.UpdatedAt = timestamppb.Now()
 		_ = st.UpdateVM(cleanupCtx, vm)
 	default: // DELETE_AND_REPLACE, and the unspecified zero value: fail safe by deleting.
+		log.WarnContext(ctx, "reconciler: deleting microvm after hook failure", "hook", hook)
 		if client, err := flint.Client(vm.GetFlintlockHost()); err == nil {
-			_, _ = client.DeleteMicroVM(cleanupCtx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: vm.GetUid()})
+			if _, err := client.DeleteMicroVM(cleanupCtx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: vm.GetUid()}); err != nil {
+				log.ErrorContext(ctx, "reconciler: DeleteMicroVM failed", "error", err)
+			}
 		}
 		_ = st.DeleteVM(cleanupCtx, vm.GetUid())
 	}
@@ -328,6 +354,8 @@ type DeletionNotifier interface {
 // other flintlock/host error leaves vm in the DELETING phase for a later
 // retry (e.g. Sweeper's pending-deletion scan) and returns that error.
 func EnsureVMDeleted(ctx context.Context, st store.Store, flint *flintlockclient.Pool, vm *poolmgrv1alpha1.VMRecord) error {
+	log := slog.Default().With("pool", vm.GetPoolName(), "namespace", vm.GetPoolNamespace(), "microvm_uid", vm.GetUid(), "flintlock_host", vm.GetFlintlockHost())
+
 	if vm.GetPhase() != poolmgrv1alpha1.VMPhase_DELETING {
 		vm.Phase = poolmgrv1alpha1.VMPhase_DELETING
 		vm.UpdatedAt = timestamppb.Now()
@@ -340,13 +368,17 @@ func EnsureVMDeleted(ctx context.Context, st store.Store, flint *flintlockclient
 	if err != nil {
 		return fmt.Errorf("reconciler: ensure vm deleted: %w", err)
 	}
+
+	log.InfoContext(ctx, "reconciler: deleting microvm")
 	if _, err := client.DeleteMicroVM(ctx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: vm.GetUid()}); err != nil && status.Code(err) != codes.NotFound {
+		log.ErrorContext(ctx, "reconciler: DeleteMicroVM failed", "error", err)
 		return fmt.Errorf("reconciler: DeleteMicroVM: %w", err)
 	}
 
 	if err := st.DeleteVM(ctx, vm.GetUid()); err != nil {
 		return fmt.Errorf("reconciler: delete vm record: %w", err)
 	}
+	log.InfoContext(ctx, "reconciler: microvm deleted")
 	return nil
 }
 
