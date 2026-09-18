@@ -125,18 +125,24 @@ func (s *PoolAdminServer) CreatePool(ctx context.Context, req *poolmgrv1alpha1.C
 		return nil, err
 	}
 
+	log := slog.Default().With("pool", spec.GetName(), "namespace", spec.GetNamespace())
+	log.InfoContext(ctx, "pooladmin: CreatePool requested")
+
 	unlock := s.lockPool(spec.GetName(), spec.GetNamespace())
 	defer unlock()
 
 	_, err := s.store.GetPool(ctx, spec.GetName(), spec.GetNamespace())
 	if err == nil {
+		log.WarnContext(ctx, "pooladmin: CreatePool failed: pool already exists")
 		return nil, status.Errorf(codes.AlreadyExists, "pool %s/%s already exists", spec.GetNamespace(), spec.GetName())
 	}
 	if !errors.Is(err, store.ErrNotFound) {
+		log.ErrorContext(ctx, "pooladmin: CreatePool: get pool failed", "error", err)
 		return nil, status.Errorf(codes.Internal, "get pool: %v", err)
 	}
 
 	if err := s.store.CreatePool(ctx, spec); err != nil {
+		log.ErrorContext(ctx, "pooladmin: CreatePool: store write failed", "error", err)
 		return nil, status.Errorf(codes.Internal, "create pool: %v", err)
 	}
 
@@ -146,7 +152,6 @@ func (s *PoolAdminServer) CreatePool(ctx context.Context, req *poolmgrv1alpha1.C
 	// that to the caller. Log it as an operational signal instead; the pool
 	// will simply have no reconciler running until poolmgrd restarts (which
 	// re-seeds every pool) or the pool is deleted and recreated.
-	log := slog.Default().With("pool", spec.GetName(), "namespace", spec.GetNamespace())
 	if err := s.poolMgr.StartReconciler(spec); err != nil {
 		log.ErrorContext(ctx, "pooladmin: start reconciler failed", "error", err)
 	} else {
@@ -164,8 +169,15 @@ func (s *PoolAdminServer) GetPool(ctx context.Context, req *poolmgrv1alpha1.GetP
 // ListPools returns every pool, optionally filtered to a single namespace,
 // each with its current live status.
 func (s *PoolAdminServer) ListPools(ctx context.Context, req *poolmgrv1alpha1.ListPoolsRequest) (*poolmgrv1alpha1.ListPoolsResponse, error) {
+	log := slog.Default()
+	if req.Namespace != nil {
+		log = log.With("namespace", req.GetNamespace())
+	}
+	log.DebugContext(ctx, "pooladmin: ListPools requested")
+
 	specs, err := s.store.ListPools(ctx)
 	if err != nil {
+		log.ErrorContext(ctx, "pooladmin: ListPools failed", "error", err)
 		return nil, status.Errorf(codes.Internal, "list pools: %v", err)
 	}
 
@@ -176,10 +188,12 @@ func (s *PoolAdminServer) ListPools(ctx context.Context, req *poolmgrv1alpha1.Li
 		}
 		counts, err := reconciler.CountVMs(ctx, s.store, spec.GetName(), spec.GetNamespace())
 		if err != nil {
+			log.ErrorContext(ctx, "pooladmin: ListPools: count vms failed", "pool", spec.GetName(), "namespace", spec.GetNamespace(), "error", err)
 			return nil, status.Errorf(codes.Internal, "count vms: %v", err)
 		}
 		resp.Pools = append(resp.Pools, &poolmgrv1alpha1.Pool{Spec: spec, Status: countsToStatus(counts)})
 	}
+	log.DebugContext(ctx, "pooladmin: ListPools completed", "count", len(resp.Pools))
 	return resp, nil
 }
 
@@ -191,17 +205,23 @@ func (s *PoolAdminServer) UpdatePool(ctx context.Context, req *poolmgrv1alpha1.U
 		return nil, err
 	}
 
+	log := slog.Default().With("pool", spec.GetName(), "namespace", spec.GetNamespace())
+	log.InfoContext(ctx, "pooladmin: UpdatePool requested")
+
 	unlock := s.lockPool(spec.GetName(), spec.GetNamespace())
 	defer unlock()
 
 	if _, err := s.store.GetPool(ctx, spec.GetName(), spec.GetNamespace()); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
+			log.WarnContext(ctx, "pooladmin: UpdatePool failed: pool not found")
 			return nil, status.Errorf(codes.NotFound, "pool %s/%s not found", spec.GetNamespace(), spec.GetName())
 		}
+		log.ErrorContext(ctx, "pooladmin: UpdatePool: get pool failed", "error", err)
 		return nil, status.Errorf(codes.Internal, "get pool: %v", err)
 	}
 
 	if err := s.store.UpdatePool(ctx, spec); err != nil {
+		log.ErrorContext(ctx, "pooladmin: UpdatePool: store write failed", "error", err)
 		return nil, status.Errorf(codes.Internal, "update pool: %v", err)
 	}
 
@@ -212,7 +232,6 @@ func (s *PoolAdminServer) UpdatePool(ctx context.Context, req *poolmgrv1alpha1.U
 	// on start failure the pool simply has no reconciler running until
 	// poolmgrd restarts (re-seeds every pool) or another successful
 	// CreatePool/UpdatePool/DeletePool cycle.
-	log := slog.Default().With("pool", spec.GetName(), "namespace", spec.GetNamespace())
 	s.poolMgr.StopReconciler(spec.GetName(), spec.GetNamespace())
 	if err := s.poolMgr.StartReconciler(spec); err != nil {
 		log.ErrorContext(ctx, "pooladmin: restart reconciler failed", "error", err)
@@ -222,6 +241,7 @@ func (s *PoolAdminServer) UpdatePool(ctx context.Context, req *poolmgrv1alpha1.U
 
 	counts, err := reconciler.CountVMs(ctx, s.store, spec.GetName(), spec.GetNamespace())
 	if err != nil {
+		log.ErrorContext(ctx, "pooladmin: UpdatePool: count vms failed", "error", err)
 		return nil, status.Errorf(codes.Internal, "count vms: %v", err)
 	}
 	return &poolmgrv1alpha1.Pool{Spec: spec, Status: countsToStatus(counts)}, nil
@@ -234,47 +254,62 @@ func (s *PoolAdminServer) UpdatePool(ctx context.Context, req *poolmgrv1alpha1.U
 func (s *PoolAdminServer) DeletePool(ctx context.Context, req *poolmgrv1alpha1.DeletePoolRequest) (*emptypb.Empty, error) {
 	name, ns := req.GetRef().GetName(), req.GetRef().GetNamespace()
 
+	log := slog.Default().With("pool", name, "namespace", ns)
+	log.InfoContext(ctx, "pooladmin: DeletePool requested")
+
 	unlock := s.lockPool(name, ns)
 	defer unlock()
 
 	if _, err := s.store.GetPool(ctx, name, ns); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
+			log.WarnContext(ctx, "pooladmin: DeletePool failed: pool not found")
 			return nil, status.Errorf(codes.NotFound, "pool %s/%s not found", ns, name)
 		}
+		log.ErrorContext(ctx, "pooladmin: DeletePool: get pool failed", "error", err)
 		return nil, status.Errorf(codes.Internal, "get pool: %v", err)
 	}
 
 	vms, err := s.store.ListVMsByPool(ctx, name, ns, nil)
 	if err != nil {
+		log.ErrorContext(ctx, "pooladmin: DeletePool: list vms failed", "error", err)
 		return nil, status.Errorf(codes.Internal, "list vms: %v", err)
 	}
 	if len(vms) > 0 {
+		log.WarnContext(ctx, "pooladmin: DeletePool failed: pool still has VMs", "vm_count", len(vms))
 		return nil, status.Errorf(codes.FailedPrecondition, "pool %s/%s still has VMs, delete or drain them first", ns, name)
 	}
 
 	if err := s.store.DeletePool(ctx, name, ns); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
+			log.WarnContext(ctx, "pooladmin: DeletePool failed: pool not found")
 			return nil, status.Errorf(codes.NotFound, "pool %s/%s not found", ns, name)
 		}
+		log.ErrorContext(ctx, "pooladmin: DeletePool: store delete failed", "error", err)
 		return nil, status.Errorf(codes.Internal, "delete pool: %v", err)
 	}
 
 	s.poolMgr.StopReconciler(name, ns)
-	slog.Default().With("pool", name, "namespace", ns).InfoContext(ctx, "pooladmin: pool deleted")
+	log.InfoContext(ctx, "pooladmin: pool deleted")
 	return &emptypb.Empty{}, nil
 }
 
 func (s *PoolAdminServer) getPool(ctx context.Context, name, namespace string) (*poolmgrv1alpha1.Pool, error) {
+	log := slog.Default().With("pool", name, "namespace", namespace)
+	log.DebugContext(ctx, "pooladmin: GetPool requested")
+
 	spec, err := s.store.GetPool(ctx, name, namespace)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
+			log.DebugContext(ctx, "pooladmin: GetPool failed: pool not found")
 			return nil, status.Errorf(codes.NotFound, "pool %s/%s not found", namespace, name)
 		}
+		log.ErrorContext(ctx, "pooladmin: GetPool: get pool failed", "error", err)
 		return nil, status.Errorf(codes.Internal, "get pool: %v", err)
 	}
 
 	counts, err := reconciler.CountVMs(ctx, s.store, name, namespace)
 	if err != nil {
+		log.ErrorContext(ctx, "pooladmin: GetPool: count vms failed", "error", err)
 		return nil, status.Errorf(codes.Internal, "count vms: %v", err)
 	}
 	return &poolmgrv1alpha1.Pool{Spec: spec, Status: countsToStatus(counts)}, nil
