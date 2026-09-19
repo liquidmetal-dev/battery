@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/google/uuid"
+
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	microvmv1alpha1 "github.com/liquidmetal-dev/flintlock/api/services/microvm/v1alpha1"
 	flintlocktypes "github.com/liquidmetal-dev/flintlock/api/types"
@@ -133,6 +135,16 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 		spec = &flintlocktypes.MicroVMSpec{}
 	}
 	spec.AllowGuestAgent = true
+	// The template is one shared spec instantiated for every VM in the
+	// pool, so no single id in it can be right for all of them: flintlockd
+	// rejects an empty one outright ("name is required"), and a fixed
+	// non-empty one would collide the moment the pool held more than one
+	// VM. Provision is what actually creates each VM, so it's the only
+	// place that can give each one its own.
+	spec.Id = fmt.Sprintf("%s-%s", pool.GetName(), uuid.NewString())
+	if spec.Namespace == "" {
+		spec.Namespace = pool.GetNamespace()
+	}
 
 	log.InfoContext(ctx, "reconciler: creating microvm")
 	createResp, err := client.CreateMicroVM(ctx, &microvmv1alpha1.CreateMicroVMRequest{Microvm: spec})

@@ -77,6 +77,47 @@ func TestProvision_HappyPath(t *testing.T) {
 	}
 }
 
+// TestProvision_AssignsAUniqueIDToEachVM guards against the bug reported in
+// https://github.com/liquidmetal-dev/battery/issues/87: the pool's template
+// is shared by every VM the reconciler provisions from it, so an empty id
+// (the normal case: flintlock-runner and battery's own e2e suite both leave
+// it unset, expecting the Pool Manager to assign one) got sent to flintlockd
+// as-is, which rejects it ("creating vmid from spec: name is required").
+// A fixed non-empty id in the template would only trade that failure for
+// every VM in a pool of size > 1 colliding on the same one.
+func TestProvision_AssignsAUniqueIDToEachVM(t *testing.T) {
+	vm := &fakeMicroVM{pollsUntilCreated: 0}
+	exec := alwaysReadyExec()
+	flint := startFakeFlintlock(t, vm, exec)
+	st := openTestStore(t)
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-a"})
+	reg := metrics.NewRegistry()
+	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), reg)
+
+	if err := p.Provision(context.Background(), pool); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if err := p.Provision(context.Background(), pool); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	created := vm.createdSpecs()
+	if len(created) != 2 {
+		t.Fatalf("expected 2 CreateMicroVM calls, got %d", len(created))
+	}
+	id1, id2 := created[0].GetId(), created[1].GetId()
+	if id1 == "" || id2 == "" {
+		t.Fatalf("expected every created spec to have a non-empty id, got %q and %q", id1, id2)
+	}
+	if id1 == id2 {
+		t.Fatalf("expected each VM in the pool to get its own id, both got %q", id1)
+	}
+	if got := created[0].GetNamespace(); got != pool.GetNamespace() {
+		t.Fatalf("namespace = %q, want the pool's own %q", got, pool.GetNamespace())
+	}
+}
+
 func TestProvision_CreatePollTimeout(t *testing.T) {
 	vm := &fakeMicroVM{pollsUntilCreated: 1000} // never reaches CREATED within the test's timeout
 	exec := &fakeMicroVMExec{}
