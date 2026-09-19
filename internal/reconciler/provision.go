@@ -141,7 +141,17 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 	// non-empty one would collide the moment the pool held more than one
 	// VM. Provision is what actually creates each VM, so it's the only
 	// place that can give each one its own.
-	spec.Id = fmt.Sprintf("%s-%s", pool.GetName(), uuid.NewString())
+	//
+	// The id becomes part of a filesystem path for the guest-agent's vsock
+	// proxy socket (.../<namespace>/<id>/<flintlock-uid>/guest-agent.vsock),
+	// which is a Unix domain socket subject to Linux's 108-byte sun_path
+	// limit - a full uuid here (36 chars) overflows that budget once the
+	// namespace and flintlock's own generated uid are accounted for,
+	// failing every VM with "connect: invalid argument" well after
+	// CreateMicroVM has already succeeded. An 8-character suffix keeps
+	// enough entropy to make collisions practically impossible for any
+	// real pool size while leaving headroom in that path.
+	spec.Id = fmt.Sprintf("%s-%s", pool.GetName(), uuid.NewString()[:8])
 	if spec.Namespace == "" {
 		spec.Namespace = pool.GetNamespace()
 	}
