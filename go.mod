@@ -8,7 +8,7 @@ require (
 	github.com/liquidmetal-dev/flintlock/api v0.0.0-20260907103632-80befabb631d
 	github.com/prometheus/client_golang v1.24.1
 	github.com/spf13/cobra v1.10.2
-	github.com/spf13/pflag v1.0.9
+	github.com/spf13/pflag v1.0.10
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
 	modernc.org/sqlite v1.58.0
