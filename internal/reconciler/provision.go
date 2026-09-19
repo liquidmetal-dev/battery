@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/google/uuid"
+
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	microvmv1alpha1 "github.com/liquidmetal-dev/flintlock/api/services/microvm/v1alpha1"
 	flintlocktypes "github.com/liquidmetal-dev/flintlock/api/types"
@@ -133,6 +135,26 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 		spec = &flintlocktypes.MicroVMSpec{}
 	}
 	spec.AllowGuestAgent = true
+	// The template is one shared spec instantiated for every VM in the
+	// pool, so no single id in it can be right for all of them: flintlockd
+	// rejects an empty one outright ("name is required"), and a fixed
+	// non-empty one would collide the moment the pool held more than one
+	// VM. Provision is what actually creates each VM, so it's the only
+	// place that can give each one its own.
+	//
+	// The id becomes part of a filesystem path for the guest-agent's vsock
+	// proxy socket (.../<namespace>/<id>/<flintlock-uid>/guest-agent.vsock),
+	// which is a Unix domain socket subject to Linux's 108-byte sun_path
+	// limit - a full uuid here (36 chars) overflows that budget once the
+	// namespace and flintlock's own generated uid are accounted for,
+	// failing every VM with "connect: invalid argument" well after
+	// CreateMicroVM has already succeeded. An 8-character suffix keeps
+	// enough entropy to make collisions practically impossible for any
+	// real pool size while leaving headroom in that path.
+	spec.Id = fmt.Sprintf("%s-%s", pool.GetName(), uuid.NewString()[:8])
+	if spec.Namespace == "" {
+		spec.Namespace = pool.GetNamespace()
+	}
 
 	log.InfoContext(ctx, "reconciler: creating microvm")
 	createResp, err := client.CreateMicroVM(ctx, &microvmv1alpha1.CreateMicroVMRequest{Microvm: spec})
