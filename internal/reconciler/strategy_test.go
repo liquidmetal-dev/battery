@@ -170,3 +170,40 @@ func TestMinSizeThreshold_EventsAreNoop(t *testing.T) {
 		t.Errorf("OnVMDeleted() = %d, want 0", got)
 	}
 }
+
+func TestInitialNewVMs(t *testing.T) {
+	const (
+		immediate = poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE
+		replace   = poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE
+		minSize   = poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD
+	)
+	tests := []struct {
+		name     string
+		strategy poolmgrv1alpha1.ReplenishmentStrategyType
+		counts   reconciler.VMCounts
+		want     int
+	}{
+		{"immediate: empty pool fills to size", immediate, reconciler.VMCounts{}, 5},
+		{"replace: empty pool fills to size", replace, reconciler.VMCounts{}, 5},
+		{"min size: tick handles it", minSize, reconciler.VMCounts{}, 0},
+		{"immediate: leased VMs don't count", immediate, reconciler.VMCounts{Available: 2, Leased: 2, Provisioning: 1}, 2},
+		{"replace: leased VMs count", replace, reconciler.VMCounts{Available: 2, Leased: 2, Provisioning: 1}, 0},
+		{"immediate: at size", immediate, reconciler.VMCounts{Available: 5}, 0},
+		{"replace: over size", replace, reconciler.VMCounts{Available: 4, Leased: 3}, 0},
+		{"immediate: quarantined VMs don't count", immediate, reconciler.VMCounts{Available: 1, Quarantined: 3}, 4},
+		{"replace: quarantined VMs don't count", replace, reconciler.VMCounts{Leased: 1, Quarantined: 3}, 4},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pool := poolWithStrategy(tt.strategy, 5, 2)
+			s, err := reconciler.NewStrategy(pool.GetReplenishmentStrategy())
+			if err != nil {
+				t.Fatalf("NewStrategy: %v", err)
+			}
+			if got := s.InitialNewVMs(pool, tt.counts); got != tt.want {
+				t.Errorf("InitialNewVMs() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
