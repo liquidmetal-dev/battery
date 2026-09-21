@@ -16,7 +16,6 @@ import (
 
 	"github.com/liquidmetal-dev/battery/internal/flintlockclient"
 	"github.com/liquidmetal-dev/battery/internal/metrics"
-	"github.com/liquidmetal-dev/battery/internal/reconciler"
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
 
@@ -95,7 +94,7 @@ func (fakeRolloutRunner) Run(ctx context.Context) error {
 func withFakeRolloutController(t *testing.T) {
 	t.Helper()
 	orig := newRolloutController
-	newRolloutController = func(_ *poolmgrv1alpha1.PoolSpec, _ store.Store, _ *flintlockclient.Pool, _ reconciler.DeletionNotifier, _ *metrics.Registry) rolloutRunner {
+	newRolloutController = func(_ *poolmgrv1alpha1.PoolSpec, _ store.Store, _ *flintlockclient.Pool, _ *metrics.Registry) rolloutRunner {
 		return fakeRolloutRunner{}
 	}
 	t.Cleanup(func() { newRolloutController = orig })

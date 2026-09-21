@@ -125,3 +125,15 @@ func (replaceOnDelete) InitialNewVMs(pool *poolmgrv1alpha1.PoolSpec, counts VMCo
 func (replaceOnDelete) DesiredNewVMs(*poolmgrv1alpha1.PoolSpec, VMCounts) int { return 0 }
 func (replaceOnDelete) OnVMClaimed(*poolmgrv1alpha1.PoolSpec) int             { return 0 }
 func (replaceOnDelete) OnVMDeleted(*poolmgrv1alpha1.PoolSpec) int             { return 1 }
+
+// poolDeficit is how many VMs pool is short of its target size, given
+// counts: the gap each strategy's InitialNewVMs would top up (leased VMs
+// don't count toward an IMMEDIATE_ON_LEASE pool's warm set, but do toward
+// every other strategy's size). Never negative.
+func poolDeficit(pool *poolmgrv1alpha1.PoolSpec, counts VMCounts) int {
+	have := counts.Available + counts.Provisioning
+	if pool.GetReplenishmentStrategy().GetType() != poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE {
+		have += counts.Leased
+	}
+	return max(0, int(pool.GetSize())-have)
+}
