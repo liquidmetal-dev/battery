@@ -46,8 +46,69 @@ func Open(path string) (Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("store: apply schema: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 
 	return &sqliteStore{db: db}, nil
+}
+
+// addedColumns lists every column added to a table after its CREATE TABLE
+// first shipped. schema.sql's CREATE TABLE IF NOT EXISTS leaves an existing
+// table untouched, so a database created by an older poolmgrd would
+// otherwise be missing these columns and fail every query that names them.
+// Definitions must match schema.sql exactly.
+var addedColumns = []struct {
+	table, column, definition string
+}{
+	{"pools", "template_hash", "TEXT NOT NULL DEFAULT ''"},
+	{"pools", "rollout_policy", "TEXT"},
+	{"vms", "template_hash", "TEXT NOT NULL DEFAULT ''"},
+}
+
+// migrate brings a database created by an older schema up to date by adding
+// any of addedColumns it lacks. It's idempotent: a column already present
+// (a fresh database, or one migrated by an earlier Open) is skipped.
+func migrate(db *sql.DB) error {
+	for _, c := range addedColumns {
+		exists, err := columnExists(db, c.table, c.column)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", c.table, c.column, c.definition)); err != nil {
+			return fmt.Errorf("store: migrate: add %s.%s: %w", c.table, c.column, err)
+		}
+	}
+	return nil
+}
+
+func columnExists(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false, fmt.Errorf("store: migrate: table_info(%s): %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var (
+			cid        int
+			name, typ  string
+			notNull    int
+			dflt       sql.NullString
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &primaryKey); err != nil {
+			return false, fmt.Errorf("store: migrate: scan table_info(%s): %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func (s *sqliteStore) Close() error {
