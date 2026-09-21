@@ -112,6 +112,14 @@ func (f *fakeMicroVM) deletedUIDs() []string {
 	return out
 }
 
+func (f *fakeMicroVM) createdSpecs() []*flintlocktypes.MicroVMSpec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]*flintlocktypes.MicroVMSpec, len(f.created))
+	copy(out, f.created)
+	return out
+}
+
 // fakeMicroVMExec is a minimal flintlock MicroVMExec service. respond is
 // called once per ExecCommand stream after the start message is received;
 // it drives what the fake sends back (or the error it returns). A nil
