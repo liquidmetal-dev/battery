@@ -83,6 +83,24 @@ message PoolSpec {
   // HeartbeatExpiryThreshold is how long without a heartbeat before a lease is considered
   // expired.
   google.protobuf.Duration heartbeat_expiry_threshold = 11;
+
+  // TemplateHash is a server-computed content hash of the marshaled microvm_template. Used
+  // to detect when a pool's template has changed since a VM was provisioned, to drive rolling
+  // replacement.
+  string template_hash = 12;
+
+  // RolloutPolicy controls how many VMs may be replaced concurrently during a rolling
+  // replacement triggered by a template_hash change. Unset/nil defaults to count = 1.
+  RolloutPolicy rollout_policy = 13;
+}
+
+// RolloutPolicy bounds how many VMs a pool may have unavailable at once during a rolling
+// replacement.
+message RolloutPolicy {
+  oneof max_unavailable {
+    int32 count = 1;
+    int32 percent = 2;
+  }
 }
 
 // VMPhase is the lifecycle phase of a pool-managed VM.
@@ -112,6 +130,9 @@ message VMRecord {
   // PoolNamespace is the namespace of the pool identified by pool_name (together they form
   // the pool's PoolRef identity).
   string pool_namespace = 8;
+
+  // TemplateHash is the hash of the template the VM was provisioned from.
+  string template_hash = 9;
 }
 
 // LeaseRecord is the pool manager's record of an outstanding claim on a VM. Named
@@ -143,6 +164,15 @@ enum EventType {
   VM_HOOK_FAILED = 8;
   POOL_REPLENISHING = 9;
   POOL_SIZE_BELOW_TARGET = 10;
+  // VM_DELETED_FOR_ROLLOUT is fired when a VM is deleted because its template_hash no longer
+  // matches the pool's current template_hash.
+  VM_DELETED_FOR_ROLLOUT = 11;
+  // POOL_ROLLOUT_STARTED is fired when a pool's template_hash changes and a rolling
+  // replacement begins.
+  POOL_ROLLOUT_STARTED = 12;
+  // POOL_ROLLOUT_COMPLETED is fired when a rolling replacement finishes and no stale VMs
+  // remain.
+  POOL_ROLLOUT_COMPLETED = 13;
 }
 
 // Event is a single row from the pool manager's event outbox.
@@ -170,6 +200,10 @@ message PoolStatus {
   int32 leased_count = 2;
   int32 provisioning_count = 3;
   int32 quarantined_count = 4;
+
+  // StaleCount is the number of VMRecords (any phase) whose template_hash differs from the
+  // pool's current template_hash.
+  int32 stale_count = 5;
 }
 
 // Pool pairs a pool's spec with its current live status.

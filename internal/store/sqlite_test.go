@@ -85,6 +85,96 @@ func TestCreateAndGetPool(t *testing.T) {
 	}
 }
 
+func TestCreateAndGetPoolRolloutPolicyCount(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	want := samplePoolSpec("pool-a")
+	want.RolloutPolicy = &poolmgrv1alpha1.RolloutPolicy{
+		MaxUnavailable: &poolmgrv1alpha1.RolloutPolicy_Count{Count: 3},
+	}
+	if err := s.CreatePool(ctx, want); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+
+	got, err := s.GetPool(ctx, "pool-a", "default")
+	if err != nil {
+		t.Fatalf("GetPool() error = %v", err)
+	}
+	if got.GetRolloutPolicy().GetCount() != 3 {
+		t.Errorf("GetPool() rollout policy count = %d, want 3", got.GetRolloutPolicy().GetCount())
+	}
+}
+
+func TestCreateAndGetPoolRolloutPolicyPercent(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	want := samplePoolSpec("pool-a")
+	want.RolloutPolicy = &poolmgrv1alpha1.RolloutPolicy{
+		MaxUnavailable: &poolmgrv1alpha1.RolloutPolicy_Percent{Percent: 25},
+	}
+	if err := s.CreatePool(ctx, want); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+
+	got, err := s.GetPool(ctx, "pool-a", "default")
+	if err != nil {
+		t.Fatalf("GetPool() error = %v", err)
+	}
+	if got.GetRolloutPolicy().GetPercent() != 25 {
+		t.Errorf("GetPool() rollout policy percent = %d, want 25", got.GetRolloutPolicy().GetPercent())
+	}
+}
+
+// TestCreateAndGetPoolRolloutPolicyUnsetRoundTripsAsNil reproduces the bug found in Task 4's
+// review: a pool created with no RolloutPolicy must come back from GetPool with a nil
+// RolloutPolicy, not a zero-value &RolloutPolicy{}. The reconciler's resolveBatchSize
+// currently treats both the same (see rollout_internal_test.go), but the store must not
+// depend on that equivalence - a nil policy is the unambiguous "unset" representation.
+func TestCreateAndGetPoolRolloutPolicyUnsetRoundTripsAsNil(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	want := samplePoolSpec("pool-a") // RolloutPolicy left unset.
+	if err := s.CreatePool(ctx, want); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+
+	got, err := s.GetPool(ctx, "pool-a", "default")
+	if err != nil {
+		t.Fatalf("GetPool() error = %v", err)
+	}
+	if got.RolloutPolicy != nil {
+		t.Errorf("GetPool() rollout policy = %+v, want nil", got.RolloutPolicy)
+	}
+}
+
+func TestUpdatePoolRolloutPolicy(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	p := samplePoolSpec("pool-a")
+	if err := s.CreatePool(ctx, p); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+
+	p.RolloutPolicy = &poolmgrv1alpha1.RolloutPolicy{
+		MaxUnavailable: &poolmgrv1alpha1.RolloutPolicy_Count{Count: 5},
+	}
+	if err := s.UpdatePool(ctx, p); err != nil {
+		t.Fatalf("UpdatePool() error = %v", err)
+	}
+
+	got, err := s.GetPool(ctx, "pool-a", "default")
+	if err != nil {
+		t.Fatalf("GetPool() error = %v", err)
+	}
+	if got.GetRolloutPolicy().GetCount() != 5 {
+		t.Errorf("GetPool() rollout policy count = %d, want 5", got.GetRolloutPolicy().GetCount())
+	}
+}
+
 func TestCreatePoolNilDuration(t *testing.T) {
 	tests := []struct {
 		name   string

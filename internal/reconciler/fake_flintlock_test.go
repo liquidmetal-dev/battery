@@ -39,6 +39,16 @@ type fakeMicroVM struct {
 	// unreachable. Guarded by mu.
 	failDeletesRemaining int
 
+	// failCreatesRemaining, if > 0, makes CreateMicroVM return an Internal
+	// error that many times (decrementing each call) before succeeding.
+	// Guarded by mu.
+	failCreatesRemaining int
+
+	// createGate, if non-nil, makes every CreateMicroVM call block until
+	// the gate is closed (or the call's ctx is done), to hold a VM in the
+	// window before its store row exists.
+	createGate chan struct{}
+
 	mu       sync.Mutex
 	getCalls map[string]int
 	deleted  []string
@@ -47,7 +57,22 @@ type fakeMicroVM struct {
 
 var fakeUIDCounter atomic.Int64
 
-func (f *fakeMicroVM) CreateMicroVM(_ context.Context, req *microvmv1alpha1.CreateMicroVMRequest) (*microvmv1alpha1.CreateMicroVMResponse, error) {
+func (f *fakeMicroVM) CreateMicroVM(ctx context.Context, req *microvmv1alpha1.CreateMicroVMRequest) (*microvmv1alpha1.CreateMicroVMResponse, error) {
+	if f.createGate != nil {
+		select {
+		case <-f.createGate:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	f.mu.Lock()
+	if f.failCreatesRemaining > 0 {
+		f.failCreatesRemaining--
+		f.mu.Unlock()
+		return nil, status.Error(codes.Internal, "flintlock create failed")
+	}
+	f.mu.Unlock()
+
 	spec, _ := proto.Clone(req.GetMicrovm()).(*flintlocktypes.MicroVMSpec)
 	if spec == nil {
 		spec = &flintlocktypes.MicroVMSpec{}

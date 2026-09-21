@@ -26,6 +26,7 @@ func samplePoolForOutput(name, namespace string) *poolmgrv1alpha1.Pool {
 			LeasedCount:       2,
 			ProvisioningCount: 3,
 			QuarantinedCount:  4,
+			StaleCount:        5,
 		},
 	}
 }
@@ -43,7 +44,7 @@ func TestPrintPoolsTable(t *testing.T) {
 
 	out := buf.String()
 	for _, want := range []string{
-		"NAME", "NAMESPACE", "SIZE", "AVAILABLE", "LEASED", "PROVISIONING", "QUARANTINED",
+		"NAME", "NAMESPACE", "SIZE", "AVAILABLE", "LEASED", "PROVISIONING", "QUARANTINED", "STALE",
 		"pool-a", "default", "pool-b", "other",
 	} {
 		if !strings.Contains(out, want) {
@@ -77,7 +78,7 @@ func TestPrintPoolTable(t *testing.T) {
 	}
 
 	out := buf.String()
-	for _, want := range []string{"NAME", "pool-a", "default", "3", "1", "2", "4"} {
+	for _, want := range []string{"NAME", "pool-a", "default", "3", "1", "2", "4", "5"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printPool() table output missing %q, got:\n%s", want, out)
 		}

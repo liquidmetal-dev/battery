@@ -27,6 +27,8 @@ type poolRow struct {
 	hookFailurePolicy          int32
 	heartbeatIntervalNs        int64
 	heartbeatExpiryThresholdNs int64
+	templateHash               string
+	rolloutPolicy              sql.NullString
 }
 
 // requireDuration rejects a nil duration instead of letting AsDuration() silently return 0:
@@ -76,6 +78,15 @@ func poolToRow(p *poolmgrv1alpha1.PoolSpec) (poolRow, error) {
 		return poolRow{}, fmt.Errorf("marshal pre_lease_commands: %w", err)
 	}
 
+	var rolloutPolicy sql.NullString
+	if p.GetRolloutPolicy() != nil {
+		policy, err := marshalProtoJSON(p.GetRolloutPolicy())
+		if err != nil {
+			return poolRow{}, fmt.Errorf("marshal rollout_policy: %w", err)
+		}
+		rolloutPolicy = sql.NullString{String: policy, Valid: true}
+	}
+
 	return poolRow{
 		name:                       p.GetName(),
 		namespace:                  p.GetNamespace(),
@@ -88,6 +99,8 @@ func poolToRow(p *poolmgrv1alpha1.PoolSpec) (poolRow, error) {
 		hookFailurePolicy:          int32(p.GetHookFailurePolicy()),
 		heartbeatIntervalNs:        heartbeatInterval.Nanoseconds(),
 		heartbeatExpiryThresholdNs: heartbeatExpiryThreshold.Nanoseconds(),
+		templateHash:               p.GetTemplateHash(),
+		rolloutPolicy:              rolloutPolicy,
 	}, nil
 }
 
@@ -115,6 +128,14 @@ func rowToPool(row poolRow) (*poolmgrv1alpha1.PoolSpec, error) {
 		return nil, fmt.Errorf("store: unmarshal pre_lease_commands: %w", err)
 	}
 
+	var rolloutPolicy *poolmgrv1alpha1.RolloutPolicy
+	if row.rolloutPolicy.Valid {
+		rolloutPolicy = &poolmgrv1alpha1.RolloutPolicy{}
+		if err := unmarshalProtoJSON(row.rolloutPolicy.String, rolloutPolicy); err != nil {
+			return nil, fmt.Errorf("store: unmarshal rollout_policy: %w", err)
+		}
+	}
+
 	return &poolmgrv1alpha1.PoolSpec{
 		Name:                     row.name,
 		Namespace:                row.namespace,
@@ -127,6 +148,8 @@ func rowToPool(row poolRow) (*poolmgrv1alpha1.PoolSpec, error) {
 		HookFailurePolicy:        poolmgrv1alpha1.HookFailurePolicy(row.hookFailurePolicy),
 		HeartbeatInterval:        durationpb.New(nanoseconds(row.heartbeatIntervalNs)),
 		HeartbeatExpiryThreshold: durationpb.New(nanoseconds(row.heartbeatExpiryThresholdNs)),
+		TemplateHash:             row.templateHash,
+		RolloutPolicy:            rolloutPolicy,
 	}, nil
 }
 
@@ -149,6 +172,7 @@ type vmRow struct {
 	flintlockHost string
 	phase         int32
 	leaseID       sql.NullString
+	templateHash  string
 	createdAt     int64
 	updatedAt     int64
 }
@@ -169,6 +193,7 @@ func vmToRow(v *poolmgrv1alpha1.VMRecord) (vmRow, error) {
 		poolNamespace: v.GetPoolNamespace(),
 		flintlockHost: v.GetFlintlockHost(),
 		phase:         int32(v.GetPhase()),
+		templateHash:  v.GetTemplateHash(),
 		createdAt:     createdAt.UnixNano(),
 		updatedAt:     updatedAt.UnixNano(),
 	}
@@ -185,6 +210,7 @@ func rowToVM(row vmRow) *poolmgrv1alpha1.VMRecord {
 		PoolNamespace: row.poolNamespace,
 		FlintlockHost: row.flintlockHost,
 		Phase:         poolmgrv1alpha1.VMPhase(row.phase),
+		TemplateHash:  row.templateHash,
 		CreatedAt:     timestamppb.New(time.Unix(0, row.createdAt)),
 		UpdatedAt:     timestamppb.New(time.Unix(0, row.updatedAt)),
 	}

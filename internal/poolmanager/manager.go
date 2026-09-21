@@ -34,14 +34,30 @@ var newReconciler = func(spec *poolmgrv1alpha1.PoolSpec, st store.Store, flint *
 	return reconciler.New(spec, st, flint, 0, reconciler.ProvisionConfig{}, m)
 }
 
+// rolloutRunner is the subset of *reconciler.RolloutController that Manager
+// depends on. newRolloutController (below) is a package var so tests can
+// substitute a fake that doesn't need a real store/flintlock connection.
+type rolloutRunner interface {
+	Run(ctx context.Context) error
+}
+
+// newRolloutController builds the rolloutRunner for a pool. Overridden in
+// tests. RolloutController provisions its own replacement VMs (with the
+// same ProvisionConfig as newReconciler), so its deletions aren't routed
+// through Manager's NotifyVMDeleted to the pool's reconcilerRunner.
+var newRolloutController = func(spec *poolmgrv1alpha1.PoolSpec, st store.Store, flint *flintlockclient.Pool, m *metrics.Registry) rolloutRunner {
+	return reconciler.NewRolloutController(spec, st, flint, 0, reconciler.ProvisionConfig{}, m)
+}
+
 type poolKey struct {
 	name      string
 	namespace string
 }
 
 type reconcilerHandle struct {
-	runner reconcilerRunner
-	cancel context.CancelFunc
+	runner  reconcilerRunner
+	rollout rolloutRunner
+	cancel  context.CancelFunc
 }
 
 // Manager owns one reconcilerRunner goroutine per pool: startReconciler
@@ -120,9 +136,10 @@ func (m *Manager) StartReconciler(spec *poolmgrv1alpha1.PoolSpec) error {
 	if err != nil {
 		return fmt.Errorf("poolmanager: new reconciler for %s/%s: %w", key.namespace, key.name, err)
 	}
+	rollout := newRolloutController(specCopy, m.store, m.flint, m.metrics)
 
 	childCtx, cancel := context.WithCancel(m.rootCtx)
-	m.handles[key] = &reconcilerHandle{runner: runner, cancel: cancel}
+	m.handles[key] = &reconcilerHandle{runner: runner, rollout: rollout, cancel: cancel}
 
 	log := slog.Default().With("pool", key.name, "namespace", key.namespace)
 	log.Info("poolmanager: starting reconciler")
@@ -133,6 +150,14 @@ func (m *Manager) StartReconciler(spec *poolmgrv1alpha1.PoolSpec) error {
 		if err := runner.Run(childCtx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Error("poolmanager: reconciler exited unexpectedly", "error", err)
 			m.metrics.RecordReconcilerUnexpectedExit(key.name, key.namespace)
+		}
+	}()
+
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		if err := rollout.Run(childCtx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.ErrorContext(m.rootCtx, "poolmanager: rollout controller exited unexpectedly", "pool", key.name, "namespace", key.namespace, "error", err)
 		}
 	}()
 	return nil

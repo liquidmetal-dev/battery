@@ -118,6 +118,29 @@ func TestProvision_AssignsAUniqueIDToEachVM(t *testing.T) {
 	}
 }
 
+func TestProvision_NewVMCarriesPoolTemplateHash(t *testing.T) {
+	vm := &fakeMicroVM{pollsUntilCreated: 1}
+	exec := alwaysReadyExec()
+	flint := startFakeFlintlock(t, vm, exec)
+	st := openTestStore(t)
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 1, []string{"host-a"})
+	pool.TemplateHash = "abc123hash"
+
+	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), nil)
+	if err := p.Provision(context.Background(), pool); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	vms := onlyVMsInPool(t, st, "pool-a")
+	if len(vms) != 1 {
+		t.Fatalf("expected 1 VM record, got %d", len(vms))
+	}
+	if got := vms[0].GetTemplateHash(); got != "abc123hash" {
+		t.Fatalf("VMRecord.TemplateHash = %q, want %q", got, "abc123hash")
+	}
+}
+
 func TestProvision_CreatePollTimeout(t *testing.T) {
 	vm := &fakeMicroVM{pollsUntilCreated: 1000} // never reaches CREATED within the test's timeout
 	exec := &fakeMicroVMExec{}

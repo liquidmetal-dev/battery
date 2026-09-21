@@ -68,6 +68,9 @@ func (s *EventsServer) Subscribe(req *poolmgrv1alpha1.SubscribeRequest, stream g
 
 		events, err := s.listEventsSince(stream.Context(), ref, sinceID, s.batchSize)
 		if err != nil {
+			if stream.Context().Err() != nil {
+				return nil // cancelled mid-query: a clean shutdown, not a store failure
+			}
 			return status.Errorf(codes.Internal, "list events: %v", err)
 		}
 		for _, e := range events {

@@ -286,6 +286,94 @@ func TestPoolList_Bufconn(t *testing.T) {
 	}
 }
 
+// TestLoadPoolSpec_RolloutPolicy_Count proves that a rollout_policy with a
+// count-based max_unavailable, given in a --spec-file, is parsed correctly
+// by loadPoolSpec - the function pool create/update use to build the Spec
+// field of their CreatePoolRequest/UpdatePoolRequest.
+func TestLoadPoolSpec_RolloutPolicy_Count(t *testing.T) {
+	want := testPoolSpec("pool-a", "default")
+	want.RolloutPolicy = &poolmgrv1alpha1.RolloutPolicy{
+		MaxUnavailable: &poolmgrv1alpha1.RolloutPolicy_Count{Count: 2},
+	}
+	specPath := writeSpecFile(t, want)
+
+	got, err := loadPoolSpec(specPath)
+	if err != nil {
+		t.Fatalf("loadPoolSpec() error = %v", err)
+	}
+
+	if got.GetRolloutPolicy().GetCount() != 2 {
+		t.Errorf("got rollout_policy.count = %d, want 2 (rollout_policy = %+v)",
+			got.GetRolloutPolicy().GetCount(), got.GetRolloutPolicy())
+	}
+
+	req := &poolmgrv1alpha1.CreatePoolRequest{Spec: got}
+	if req.GetSpec().GetRolloutPolicy().GetCount() != 2 {
+		t.Errorf("CreatePoolRequest.Spec.rollout_policy.count = %d, want 2", req.GetSpec().GetRolloutPolicy().GetCount())
+	}
+}
+
+// TestLoadPoolSpec_RolloutPolicy_Percent mirrors
+// TestLoadPoolSpec_RolloutPolicy_Count for the percent-based
+// max_unavailable variant, and for pool update's UpdatePoolRequest.
+func TestLoadPoolSpec_RolloutPolicy_Percent(t *testing.T) {
+	want := testPoolSpec("pool-a", "default")
+	want.RolloutPolicy = &poolmgrv1alpha1.RolloutPolicy{
+		MaxUnavailable: &poolmgrv1alpha1.RolloutPolicy_Percent{Percent: 25},
+	}
+	specPath := writeSpecFile(t, want)
+
+	got, err := loadPoolSpec(specPath)
+	if err != nil {
+		t.Fatalf("loadPoolSpec() error = %v", err)
+	}
+
+	if got.GetRolloutPolicy().GetPercent() != 25 {
+		t.Errorf("got rollout_policy.percent = %d, want 25 (rollout_policy = %+v)",
+			got.GetRolloutPolicy().GetPercent(), got.GetRolloutPolicy())
+	}
+
+	req := &poolmgrv1alpha1.UpdatePoolRequest{Spec: got}
+	if req.GetSpec().GetRolloutPolicy().GetPercent() != 25 {
+		t.Errorf("UpdatePoolRequest.Spec.rollout_policy.percent = %d, want 25", req.GetSpec().GetRolloutPolicy().GetPercent())
+	}
+}
+
+// TestPoolCreate_RolloutPolicy_Bufconn proves that a rollout_policy loaded
+// from --spec-file (via loadPoolSpec, exactly as pool create's RunE does)
+// is accepted end to end by a real PoolAdminServer's CreatePool RPC and
+// comes back on the created pool's spec. It calls the PoolAdmin client
+// directly rather than "pool get" afterwards, since GetPool reloads the
+// pool from the store, and the store's schema has no rollout_policy column
+// yet (a pre-existing gap outside this task's scope) - CreatePool/UpdatePool
+// themselves return the in-memory spec they were given, so this is still a
+// faithful check of the CLI's request-construction path.
+func TestPoolCreate_RolloutPolicy_Bufconn(t *testing.T) {
+	conn := bufconnPoolAdmin(t)
+	ctx := withTestClients(conn)
+
+	spec := testPoolSpec("pool-a", "default")
+	spec.RolloutPolicy = &poolmgrv1alpha1.RolloutPolicy{
+		MaxUnavailable: &poolmgrv1alpha1.RolloutPolicy_Count{Count: 2},
+	}
+	specPath := writeSpecFile(t, spec)
+
+	loaded, err := loadPoolSpec(specPath)
+	if err != nil {
+		t.Fatalf("loadPoolSpec() error = %v", err)
+	}
+
+	poolAdmin := poolmgrv1alpha1.NewPoolAdminClient(conn)
+	pool, err := poolAdmin.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: loaded})
+	if err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+	if pool.GetSpec().GetRolloutPolicy().GetCount() != 2 {
+		t.Errorf("got rollout_policy.count = %d, want 2 (rollout_policy = %+v)",
+			pool.GetSpec().GetRolloutPolicy().GetCount(), pool.GetSpec().GetRolloutPolicy())
+	}
+}
+
 func TestPoolDelete_Bufconn(t *testing.T) {
 	conn := bufconnPoolAdmin(t)
 	ctx := withTestClients(conn)

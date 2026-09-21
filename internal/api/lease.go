@@ -289,7 +289,7 @@ func (s *LeaseServer) ReleaseVM(ctx context.Context, req *poolmgrv1alpha1.Releas
 		if perr != nil {
 			return nil, status.Errorf(codes.Internal, "get pool: %v", perr)
 		}
-		reconciler.FinishVMDeletion(ctx, s.store, pool, vm, s.notifier, s.metrics)
+		reconciler.FinishVMDeletion(ctx, s.store, pool, vm, s.notifier, s.metrics, poolmgrv1alpha1.EventType_VM_DELETED_DUE_TO_EXPIRY)
 		return &emptypb.Empty{}, nil
 	}
 

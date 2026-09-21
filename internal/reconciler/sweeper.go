@@ -148,6 +148,14 @@ func (s *Sweeper) Tick(ctx context.Context, now time.Time) {
 // retryPendingDeletions finishes any VM deletion left incomplete by a
 // previous EnsureVMDeleted failure (from a prior tick's beginExpiry, or from
 // a ReleaseVM call whose flintlock request failed).
+//
+// Known limitation: a VM already DELETING here has no durable record of
+// *why* it was being deleted, so a rollout-triggered deletion
+// (RolloutController.Tick calls EnsureVMDeletedIfPhase, which also leaves a
+// VM DELETING on failure) that gets finished by a retry here is reported as
+// VM_DELETED_DUE_TO_EXPIRY rather than VM_DELETED_FOR_ROLLOUT - the deletion
+// itself is still correct and crash-safe, only the event undercounts
+// VM_DELETED_FOR_ROLLOUT in that retried-after-failure case.
 func (s *Sweeper) retryPendingDeletions(ctx context.Context) {
 	vms, err := s.store.ListVMsByPhase(ctx, poolmgrv1alpha1.VMPhase_DELETING)
 	if err != nil {
@@ -161,7 +169,7 @@ func (s *Sweeper) retryPendingDeletions(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		FinishVMDeletion(ctx, s.store, pool, vm, s.notifier, s.metrics)
+		FinishVMDeletion(ctx, s.store, pool, vm, s.notifier, s.metrics, poolmgrv1alpha1.EventType_VM_DELETED_DUE_TO_EXPIRY)
 	}
 }
 
@@ -214,5 +222,5 @@ func (s *Sweeper) beginExpiry(ctx context.Context, l *poolmgrv1alpha1.LeaseRecor
 	if err := EnsureVMDeleted(ctx, s.store, s.flint, vm); err != nil {
 		return // left DELETING; retryPendingDeletions will pick it up next tick
 	}
-	FinishVMDeletion(ctx, s.store, pool, vm, s.notifier, s.metrics)
+	FinishVMDeletion(ctx, s.store, pool, vm, s.notifier, s.metrics, poolmgrv1alpha1.EventType_VM_DELETED_DUE_TO_EXPIRY)
 }

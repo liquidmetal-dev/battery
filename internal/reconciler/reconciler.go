@@ -159,6 +159,11 @@ func CountVMs(ctx context.Context, st store.Store, poolName, poolNamespace strin
 		return VMCounts{}, fmt.Errorf("reconciler: ListVMsByPool: %w", err)
 	}
 
+	return countPhases(vms), nil
+}
+
+// countPhases summarizes vms into VMCounts.
+func countPhases(vms []*poolmgrv1alpha1.VMRecord) VMCounts {
 	var counts VMCounts
 	for _, vm := range vms {
 		switch vm.GetPhase() {
@@ -176,7 +181,7 @@ func CountVMs(ctx context.Context, st store.Store, poolName, poolNamespace strin
 			counts.Quarantined++
 		}
 	}
-	return counts, nil
+	return counts
 }
 
 // provisionN starts n Provision calls concurrently and logs any failures.

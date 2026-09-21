@@ -46,8 +46,69 @@ func Open(path string) (Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("store: apply schema: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 
 	return &sqliteStore{db: db}, nil
+}
+
+// addedColumns lists every column added to a table after its CREATE TABLE
+// first shipped. schema.sql's CREATE TABLE IF NOT EXISTS leaves an existing
+// table untouched, so a database created by an older poolmgrd would
+// otherwise be missing these columns and fail every query that names them.
+// Definitions must match schema.sql exactly.
+var addedColumns = []struct {
+	table, column, definition string
+}{
+	{"pools", "template_hash", "TEXT NOT NULL DEFAULT ''"},
+	{"pools", "rollout_policy", "TEXT"},
+	{"vms", "template_hash", "TEXT NOT NULL DEFAULT ''"},
+}
+
+// migrate brings a database created by an older schema up to date by adding
+// any of addedColumns it lacks. It's idempotent: a column already present
+// (a fresh database, or one migrated by an earlier Open) is skipped.
+func migrate(db *sql.DB) error {
+	for _, c := range addedColumns {
+		exists, err := columnExists(db, c.table, c.column)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", c.table, c.column, c.definition)); err != nil {
+			return fmt.Errorf("store: migrate: add %s.%s: %w", c.table, c.column, err)
+		}
+	}
+	return nil
+}
+
+func columnExists(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false, fmt.Errorf("store: migrate: table_info(%s): %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var (
+			cid        int
+			name, typ  string
+			notNull    int
+			dflt       sql.NullString
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &primaryKey); err != nil {
+			return false, fmt.Errorf("store: migrate: scan table_info(%s): %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func (s *sqliteStore) Close() error {
@@ -64,11 +125,13 @@ func (s *sqliteStore) CreatePool(ctx context.Context, p *poolmgrv1alpha1.PoolSpe
 		INSERT INTO pools (
 			name, namespace, size, flintlock_hosts, microvm_template,
 			replenishment_strategy, create_commands, pre_lease_commands,
-			hook_failure_policy, heartbeat_interval_ns, heartbeat_expiry_threshold_ns
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			hook_failure_policy, heartbeat_interval_ns, heartbeat_expiry_threshold_ns, template_hash,
+			rollout_policy
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.name, row.namespace, row.size, row.flintlockHosts, row.microvmTemplate,
 		row.replenishmentStrategy, row.createCommands, row.preLeaseCommands,
-		row.hookFailurePolicy, row.heartbeatIntervalNs, row.heartbeatExpiryThresholdNs,
+		row.hookFailurePolicy, row.heartbeatIntervalNs, row.heartbeatExpiryThresholdNs, row.templateHash,
+		row.rolloutPolicy,
 	)
 	if err != nil {
 		return fmt.Errorf("store: insert pool: %w", err)
@@ -80,13 +143,15 @@ func (s *sqliteStore) GetPool(ctx context.Context, name, namespace string) (*poo
 	r := s.db.QueryRowContext(ctx, `
 		SELECT name, namespace, size, flintlock_hosts, microvm_template,
 			replenishment_strategy, create_commands, pre_lease_commands,
-			hook_failure_policy, heartbeat_interval_ns, heartbeat_expiry_threshold_ns
+			hook_failure_policy, heartbeat_interval_ns, heartbeat_expiry_threshold_ns, template_hash,
+			rollout_policy
 		FROM pools WHERE name = ? AND namespace = ?`, name, namespace)
 
 	var row poolRow
 	err := r.Scan(&row.name, &row.namespace, &row.size, &row.flintlockHosts, &row.microvmTemplate,
 		&row.replenishmentStrategy, &row.createCommands, &row.preLeaseCommands,
-		&row.hookFailurePolicy, &row.heartbeatIntervalNs, &row.heartbeatExpiryThresholdNs)
+		&row.hookFailurePolicy, &row.heartbeatIntervalNs, &row.heartbeatExpiryThresholdNs, &row.templateHash,
+		&row.rolloutPolicy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -101,7 +166,8 @@ func (s *sqliteStore) ListPools(ctx context.Context) ([]*poolmgrv1alpha1.PoolSpe
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT name, namespace, size, flintlock_hosts, microvm_template,
 			replenishment_strategy, create_commands, pre_lease_commands,
-			hook_failure_policy, heartbeat_interval_ns, heartbeat_expiry_threshold_ns
+			hook_failure_policy, heartbeat_interval_ns, heartbeat_expiry_threshold_ns, template_hash,
+			rollout_policy
 		FROM pools ORDER BY namespace, name`)
 	if err != nil {
 		return nil, fmt.Errorf("store: query pools: %w", err)
@@ -113,7 +179,8 @@ func (s *sqliteStore) ListPools(ctx context.Context) ([]*poolmgrv1alpha1.PoolSpe
 		var row poolRow
 		if err := rows.Scan(&row.name, &row.namespace, &row.size, &row.flintlockHosts, &row.microvmTemplate,
 			&row.replenishmentStrategy, &row.createCommands, &row.preLeaseCommands,
-			&row.hookFailurePolicy, &row.heartbeatIntervalNs, &row.heartbeatExpiryThresholdNs); err != nil {
+			&row.hookFailurePolicy, &row.heartbeatIntervalNs, &row.heartbeatExpiryThresholdNs, &row.templateHash,
+			&row.rolloutPolicy); err != nil {
 			return nil, fmt.Errorf("store: scan pool: %w", err)
 		}
 		p, err := rowToPool(row)
@@ -138,11 +205,13 @@ func (s *sqliteStore) UpdatePool(ctx context.Context, p *poolmgrv1alpha1.PoolSpe
 		UPDATE pools SET
 			size = ?, flintlock_hosts = ?, microvm_template = ?,
 			replenishment_strategy = ?, create_commands = ?, pre_lease_commands = ?,
-			hook_failure_policy = ?, heartbeat_interval_ns = ?, heartbeat_expiry_threshold_ns = ?
+			hook_failure_policy = ?, heartbeat_interval_ns = ?, heartbeat_expiry_threshold_ns = ?,
+			template_hash = ?, rollout_policy = ?
 		WHERE name = ? AND namespace = ?`,
 		row.size, row.flintlockHosts, row.microvmTemplate,
 		row.replenishmentStrategy, row.createCommands, row.preLeaseCommands,
 		row.hookFailurePolicy, row.heartbeatIntervalNs, row.heartbeatExpiryThresholdNs,
+		row.templateHash, row.rolloutPolicy,
 		row.name, row.namespace,
 	)
 	if err != nil {
@@ -166,9 +235,9 @@ func (s *sqliteStore) CreateVM(ctx context.Context, v *poolmgrv1alpha1.VMRecord)
 	}
 
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO vms (uid, pool_name, pool_namespace, flintlock_host, phase, lease_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		row.uid, row.poolName, row.poolNamespace, row.flintlockHost, row.phase, row.leaseID, row.createdAt, row.updatedAt,
+		INSERT INTO vms (uid, pool_name, pool_namespace, flintlock_host, phase, lease_id, template_hash, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		row.uid, row.poolName, row.poolNamespace, row.flintlockHost, row.phase, row.leaseID, row.templateHash, row.createdAt, row.updatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("store: insert vm: %w", err)
@@ -178,11 +247,11 @@ func (s *sqliteStore) CreateVM(ctx context.Context, v *poolmgrv1alpha1.VMRecord)
 
 func (s *sqliteStore) GetVM(ctx context.Context, uid string) (*poolmgrv1alpha1.VMRecord, error) {
 	r := s.db.QueryRowContext(ctx, `
-		SELECT uid, pool_name, pool_namespace, flintlock_host, phase, lease_id, created_at, updated_at
+		SELECT uid, pool_name, pool_namespace, flintlock_host, phase, lease_id, template_hash, created_at, updated_at
 		FROM vms WHERE uid = ?`, uid)
 
 	var row vmRow
-	err := r.Scan(&row.uid, &row.poolName, &row.poolNamespace, &row.flintlockHost, &row.phase, &row.leaseID, &row.createdAt, &row.updatedAt)
+	err := r.Scan(&row.uid, &row.poolName, &row.poolNamespace, &row.flintlockHost, &row.phase, &row.leaseID, &row.templateHash, &row.createdAt, &row.updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -193,7 +262,7 @@ func (s *sqliteStore) GetVM(ctx context.Context, uid string) (*poolmgrv1alpha1.V
 }
 
 func (s *sqliteStore) ListVMsByPool(ctx context.Context, poolName, poolNamespace string, phase *poolmgrv1alpha1.VMPhase) ([]*poolmgrv1alpha1.VMRecord, error) {
-	query := `SELECT uid, pool_name, pool_namespace, flintlock_host, phase, lease_id, created_at, updated_at
+	query := `SELECT uid, pool_name, pool_namespace, flintlock_host, phase, lease_id, template_hash, created_at, updated_at
 		FROM vms WHERE pool_name = ? AND pool_namespace = ?`
 	args := []any{poolName, poolNamespace}
 	if phase != nil {
@@ -211,7 +280,7 @@ func (s *sqliteStore) ListVMsByPool(ctx context.Context, poolName, poolNamespace
 	var vms []*poolmgrv1alpha1.VMRecord
 	for rows.Next() {
 		var row vmRow
-		if err := rows.Scan(&row.uid, &row.poolName, &row.poolNamespace, &row.flintlockHost, &row.phase, &row.leaseID, &row.createdAt, &row.updatedAt); err != nil {
+		if err := rows.Scan(&row.uid, &row.poolName, &row.poolNamespace, &row.flintlockHost, &row.phase, &row.leaseID, &row.templateHash, &row.createdAt, &row.updatedAt); err != nil {
 			return nil, fmt.Errorf("store: scan vm: %w", err)
 		}
 		vms = append(vms, rowToVM(row))
@@ -224,7 +293,7 @@ func (s *sqliteStore) ListVMsByPool(ctx context.Context, poolName, poolNamespace
 
 func (s *sqliteStore) ListVMsByPhase(ctx context.Context, phase poolmgrv1alpha1.VMPhase) ([]*poolmgrv1alpha1.VMRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT uid, pool_name, pool_namespace, flintlock_host, phase, lease_id, created_at, updated_at
+		SELECT uid, pool_name, pool_namespace, flintlock_host, phase, lease_id, template_hash, created_at, updated_at
 		FROM vms WHERE phase = ? ORDER BY uid`, int32(phase))
 	if err != nil {
 		return nil, fmt.Errorf("store: query vms by phase: %w", err)
@@ -234,7 +303,7 @@ func (s *sqliteStore) ListVMsByPhase(ctx context.Context, phase poolmgrv1alpha1.
 	var vms []*poolmgrv1alpha1.VMRecord
 	for rows.Next() {
 		var row vmRow
-		if err := rows.Scan(&row.uid, &row.poolName, &row.poolNamespace, &row.flintlockHost, &row.phase, &row.leaseID, &row.createdAt, &row.updatedAt); err != nil {
+		if err := rows.Scan(&row.uid, &row.poolName, &row.poolNamespace, &row.flintlockHost, &row.phase, &row.leaseID, &row.templateHash, &row.createdAt, &row.updatedAt); err != nil {
 			return nil, fmt.Errorf("store: scan vm: %w", err)
 		}
 		vms = append(vms, rowToVM(row))
@@ -268,6 +337,37 @@ func (s *sqliteStore) DeleteVM(ctx context.Context, uid string) error {
 		return fmt.Errorf("store: delete vm: %w", err)
 	}
 	return checkRowsAffected(res)
+}
+
+func (s *sqliteStore) UpdateVMPhaseIfCurrent(ctx context.Context, uid string, expectedPhase, newPhase poolmgrv1alpha1.VMPhase) error {
+	now := time.Now().UnixNano()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE vms SET phase = ?, updated_at = ? WHERE uid = ? AND phase = ?`,
+		int32(newPhase), now, uid, int32(expectedPhase),
+	)
+	if err != nil {
+		return fmt.Errorf("store: update vm phase if current: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: update vm phase if current rows affected: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+
+	// No rows matched: either uid doesn't exist, or its phase already moved
+	// away from expectedPhase (e.g. a concurrent ClaimAvailableVM) - tell
+	// the two apart for the caller.
+	var exists int
+	err = s.db.QueryRowContext(ctx, `SELECT 1 FROM vms WHERE uid = ?`, uid).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("store: check vm exists: %w", err)
+	}
+	return ErrPhaseChanged
 }
 
 func (s *sqliteStore) ClaimAvailableVM(ctx context.Context, poolName, poolNamespace string) (*poolmgrv1alpha1.VMRecord, error) {
@@ -310,9 +410,9 @@ func (s *sqliteStore) ClaimAvailableVM(ctx context.Context, poolName, poolNamesp
 
 	var row vmRow
 	err = tx.QueryRowContext(ctx, `
-		SELECT uid, pool_name, pool_namespace, flintlock_host, phase, lease_id, created_at, updated_at
+		SELECT uid, pool_name, pool_namespace, flintlock_host, phase, lease_id, template_hash, created_at, updated_at
 		FROM vms WHERE uid = ?`, uid,
-	).Scan(&row.uid, &row.poolName, &row.poolNamespace, &row.flintlockHost, &row.phase, &row.leaseID, &row.createdAt, &row.updatedAt)
+	).Scan(&row.uid, &row.poolName, &row.poolNamespace, &row.flintlockHost, &row.phase, &row.leaseID, &row.templateHash, &row.createdAt, &row.updatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("store: reload claimed vm: %w", err)
 	}
