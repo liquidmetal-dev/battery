@@ -215,6 +215,13 @@ service Events {
 - `REPLACE_ON_DELETE`: on every VM deletion (expiry, release-triggered, or hook failure), start
   provisioning exactly one replacement.
 
+The two event-driven strategies (`IMMEDIATE_ON_LEASE`, `REPLACE_ON_DELETE`) would otherwise never
+fill a fresh, empty pool: nothing can be claimed or deleted, so nothing triggers replenishment.
+Each time a pool's reconciler starts (manager startup, `CreatePool`, `UpdatePool`) it therefore
+tops the pool up to `size` once — `size` available VMs for `IMMEDIATE_ON_LEASE` (leased VMs are
+extra), `size` VMs in total for `REPLACE_ON_DELETE`. `MIN_SIZE_THRESHOLD` needs no seed; its tick
+already does this.
+
 All strategies share the same provisioning pipeline: `CreateMicroVM` (flintlock) → poll
 `GetMicroVM` until `CREATED` with a non-empty `vsock_path` → guest-agent `WaitReady` → run
 `create_commands` → on success mark `AVAILABLE` + emit `VMAvailable`; on failure apply the

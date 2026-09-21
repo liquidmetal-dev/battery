@@ -25,9 +25,9 @@ const DefaultTickInterval = 10 * time.Second
 // notifications before it runs are redundant.
 const notifyBuffer = 1
 
-// Reconciler runs the control loop for a single pool: on every tick, and on
-// every claim/delete notification, it asks the pool's Strategy how many new
-// VMs are needed and provisions them.
+// Reconciler runs the control loop for a single pool: once at start, on
+// every tick, and on every claim/delete notification, it asks the pool's
+// Strategy how many new VMs are needed and provisions them.
 type Reconciler struct {
 	pool         *poolmgrv1alpha1.PoolSpec
 	store        store.Store
@@ -38,6 +38,10 @@ type Reconciler struct {
 
 	claimed chan struct{}
 	deleted chan struct{}
+
+	// seeded records whether the start-of-life top-up (see seed) has run.
+	// Only touched by the Run goroutine.
+	seeded bool
 }
 
 // New returns a Reconciler for pool. tickInterval <= 0 uses
@@ -87,7 +91,7 @@ func (r *Reconciler) NotifyVMDeleted() {
 }
 
 // Run drives the control loop until ctx is done, at which point it returns
-// ctx.Err(). Each tick and each notification independently computes how
+// ctx.Err(). It first seeds the pool (see seed), then each tick and each notification independently computes how
 // many VMs to provision and starts that many Provision calls concurrently;
 // one failed Provision is logged and does not stop the others or the loop.
 func (r *Reconciler) Run(ctx context.Context) error {
@@ -97,11 +101,16 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	r.log.InfoContext(ctx, "reconciler: started", "tick_interval", r.tickInterval)
 	defer r.log.InfoContext(ctx, "reconciler: stopped")
 
+	r.seed(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
+			if !r.seeded {
+				r.seed(ctx)
+			}
 			counts, err := r.countVMs(ctx)
 			if err != nil {
 				r.log.ErrorContext(ctx, "reconciler: failed to count VMs", "error", err)
@@ -114,6 +123,25 @@ func (r *Reconciler) Run(ctx context.Context) error {
 			r.provisionN(ctx, r.strategy.OnVMDeleted(r.pool))
 		}
 	}
+}
+
+// seed provisions the Strategy's InitialNewVMs once per Reconciler
+// lifetime, so an event-driven pool starting empty isn't deadlocked waiting
+// for a claim/delete that can never happen. If counting VMs fails, seeded
+// stays false and the next tick retries.
+func (r *Reconciler) seed(ctx context.Context) {
+	counts, err := r.countVMs(ctx)
+	if err != nil {
+		r.log.ErrorContext(ctx, "reconciler: failed to count VMs for seeding", "error", err)
+		return
+	}
+	r.seeded = true
+
+	n := r.strategy.InitialNewVMs(r.pool, counts)
+	if n > 0 {
+		r.log.InfoContext(ctx, "reconciler: seeding pool", "count", n)
+	}
+	r.provisionN(ctx, n)
 }
 
 // countVMs summarizes the pool's current VMs into VMCounts.
