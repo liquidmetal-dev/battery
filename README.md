@@ -47,6 +47,9 @@ manual end-to-end verification runbook against a real flintlockd + Firecracker V
 ### Prerequisites
 
 - Go 1.25+
+- flintlock v0.15.2+ on every flintlock host. Earlier versions put the guest-agent socket at a path
+  that long namespaces or pool names can push past the Unix socket path limit, leaving every VM
+  unreachable. `poolmgrd` checks each host's version and won't provision VMs on an older one.
 - [mise](https://mise.jdx.dev/) (recommended) to install pinned tool versions from
   `mise.toml` — [buf](https://buf.build/), golangci-lint, `protoc-gen-go`, and
   `protoc-gen-go-grpc`.

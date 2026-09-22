@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 
 	microvmv1alpha1 "github.com/liquidmetal-dev/flintlock/api/services/microvm/v1alpha1"
 	microvmexecv1alpha1 "github.com/liquidmetal-dev/flintlock/api/services/microvmexec/v1alpha1"
@@ -32,6 +33,10 @@ type Pool struct {
 	execClients     map[string]microvmexecv1alpha1.MicroVMExecClient
 	sshProxyClients map[string]microvmsshproxyv1alpha1.MicroVMSSHProxyClient
 	addresses       map[string]string
+
+	// versionOK records the hosts CheckVersion has accepted.
+	versionMu sync.Mutex
+	versionOK map[string]bool
 }
 
 // New dials every host in cfg and returns a Pool. On any dial/TLS-setup
@@ -50,6 +55,7 @@ func New(cfg *config.Config) (*Pool, error) {
 		execClients:     make(map[string]microvmexecv1alpha1.MicroVMExecClient, len(cfg.Hosts)),
 		sshProxyClients: make(map[string]microvmsshproxyv1alpha1.MicroVMSSHProxyClient, len(cfg.Hosts)),
 		addresses:       make(map[string]string, len(cfg.Hosts)),
+		versionOK:       make(map[string]bool, len(cfg.Hosts)),
 	}
 
 	for _, host := range cfg.Hosts {

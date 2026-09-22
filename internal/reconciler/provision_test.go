@@ -118,6 +118,30 @@ func TestProvision_AssignsAUniqueIDToEachVM(t *testing.T) {
 	}
 }
 
+// TestProvision_RejectsOldFlintlock guards against
+// https://github.com/liquidmetal-dev/battery/issues/94: flintlockd before
+// v0.15.2 can put the guest-agent socket at a path too long to dial, so
+// Provision must refuse the host before creating anything on it.
+func TestProvision_RejectsOldFlintlock(t *testing.T) {
+	vm := &fakeMicroVM{serverVersion: "v0.15.1"}
+	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
+	st := openTestStore(t)
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-a"})
+	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), metrics.NewRegistry())
+
+	err := p.Provision(context.Background(), pool)
+	if !errors.Is(err, flintlockclient.ErrUnsupportedVersion) {
+		t.Fatalf("Provision() error = %v, want ErrUnsupportedVersion", err)
+	}
+	if got := len(vm.createdSpecs()); got != 0 {
+		t.Fatalf("expected no CreateMicroVM calls, got %d", got)
+	}
+	if vms := onlyVMsInPool(t, st, "pool-a"); len(vms) != 0 {
+		t.Fatalf("expected no VM records, got %d", len(vms))
+	}
+}
+
 func TestProvision_CreatePollTimeout(t *testing.T) {
 	vm := &fakeMicroVM{pollsUntilCreated: 1000} // never reaches CREATED within the test's timeout
 	exec := &fakeMicroVMExec{}
