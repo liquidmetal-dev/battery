@@ -39,6 +39,10 @@ type fakeMicroVM struct {
 	// unreachable. Guarded by mu.
 	failDeletesRemaining int
 
+	// serverVersion is what ServerInfo reports; empty means
+	// flintlockclient.MinFlintlockVersion.
+	serverVersion string
+
 	mu       sync.Mutex
 	getCalls map[string]int
 	deleted  []string
@@ -46,6 +50,14 @@ type fakeMicroVM struct {
 }
 
 var fakeUIDCounter atomic.Int64
+
+func (f *fakeMicroVM) ServerInfo(context.Context, *emptypb.Empty) (*microvmv1alpha1.ServerInfoResponse, error) {
+	version := f.serverVersion
+	if version == "" {
+		version = flintlockclient.MinFlintlockVersion
+	}
+	return &microvmv1alpha1.ServerInfoResponse{Version: &microvmv1alpha1.VersionInfo{Version: version}}, nil
+}
 
 func (f *fakeMicroVM) CreateMicroVM(_ context.Context, req *microvmv1alpha1.CreateMicroVMRequest) (*microvmv1alpha1.CreateMicroVMResponse, error) {
 	spec, _ := proto.Clone(req.GetMicrovm()).(*flintlocktypes.MicroVMSpec)

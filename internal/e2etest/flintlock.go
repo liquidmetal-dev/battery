@@ -82,6 +82,14 @@ func (f *FakeMicroVM) DeleteMicroVM(context.Context, *microvmv1alpha1.DeleteMicr
 	return &emptypb.Empty{}, nil
 }
 
+// ServerInfo implements the flintlock MicroVM ServerInfo RPC, reporting the
+// minimum flintlock version the pool manager will provision on.
+func (f *FakeMicroVM) ServerInfo(context.Context, *emptypb.Empty) (*microvmv1alpha1.ServerInfoResponse, error) {
+	return &microvmv1alpha1.ServerInfoResponse{
+		Version: &microvmv1alpha1.VersionInfo{Version: flintlockclient.MinFlintlockVersion},
+	}, nil
+}
+
 // FakeMicroVMExec is a minimal flintlock MicroVMExec service: every
 // ExecCommand call succeeds immediately with exit code 0, satisfying
 // flintlockclient.WaitReady's guest-agent readiness probe.

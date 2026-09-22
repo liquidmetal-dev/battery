@@ -54,7 +54,11 @@ Key grounding facts confirmed directly from the flintlock and guest-agent source
   spans multiple flintlock hosts, we run a small **per-host sidecar** (`poolmgr-hostagent`)
   alongside each `flintlockd` that proxies guest-agent `exec`/`ping` calls over gRPC back to the
   central pool manager. This keeps the pool manager itself single-instance/host-agnostic and
-  avoids requiring shared filesystem access to `/run/flintlock/*.vsock`.
+  avoids requiring shared filesystem access to `/run/flintlock/<uid>/guest-agent.vsock`.
+- **Minimum flintlock version**: v0.15.2. Earlier versions put the guest-agent socket under
+  `<state-dir>/<namespace>/<name>/<uid>/`, where a long namespace or VM name could exceed the
+  107-byte Unix socket path limit. The reconciler checks each host's version via `ServerInfo`
+  before provisioning on it.
 
 ## Architecture
 

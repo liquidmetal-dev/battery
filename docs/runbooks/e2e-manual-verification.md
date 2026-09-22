@@ -3,7 +3,7 @@
 This runbook is the manual/E2E counterpart to the automated test suite (`go test ./...`, which
 runs against a fake flintlock gRPC server — see
 [`docs/design/2026-09-05-microvm-warm-pool-manager-design.md`](../design/2026-09-05-microvm-warm-pool-manager-design.md#testingverification-approach)).
-It walks through verifying `battery` against a **real** `flintlockd` v0.13.0+ and Firecracker VM.
+It walks through verifying `battery` against a **real** `flintlockd` v0.15.2+ and Firecracker VM.
 
 It supersedes the design doc's original `vsock-connect ping` step: flintlock v0.13.0 added native
 `MicroVMExec` and `MicroVMSSHProxy` gRPC services served directly by `flintlockd`, which replaced
@@ -32,7 +32,7 @@ the `poolmgr-hostagent`/vsock-connect path (see [#29](https://github.com/liquidm
 
 ## Prerequisites
 
-- A real Firecracker-capable host running `flintlockd` v0.13.0+. Follow flintlock's own
+- A real Firecracker-capable host running `flintlockd` v0.15.2+. Follow flintlock's own
   getting-started guides for the underlying infra — this runbook doesn't duplicate them:
   - [Firecracker setup](https://github.com/liquidmetal-dev/flintlock/blob/main/userdocs/docs/getting-started/firecracker.md)
   - [containerd setup](https://github.com/liquidmetal-dev/flintlock/blob/main/userdocs/docs/getting-started/containerd.md)

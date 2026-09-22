@@ -129,6 +129,12 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 	if err != nil {
 		return fmt.Errorf("reconciler: provision: %w", err)
 	}
+	// An older flintlockd would accept the VM and then leave its guest
+	// agent unreachable; refuse the host up front instead.
+	if err := p.flint.CheckVersion(ctx, host); err != nil {
+		log.ErrorContext(ctx, "reconciler: refusing to provision on flintlock host", "error", err)
+		return fmt.Errorf("reconciler: provision: %w", err)
+	}
 
 	spec, ok := proto.Clone(pool.GetMicrovmTemplate()).(*flintlocktypes.MicroVMSpec)
 	if !ok || spec == nil {
@@ -142,15 +148,10 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 	// VM. Provision is what actually creates each VM, so it's the only
 	// place that can give each one its own.
 	//
-	// The id becomes part of a filesystem path for the guest-agent's vsock
-	// proxy socket (.../<namespace>/<id>/<flintlock-uid>/guest-agent.vsock),
-	// which is a Unix domain socket subject to Linux's 108-byte sun_path
-	// limit - a full uuid here (36 chars) overflows that budget once the
-	// namespace and flintlock's own generated uid are accounted for,
-	// failing every VM with "connect: invalid argument" well after
-	// CreateMicroVM has already succeeded. An 8-character suffix keeps
-	// enough entropy to make collisions practically impossible for any
-	// real pool size while leaving headroom in that path.
+	// An 8-character suffix keeps enough entropy to make collisions
+	// practically impossible for any real pool size. The id's length no
+	// longer matters for the guest-agent socket: flintlock v0.15.2+ (see
+	// flintlockclient.MinFlintlockVersion) keys that path by uid alone.
 	spec.Id = fmt.Sprintf("%s-%s", pool.GetName(), uuid.NewString()[:8])
 	if spec.Namespace == "" {
 		spec.Namespace = pool.GetNamespace()
