@@ -283,14 +283,13 @@ func (s *HostAdminServer) UpdateHost(ctx context.Context, req *poolmgrv1alpha1.U
 // check and the delete in one transaction, and hostRefsMu keeps a
 // CreatePool or UpdatePool from slipping a new reference in between.
 //
-// One narrow window remains. A reconciler that UpdatePool is replacing
-// can still be running the old spec for a moment after the new one is
-// stored, and PickHost may choose the removed host from it. If it does so
-// after the delete commits (ReservePlacement treats an unregistered host as
-// uncordoned) but before flint.Remove below, it could create a VM on the
-// host. Closing it means making ReservePlacement refuse unregistered hosts,
-// which many existing callers that place on hosts with no registry row
-// (tests, mostly) don't yet allow.
+// A reconciler that UpdatePool is replacing can still be running the old
+// spec for a moment after the new one is stored, and PickHost may choose
+// the removed host from it. That cannot place a VM there: the placement
+// reservation is taken in one transaction with a check that the host is
+// still registered, so either the reservation lands first and DeleteHost
+// refuses, or the delete lands first and ReservePlacement refuses with
+// store.ErrHostNotRegistered.
 func (s *HostAdminServer) RemoveHost(ctx context.Context, req *poolmgrv1alpha1.RemoveHostRequest) (*emptypb.Empty, error) {
 	name := req.GetName()
 

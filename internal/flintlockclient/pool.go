@@ -250,7 +250,8 @@ func (p *Pool) Close() error {
 }
 
 // validateHost checks that host has a name and address and a consistent TLS
-// config, with the same rules config.Validate applies to a config host.
+// config: insecure with no TLS files, or a ca_file plus an optional matched
+// cert_file/key_file pair. It is the only place these rules live.
 func validateHost(host *poolmgrv1alpha1.Host) error {
 	if host == nil {
 		return fmt.Errorf("%w: host is required", ErrInvalidHost)

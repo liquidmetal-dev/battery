@@ -294,6 +294,12 @@ func TestDial_InvalidHost(t *testing.T) {
 		{name: "cert without key", host: &poolmgrv1alpha1.Host{
 			Name: "host-a", Address: "127.0.0.1:1", Tls: &poolmgrv1alpha1.HostTLS{CaFile: "ca.pem", CertFile: "cert.pem"},
 		}},
+		{name: "key without cert", host: &poolmgrv1alpha1.Host{
+			Name: "host-a", Address: "127.0.0.1:1", Tls: &poolmgrv1alpha1.HostTLS{CaFile: "ca.pem", KeyFile: "key.pem"},
+		}},
+		{name: "insecure with cert file", host: &poolmgrv1alpha1.Host{
+			Name: "host-a", Address: "127.0.0.1:1", Tls: &poolmgrv1alpha1.HostTLS{Insecure: true, CertFile: "cert.pem"},
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

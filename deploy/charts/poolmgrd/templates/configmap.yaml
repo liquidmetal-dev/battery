@@ -1,3 +1,6 @@
+{{- if hasKey .Values.config "hosts" }}
+{{- fail "config.hosts is no longer supported: poolmgrd keeps flintlock hosts in its database. Remove config.hosts and register each host with \"poolmgrctl host add\" after install." }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

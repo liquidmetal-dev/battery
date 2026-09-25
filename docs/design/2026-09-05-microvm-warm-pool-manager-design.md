@@ -108,9 +108,9 @@ Key grounding facts confirmed directly from the flintlock and guest-agent source
   triggers (VM claimed, VM deleted). Responsible for: comparing desired vs actual pool state,
   invoking the configured replenishment strategy, running create/pre-lease hooks on new VMs
   before marking them `Available`, and sweeping expired leases.
-- **Flintlock Client Pool** — holds a gRPC client per configured flintlock host (from static
-  config or a discovery list); the reconciler picks a host for each new VM using a simple
-  placement policy (see Scheduling).
+- **Flintlock Client Pool** — holds a gRPC client per registered flintlock host (dialled from
+  the store at startup, and changed at runtime by the `HostAdmin` API); the reconciler picks a
+  host for each new VM using a simple placement policy (see Scheduling).
 - **poolmgr-hostagent** (new small component, one instance per flintlock host) — a thin gRPC
   server, colocated with `flintlockd`, that receives `WaitReady(vsock_path)` /
   `Run(vsock_path, cmd)` calls from the pool manager and executes them locally by shelling out
@@ -127,13 +127,16 @@ Key grounding facts confirmed directly from the flintlock and guest-agent source
 
 ### Multi-host fleet & scheduling (v1 scope)
 
-Flintlock hosts are static config entries (address + TLS materials) grouped implicitly by
-whatever the pool's spec requires (resource capacity is not tracked in v1 beyond a simple
-round-robin/least-loaded-by-VM-count placement across the hosts eligible for a pool). Each pool
-definition lists which flintlock host(s) it's allowed to place VMs on. A pool's VMs can span
-multiple hosts. No cross-pool bin-packing or live host capacity probing in v1 — this keeps
-scheduling simple and is an explicit place to extend later (e.g. querying host resource usage)
-without changing the external API.
+Flintlock hosts are records in the store (name, address, TLS file paths, cordon state), managed
+at runtime through the `HostAdmin` API (`poolmgrctl host add|update|remove|cordon`) rather than
+listed in the config file; see [the host API ADR](../adr/2026-09-24-host-api.md). A fresh
+manager has no hosts until one is added. Resource capacity is not tracked in v1 beyond a simple
+least-loaded-by-VM-count placement across the hosts eligible for a pool. Each pool
+definition lists which flintlock host(s) it's allowed to place VMs on, and each must already be
+registered. A pool's VMs can span multiple hosts, and cordoned hosts are skipped. No cross-pool
+bin-packing or live host capacity probing in v1 — this keeps scheduling simple and is an
+explicit place to extend later (e.g. querying host resource usage) without changing the
+external API.
 
 ## Data Model
 

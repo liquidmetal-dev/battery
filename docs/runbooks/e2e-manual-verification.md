@@ -53,9 +53,10 @@ flintlockd run --insecure --enable-exec-api --enable-ssh-proxy-api --parent-ifac
 
 `--enable-exec-api`/`--enable-ssh-proxy-api` gate the `MicroVMExec`/`MicroVMSSHProxy` gRPC
 services (both default to off: exec runs arbitrary commands in a guest, and SSH-proxying tunnels
-a client straight to the guest's `sshd`). `--insecure` matches `battery`'s own
-`TLSConfig.Insecure`/`ServerTLSConfig.Insecure` for this runbook; for a production-shaped check,
-use flintlock's mTLS flags and `battery`'s `CertFile`/`KeyFile`/`CAFile` config instead.
+a client straight to the guest's `sshd`). `--insecure` matches the host's `tls.insecure`
+(`poolmgrctl host add --flintlock-insecure`) and `battery`'s own `ServerTLSConfig.Insecure` for
+this runbook; for a production-shaped check, use flintlock's mTLS flags and the host's
+`ca_file`/`cert_file`/`key_file` instead.
 
 `--parent-iface <host-interface>` (or `--bridge-name <bridge>` if you're using a bridge instead —
 see the [Network setup](https://github.com/liquidmetal-dev/flintlock/blob/main/userdocs/docs/getting-started/network.md)
@@ -226,9 +227,6 @@ Example config (`poolmgrd-config.json`):
 
 ```json
 {
-  "hosts": [
-    { "name": "host-a", "address": "localhost:9090", "tls": { "insecure": true } }
-  ],
   "api_server": {
     "addr": ":9091",
     "tls": { "insecure": true }
@@ -240,6 +238,19 @@ Example config (`poolmgrd-config.json`):
 ```sh
 go run ./cmd/poolmgrd -config poolmgrd-config.json -db /tmp/poolmgr-e2e.db
 ```
+
+poolmgrd starts with no flintlock hosts: they live in its database, not the config. Register this
+flintlockd with `HostAdmin.AddHost`, which dials it and checks its flintlock version before storing
+it:
+
+```sh
+grpcurl -d '{"host": {"name": "host-a", "address": "localhost:9090", "tls": {"insecure": true}}}' \
+  -plaintext localhost:9091 poolmgr.v1alpha1.HostAdmin/AddHost
+```
+
+or, equivalently, `poolmgrctl host add host-a --address localhost:9090 --flintlock-insecure --addr
+localhost:9091 --insecure`. `HostAdmin/GetHost` (`poolmgrctl host get host-a`) should then report
+the flintlockd's version.
 
 Confirm `/metrics` is up. With no pool created yet, `poolmgr_pool_*` won't appear —
 `internal/metrics/pool_collector.go`'s `Collect` only emits a pool's gauges once it exists in the

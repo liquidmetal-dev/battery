@@ -18,7 +18,6 @@ import (
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	"github.com/liquidmetal-dev/battery/internal/api"
@@ -82,15 +81,12 @@ func main() {
 		}
 	}()
 
-	if err := seedHosts(ctx, st, cfg); err != nil {
-		fatal("poolmgrd: seed hosts", err)
-	}
 	if err := clearStalePlacements(ctx, st); err != nil {
 		fatal("poolmgrd: clear stale placements", err)
 	}
 
-	// The store holds every host seedHosts just wrote, with its TLS
-	// settings, so the pool is built from it rather than from cfg.
+	// The store is the only source of hosts: HostAdmin.AddHost writes them
+	// there, with their TLS settings, and the pool is built from it.
 	hosts, err := st.ListHosts(ctx)
 	if err != nil {
 		fatal("poolmgrd: list hosts", err)
@@ -123,7 +119,7 @@ func main() {
 	sweeper := reconciler.NewSweeper(st, flint, sweepInterval, warningWindow, poolMgr, reg)
 
 	errCh := make(chan error, 4)
-	pending := 3
+	pending := 4
 
 	go func() {
 		errCh <- serveMetrics(runCtx, cfg.MetricsAddr, reg)
@@ -135,24 +131,21 @@ func main() {
 		errCh <- sweeper.Run(runCtx)
 	}()
 
-	if cfg.APIServer != nil {
-		grpcSrv, err := buildGRPCServer(*cfg.APIServer, st, flint, reg, poolMgr)
-		if err != nil {
-			fatal("poolmgrd: build grpc server", err)
-		}
-
-		lis, err := net.Listen("tcp", cfg.APIServer.Addr)
-		if err != nil {
-			fatal(fmt.Sprintf("poolmgrd: listen on %s", cfg.APIServer.Addr), err)
-		}
-
-		pending++
-		go func() {
-			errCh <- serveGRPC(runCtx, grpcSrv, lis)
-		}()
-	} else {
-		slog.Warn("poolmgrd: no api_server configured, gRPC API is disabled")
+	// cfg.Validate (via config.Load) guarantees APIServer is set: without
+	// it the manager could never be told about a host.
+	grpcSrv, err := buildGRPCServer(*cfg.APIServer, st, flint, reg, poolMgr)
+	if err != nil {
+		fatal("poolmgrd: build grpc server", err)
 	}
+
+	lis, err := net.Listen("tcp", cfg.APIServer.Addr)
+	if err != nil {
+		fatal(fmt.Sprintf("poolmgrd: listen on %s", cfg.APIServer.Addr), err)
+	}
+
+	go func() {
+		errCh <- serveGRPC(runCtx, grpcSrv, lis)
+	}()
 
 	var firstErr error
 	for i := 0; i < pending; i++ {
@@ -180,32 +173,6 @@ func parseLogLevel(s string) (slog.Level, error) {
 	default:
 		return 0, fmt.Errorf("invalid -log-level %q: must be debug, info, warn, or error", s)
 	}
-}
-
-// seedHosts upserts a hosts registry row for every host in cfg, so the
-// HostAdmin API has a known-host set to validate Cordon/UncordonHost calls
-// against. An existing row has its address and TLS settings refreshed to
-// match cfg, but its cordon state is left untouched - see
-// store.Store.UpsertHostIfMissing.
-func seedHosts(ctx context.Context, st store.Store, cfg *config.Config) error {
-	now := timestamppb.Now()
-	for _, h := range cfg.Hosts {
-		host := &poolmgrv1alpha1.Host{
-			Name:    h.Name,
-			Address: h.Address,
-			Tls: &poolmgrv1alpha1.HostTLS{
-				Insecure: h.TLS.Insecure,
-				CaFile:   h.TLS.CAFile,
-				CertFile: h.TLS.CertFile,
-				KeyFile:  h.TLS.KeyFile,
-			},
-			UpdatedAt: now,
-		}
-		if err := st.UpsertHostIfMissing(ctx, host); err != nil {
-			return fmt.Errorf("seed host %q: %w", h.Name, err)
-		}
-	}
-	return nil
 }
 
 // buildFlintlockPool dials each stored host and returns a Pool of those that

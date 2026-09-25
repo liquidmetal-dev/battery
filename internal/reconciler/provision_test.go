@@ -41,6 +41,7 @@ func TestProvision_HappyPath(t *testing.T) {
 	exec := alwaysReadyExec()
 	flint := startFakeFlintlock(t, vm, exec)
 	st := openTestStore(t)
+	seedHost(t, st, "host-a")
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-a"})
 	pool.CreateCommands = []string{"echo hi", "echo bye"}
@@ -90,6 +91,7 @@ func TestProvision_AssignsAUniqueIDToEachVM(t *testing.T) {
 	exec := alwaysReadyExec()
 	flint := startFakeFlintlock(t, vm, exec)
 	st := openTestStore(t)
+	seedHost(t, st, "host-a")
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-a"})
 	reg := metrics.NewRegistry()
@@ -126,6 +128,7 @@ func TestProvision_RejectsOldFlintlock(t *testing.T) {
 	vm := &fakeMicroVM{serverVersion: "v0.15.1"}
 	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
 	st := openTestStore(t)
+	seedHost(t, st, "host-a")
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-a"})
 	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), metrics.NewRegistry())
@@ -150,6 +153,7 @@ func TestProvision_CreatePollTimeout(t *testing.T) {
 	exec := &fakeMicroVMExec{}
 	flint := startFakeFlintlock(t, vm, exec)
 	st := openTestStore(t)
+	seedHost(t, st, "host-a")
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-a"})
 	pool.HookFailurePolicy = poolmgrv1alpha1.HookFailurePolicy_QUARANTINE
@@ -174,6 +178,7 @@ func TestProvision_CreateFailedState(t *testing.T) {
 	exec := &fakeMicroVMExec{}
 	flint := startFakeFlintlock(t, vm, exec)
 	st := openTestStore(t)
+	seedHost(t, st, "host-a")
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-a"})
 	pool.HookFailurePolicy = poolmgrv1alpha1.HookFailurePolicy_DELETE_AND_REPLACE
@@ -201,6 +206,7 @@ func TestProvision_GuestAgentNeverReady(t *testing.T) {
 	}
 	flint := startFakeFlintlock(t, vm, exec)
 	st := openTestStore(t)
+	seedHost(t, st, "host-a")
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-a"})
 	pool.HookFailurePolicy = poolmgrv1alpha1.HookFailurePolicy_QUARANTINE
@@ -234,6 +240,7 @@ func TestProvision_CreateCommandNonZeroExit_DeleteAndReplace(t *testing.T) {
 	}
 	flint := startFakeFlintlock(t, vm, exec)
 	st := openTestStore(t)
+	seedHost(t, st, "host-a")
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-a"})
 	pool.CreateCommands = []string{"false"}
@@ -272,7 +279,7 @@ func TestProvision_CreateVMStoreFailure_CleansUpOrphanedMicrovm(t *testing.T) {
 	vm := &fakeMicroVM{}
 	exec := alwaysReadyExec()
 	flint := startFakeFlintlock(t, vm, exec)
-	st := &failingStore{Store: openTestStore(t), failCreateVM: true}
+	st := &failingStore{Store: openTestStoreWithHost(t, "host-a"), failCreateVM: true}
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-a"})
 
@@ -307,7 +314,7 @@ func TestProvision_UpdatePhaseFailure_AppliesHookFailurePolicy(t *testing.T) {
 			vm := &fakeMicroVM{}
 			exec := alwaysReadyExec()
 			flint := startFakeFlintlock(t, vm, exec)
-			st := &failingStore{Store: openTestStore(t), failUpdateVMPhase: vmPhasePtr(tt.phase)}
+			st := &failingStore{Store: openTestStoreWithHost(t, "host-a"), failUpdateVMPhase: vmPhasePtr(tt.phase)}
 
 			pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-a"})
 			pool.HookFailurePolicy = tt.policy
@@ -350,6 +357,7 @@ func TestProvision_ContextCancelledMidProvision_StillAppliesHookFailurePolicy(t 
 	exec := alwaysReadyExec()
 	flint := startFakeFlintlock(t, vm, exec)
 	st := openTestStore(t)
+	seedHost(t, st, "host-a")
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 1, []string{"host-a"})
 	pool.HookFailurePolicy = poolmgrv1alpha1.HookFailurePolicy_QUARANTINE
@@ -406,8 +414,7 @@ func countVMsOnHost(t *testing.T, st store.Store, host string) int32 {
 func TestProvision_HostCordonedAfterPick_DoesNotCreateMicroVM(t *testing.T) {
 	vm := &fakeMicroVM{}
 	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
-	st := &failingStore{Store: openTestStore(t), cordonHostBeforeReserve: "host-a"}
-	seedHost(t, st, "host-a")
+	st := &failingStore{Store: openTestStoreWithHost(t, "host-a"), cordonHostBeforeReserve: "host-a"}
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 1, []string{"host-a"})
 	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), nil)
@@ -463,8 +470,7 @@ func TestProvision_ReservationCountsWhileCreating(t *testing.T) {
 // microvm exists but before its row is written must release the placement
 // along with deleting the orphaned microvm.
 func TestProvision_CreateVMFailure_ReleasesReservation(t *testing.T) {
-	st := &failingStore{Store: openTestStore(t), failCreateVM: true}
-	seedHost(t, st, "host-a")
+	st := &failingStore{Store: openTestStoreWithHost(t, "host-a"), failCreateVM: true}
 
 	var duringCreate int32 = -1
 	vm := &fakeMicroVM{onCreate: func() { duringCreate = countVMsOnHost(t, st, "host-a") }}
@@ -484,17 +490,89 @@ func TestProvision_CreateVMFailure_ReleasesReservation(t *testing.T) {
 	}
 }
 
+// TestProvision_UnknownHost: a host that is registered but missing from the
+// client pool (its stored spec failed to dial at startup) surfaces the
+// client pool's ErrUnknownHost.
 func TestProvision_UnknownHost(t *testing.T) {
 	vm := &fakeMicroVM{}
 	exec := &fakeMicroVMExec{}
 	flint := startFakeFlintlock(t, vm, exec)
 	st := openTestStore(t)
+	seedHost(t, st, "host-not-dialled")
 
-	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-does-not-exist"})
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-not-dialled"})
 
 	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), nil)
 	err := p.Provision(context.Background(), pool)
 	if !errors.Is(err, flintlockclient.ErrUnknownHost) {
 		t.Fatalf("Provision() error = %v, want ErrUnknownHost", err)
+	}
+}
+
+// TestProvision_UnregisteredHost_NoEligibleHost: with no host registered
+// (a fresh manager before the first poolmgrctl host add, or a pool stored
+// before CreatePool checked its hosts), provisioning fails quietly with
+// ErrNoEligibleHost and touches nothing.
+func TestProvision_UnregisteredHost_NoEligibleHost(t *testing.T) {
+	vm := &fakeMicroVM{}
+	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
+	st := openTestStore(t)
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 1, []string{"host-a"})
+	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), nil)
+
+	err := p.Provision(context.Background(), pool)
+	if !errors.Is(err, reconciler.ErrNoEligibleHost) {
+		t.Fatalf("Provision() error = %v, want ErrNoEligibleHost", err)
+	}
+	if got := len(vm.createdSpecs()); got != 0 {
+		t.Fatalf("expected no CreateMicroVM calls, got %d", got)
+	}
+}
+
+// TestProvision_UnregisteredHostSkipped: PickHost passes over a pool host
+// with no registry row even when it has the fewest VMs.
+func TestProvision_UnregisteredHostSkipped(t *testing.T) {
+	vm := &fakeMicroVM{}
+	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
+	st := openTestStoreWithHost(t, "host-a")
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-a", "host-gone"})
+	seedAvailableVMs(t, st, pool, 1)
+
+	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), nil)
+	if err := p.Provision(context.Background(), pool); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	for _, v := range onlyVMsInPool(t, st, "pool-a") {
+		if v.GetFlintlockHost() != "host-a" {
+			t.Fatalf("VM %s placed on %q, want host-a", v.GetUid(), v.GetFlintlockHost())
+		}
+	}
+}
+
+// TestProvision_HostRemovedAfterPick_DoesNotCreateMicroVM is the RemoveHost
+// counterpart of TestProvision_HostCordonedAfterPick_DoesNotCreateMicroVM:
+// the host's registry row is deleted after PickHost chose it, and
+// ReservePlacement must refuse rather than place a VM on it.
+func TestProvision_HostRemovedAfterPick_DoesNotCreateMicroVM(t *testing.T) {
+	vm := &fakeMicroVM{}
+	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
+	st := &failingStore{Store: openTestStoreWithHost(t, "host-a"), removeHostBeforeReserve: "host-a"}
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 1, []string{"host-a"})
+	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), nil)
+
+	err := p.Provision(context.Background(), pool)
+	if !errors.Is(err, reconciler.ErrNoEligibleHost) {
+		t.Fatalf("Provision() error = %v, want ErrNoEligibleHost", err)
+	}
+	if !errors.Is(err, store.ErrHostNotRegistered) {
+		t.Fatalf("Provision() error = %v, want it to also wrap store.ErrHostNotRegistered", err)
+	}
+	if got := len(vm.createdSpecs()); got != 0 {
+		t.Fatalf("expected no CreateMicroVM calls on a host removed mid-provision, got %d", got)
+	}
+	if got := countVMsOnHost(t, st, "host-a"); got != 0 {
+		t.Fatalf("CountVMsByHost(host-a) = %d, want 0", got)
 	}
 }

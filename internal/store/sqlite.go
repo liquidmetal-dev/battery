@@ -659,30 +659,6 @@ func (row *hostRow) scanDest() []any {
 	}
 }
 
-func (s *sqliteStore) UpsertHostIfMissing(ctx context.Context, host *poolmgrv1alpha1.Host) error {
-	row, err := hostToRow(host)
-	if err != nil {
-		return fmt.Errorf("store: marshal host: %w", err)
-	}
-
-	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO hosts (`+hostColumns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT (name) DO UPDATE SET
-			address = excluded.address,
-			tls_insecure = excluded.tls_insecure,
-			ca_file = excluded.ca_file,
-			cert_file = excluded.cert_file,
-			key_file = excluded.key_file`,
-		row.name, row.address, row.cordoned, row.cordonedReason, row.cordonedAt, row.updatedAt,
-		row.tlsInsecure, row.caFile, row.certFile, row.keyFile,
-	)
-	if err != nil {
-		return fmt.Errorf("store: upsert host: %w", err)
-	}
-	return nil
-}
-
 func (s *sqliteStore) CreateHost(ctx context.Context, host *poolmgrv1alpha1.Host) error {
 	row, err := hostToRow(host)
 	if err != nil {
@@ -862,27 +838,6 @@ func (s *sqliteStore) SetHostCordoned(ctx context.Context, name string, cordoned
 	return s.GetHost(ctx, name)
 }
 
-func (s *sqliteStore) ListCordonedHostNames(ctx context.Context) (map[string]bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT name FROM hosts WHERE cordoned = 1`)
-	if err != nil {
-		return nil, fmt.Errorf("store: query cordoned hosts: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	cordoned := make(map[string]bool)
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, fmt.Errorf("store: scan cordoned host: %w", err)
-		}
-		cordoned[name] = true
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: iterate cordoned hosts: %w", err)
-	}
-	return cordoned, nil
-}
-
 func (s *sqliteStore) ReservePlacement(ctx context.Context, id, host, poolName, poolNamespace string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -894,11 +849,14 @@ func (s *sqliteStore) ReservePlacement(ctx context.Context, id, host, poolName, 
 	// single connection (see Open), so SetHostCordoned's UPDATE can't land
 	// between them: either it committed first and this returns
 	// ErrHostCordoned, or it waits and then sees the reservation counted.
+	// DeleteHost is serialized the same way: either it committed first and
+	// this returns ErrHostNotRegistered, or it sees the reservation and
+	// refuses.
 	var cordoned bool
 	err = tx.QueryRowContext(ctx, `SELECT cordoned FROM hosts WHERE name = ?`, host).Scan(&cordoned)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		// Unregistered host: can't be cordoned, so nothing to refuse.
+		return ErrHostNotRegistered
 	case err != nil:
 		return fmt.Errorf("store: select host cordoned: %w", err)
 	case cordoned:

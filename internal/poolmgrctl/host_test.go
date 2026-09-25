@@ -76,8 +76,8 @@ func withTestHostAdminClient(conn *grpc.ClientConn) context.Context {
 func seedHost(t *testing.T, st store.Store, name string) {
 	t.Helper()
 	host := &poolmgrv1alpha1.Host{Name: name, Address: name + ":8443", UpdatedAt: timestamppb.New(time.Now())}
-	if err := st.UpsertHostIfMissing(context.Background(), host); err != nil {
-		t.Fatalf("UpsertHostIfMissing(%q): %v", name, err)
+	if err := st.CreateHost(context.Background(), host); err != nil {
+		t.Fatalf("CreateHost(%q): %v", name, err)
 	}
 }
 

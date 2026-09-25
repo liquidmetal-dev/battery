@@ -18,17 +18,24 @@ var errInjected = errors.New("injected store failure")
 // without a special-purpose fake for each one. cordonHostBeforeReserve, if
 // set, cordons that host immediately before delegating ReservePlacement:
 // the narrowest reproduction of CordonHost landing after PickHost chose it.
+// removeHostBeforeReserve does the same with DeleteHost, for RemoveHost.
 type failingStore struct {
 	store.Store
 
 	failCreateVM            bool
 	failUpdateVMPhase       *poolmgrv1alpha1.VMPhase
 	cordonHostBeforeReserve string
+	removeHostBeforeReserve string
 }
 
 func (f *failingStore) ReservePlacement(ctx context.Context, id, host, poolName, poolNamespace string) error {
 	if f.cordonHostBeforeReserve != "" {
 		if _, err := f.SetHostCordoned(ctx, f.cordonHostBeforeReserve, true, "cordoned mid-provision"); err != nil {
+			return err
+		}
+	}
+	if f.removeHostBeforeReserve != "" {
+		if err := f.DeleteHost(ctx, f.removeHostBeforeReserve); err != nil {
 			return err
 		}
 	}

@@ -13,7 +13,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection/grpc_reflection_v1"
-	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	"github.com/liquidmetal-dev/battery/internal/config"
@@ -205,102 +205,15 @@ func TestSweeperRun_ShutsDownOnContextCancel(t *testing.T) {
 	}
 }
 
-func TestSeedHosts(t *testing.T) {
-	st := openTestStore(t)
-	cfg := &config.Config{Hosts: []config.HostConfig{
-		{Name: "host-a", Address: "10.0.0.1:8443"},
-		{Name: "host-b", Address: "10.0.0.2:8443"},
-	}}
-
-	if err := seedHosts(context.Background(), st, cfg); err != nil {
-		t.Fatalf("seedHosts: %v", err)
-	}
-
-	hosts, err := st.ListHosts(context.Background())
-	if err != nil {
-		t.Fatalf("ListHosts: %v", err)
-	}
-	if len(hosts) != 2 || hosts[0].GetName() != "host-a" || hosts[1].GetName() != "host-b" {
-		t.Fatalf("ListHosts() = %+v, want [host-a, host-b]", hosts)
-	}
-}
-
-// TestSeedHosts_PersistsTLS: each host's TLS settings reach the store, and a
-// re-seed refreshes them (as it does the address) without touching cordon
-// state.
-func TestSeedHosts_PersistsTLS(t *testing.T) {
-	ctx := context.Background()
-	st := openTestStore(t)
-	cfg := &config.Config{Hosts: []config.HostConfig{{
-		Name:    "host-a",
-		Address: "10.0.0.1:8443",
-		TLS:     config.TLSConfig{CAFile: "/etc/ca.pem", CertFile: "/etc/cert.pem", KeyFile: "/etc/key.pem"},
-	}}}
-
-	if err := seedHosts(ctx, st, cfg); err != nil {
-		t.Fatalf("seedHosts: %v", err)
-	}
-	host, err := st.GetHost(ctx, "host-a")
-	if err != nil {
-		t.Fatalf("GetHost: %v", err)
-	}
-	want := &poolmgrv1alpha1.HostTLS{CaFile: "/etc/ca.pem", CertFile: "/etc/cert.pem", KeyFile: "/etc/key.pem"}
-	if !proto.Equal(host.GetTls(), want) {
-		t.Errorf("GetHost() tls = %v, want %v", host.GetTls(), want)
-	}
-
-	if _, err := st.SetHostCordoned(ctx, "host-a", true, "maintenance"); err != nil {
-		t.Fatalf("SetHostCordoned: %v", err)
-	}
-	cfg.Hosts[0].TLS = config.TLSConfig{Insecure: true}
-	if err := seedHosts(ctx, st, cfg); err != nil {
-		t.Fatalf("seedHosts (second call): %v", err)
-	}
-	host, err = st.GetHost(ctx, "host-a")
-	if err != nil {
-		t.Fatalf("GetHost: %v", err)
-	}
-	want = &poolmgrv1alpha1.HostTLS{Insecure: true}
-	if !proto.Equal(host.GetTls(), want) {
-		t.Errorf("GetHost() tls after re-seed = %v, want %v", host.GetTls(), want)
-	}
-	if !host.GetCordoned() {
-		t.Errorf("GetHost() cordoned = false after re-seed, want true (cordon state preserved)")
-	}
-}
-
-func TestSeedHosts_PreservesExistingCordonState(t *testing.T) {
-	st := openTestStore(t)
-	cfg := &config.Config{Hosts: []config.HostConfig{{Name: "host-a", Address: "10.0.0.1:8443"}}}
-
-	if err := seedHosts(context.Background(), st, cfg); err != nil {
-		t.Fatalf("seedHosts: %v", err)
-	}
-	if _, err := st.SetHostCordoned(context.Background(), "host-a", true, "maintenance"); err != nil {
-		t.Fatalf("SetHostCordoned: %v", err)
-	}
-
-	// Simulates a poolmgrd restart: seedHosts runs again against the same
-	// (now non-empty) store.
-	if err := seedHosts(context.Background(), st, cfg); err != nil {
-		t.Fatalf("seedHosts (second call): %v", err)
-	}
-
-	host, err := st.GetHost(context.Background(), "host-a")
-	if err != nil {
-		t.Fatalf("GetHost: %v", err)
-	}
-	if !host.GetCordoned() {
-		t.Errorf("GetHost() cordoned = false after re-seed, want true (cordon state preserved)")
-	}
-}
-
 // TestClearStalePlacements: a placement reservation left in the store by a
 // previous process (it died mid-Provision) must not survive startup, or the
 // host's VM count would stay inflated until someone noticed.
 func TestClearStalePlacements(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()
+	if err := st.CreateHost(ctx, &poolmgrv1alpha1.Host{Name: "host-a", Address: "10.0.0.1:9090", UpdatedAt: timestamppb.Now()}); err != nil {
+		t.Fatalf("CreateHost: %v", err)
+	}
 	if err := st.ReservePlacement(ctx, "stale-1", "host-a", "pool-a", "default"); err != nil {
 		t.Fatalf("ReservePlacement: %v", err)
 	}
