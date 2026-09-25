@@ -307,12 +307,12 @@ func TestPrintClaimJSON_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestPrintHostTable_NoFabricatedActiveVMsColumn locks in the fix for a
+// TestPrintHostTable_NoFabricatedVMsColumn locks in the fix for a
 // reported issue: printHost (used for DrainHost/UndrainHost responses,
-// which carry no VM count) must not render an ACTIVE_VMS column, since any
+// which carry no VM count) must not render a VMS column, since any
 // value there would be a fabricated zero rather than the host's real
 // workload.
-func TestPrintHostTable_NoFabricatedActiveVMsColumn(t *testing.T) {
+func TestPrintHostTable_NoFabricatedVMsColumn(t *testing.T) {
 	host := &poolmgrv1alpha1.Host{Name: "host-a", Address: "host-a.example.com:8443", Drained: true}
 
 	var buf bytes.Buffer
@@ -326,8 +326,33 @@ func TestPrintHostTable_NoFabricatedActiveVMsColumn(t *testing.T) {
 			t.Errorf("printHost() table output missing %q, got:\n%s", want, out)
 		}
 	}
+	if strings.Contains(out, "VMS") {
+		t.Errorf("printHost() table output contains a VMS column, want none (no count is available from Drain/UndrainHost), got:\n%s", out)
+	}
+}
+
+// TestPrintHostStatusesTable_VMSColumn: host list shows the count under a
+// plain VMS heading, since it now includes every VM still on the host (in
+// any phase) plus in-flight placements, not just "active" ones.
+func TestPrintHostStatusesTable_VMSColumn(t *testing.T) {
+	hosts := []*poolmgrv1alpha1.HostStatus{{
+		Host:    &poolmgrv1alpha1.Host{Name: "host-a", Address: "host-a.example.com:8443", Drained: true},
+		VmCount: 3,
+	}}
+
+	var buf bytes.Buffer
+	if err := printHostStatuses(&buf, hosts, OutputTable); err != nil {
+		t.Fatalf("printHostStatuses() error = %v", err)
+	}
+
+	out := buf.String()
+	for _, want := range []string{"NAME", "ADDRESS", "DRAINED", "VMS", "host-a", "true", "3"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("printHostStatuses() table output missing %q, got:\n%s", want, out)
+		}
+	}
 	if strings.Contains(out, "ACTIVE_VMS") {
-		t.Errorf("printHost() table output contains ACTIVE_VMS, want none (no count is available from Drain/UndrainHost), got:\n%s", out)
+		t.Errorf("printHostStatuses() table output still uses ACTIVE_VMS heading, got:\n%s", out)
 	}
 }
 

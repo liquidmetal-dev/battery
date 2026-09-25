@@ -59,3 +59,19 @@ CREATE TABLE IF NOT EXISTS hosts (
     drained_at     INTEGER,
     updated_at     INTEGER NOT NULL
 );
+
+-- placements are in-flight VM placement reservations. Provision inserts one
+-- for the host it picked, in the same transaction as a check that the host is
+-- not drained, before it asks flintlock to create the microvm; the row is
+-- deleted once the vms row exists (or the attempt fails). Rows still present
+-- at poolmgrd startup are stale (nothing can be in flight then) and are
+-- removed by ClearPlacements.
+CREATE TABLE IF NOT EXISTS placements (
+    id             TEXT PRIMARY KEY,
+    host           TEXT NOT NULL,
+    pool_name      TEXT NOT NULL,
+    pool_namespace TEXT NOT NULL,
+    created_at     INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_placements_host ON placements (host);

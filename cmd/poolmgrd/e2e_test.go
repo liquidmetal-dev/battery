@@ -407,8 +407,8 @@ func TestE2E_HostDrain(t *testing.T) {
 		if hs.GetHost().GetDrained() {
 			t.Errorf("ListHosts: host-a still reported drained after UndrainHost")
 		}
-		if hs.GetActiveVmCount() != 1 {
-			t.Errorf("ListHosts: host-a active_vm_count = %d, want 1", hs.GetActiveVmCount())
+		if hs.GetVmCount() != 1 {
+			t.Errorf("ListHosts: host-a vm_count = %d, want 1", hs.GetVmCount())
 		}
 	}
 	if !found {

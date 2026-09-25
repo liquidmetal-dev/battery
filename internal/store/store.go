@@ -23,6 +23,10 @@ var ErrNoAvailableVM = errors.New("store: no available vm in pool")
 // expiry was extended (by a Heartbeat) since the caller last observed it.
 var ErrLeaseNotExpired = errors.New("store: lease not expired")
 
+// ErrHostDrained is returned by ReservePlacement when the host was drained
+// at the moment the reservation was attempted.
+var ErrHostDrained = errors.New("store: host is drained")
+
 // Store is the repository interface for pool manager persistence.
 type Store interface {
 	CreatePool(ctx context.Context, p *poolmgrv1alpha1.PoolSpec) error
@@ -84,9 +88,24 @@ type Store interface {
 	// ListDrainedHostNames returns the set of currently-drained host names, for PickHost's
 	// placement filter.
 	ListDrainedHostNames(ctx context.Context) (map[string]bool, error)
-	// CountActiveVMsByHost returns the count of non-terminal (not DELETING/FAILED) VMs
-	// currently placed on host name, across all pools.
-	CountActiveVMsByHost(ctx context.Context, name string) (int32, error)
+	// ReservePlacement records that a VM with the given id is about to be created on host
+	// for pool (poolName, poolNamespace), in the same transaction as a check that host is
+	// not drained. Returns ErrHostDrained if it is, in which case nothing is recorded and
+	// the caller must not create the VM there. A host with no registry row is treated as
+	// not drained (DrainHost refuses unregistered hosts, so it can never be). The
+	// reservation counts toward CountVMsByHost until ReleasePlacement(id).
+	ReservePlacement(ctx context.Context, id, host, poolName, poolNamespace string) error
+	// ReleasePlacement removes the reservation for id. Idempotent: releasing an id that
+	// doesn't exist is not an error.
+	ReleasePlacement(ctx context.Context, id string) error
+	// ClearPlacements removes every reservation. Called once at poolmgrd startup: nothing
+	// can be in flight then, so any surviving row was left behind by a crash.
+	ClearPlacements(ctx context.Context) error
+	// CountVMsByHost returns the number of VM records placed on host name in any phase
+	// (including DELETING, QUARANTINED and FAILED, all of which may still exist on the host)
+	// plus in-flight placement reservations for it, across all pools. A drained host whose
+	// count is 0 has nothing left on it and nothing on the way, so it is safe to take down.
+	CountVMsByHost(ctx context.Context, name string) (int32, error)
 
 	Close() error
 }

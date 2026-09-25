@@ -43,6 +43,10 @@ type fakeMicroVM struct {
 	// flintlockclient.MinFlintlockVersion.
 	serverVersion string
 
+	// onCreate, if set, runs inside CreateMicroVM before it returns, so a
+	// test can observe state while the provisioner is blocked in the call.
+	onCreate func()
+
 	mu       sync.Mutex
 	getCalls map[string]int
 	deleted  []string
@@ -70,6 +74,10 @@ func (f *fakeMicroVM) CreateMicroVM(_ context.Context, req *microvmv1alpha1.Crea
 	f.mu.Lock()
 	f.created = append(f.created, spec)
 	f.mu.Unlock()
+
+	if f.onCreate != nil {
+		f.onCreate()
+	}
 
 	return &microvmv1alpha1.CreateMicroVMResponse{
 		Microvm: &flintlocktypes.MicroVM{

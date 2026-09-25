@@ -85,6 +85,9 @@ func main() {
 	if err := seedHosts(ctx, st, cfg); err != nil {
 		fatal("poolmgrd: seed hosts", err)
 	}
+	if err := clearStalePlacements(ctx, st); err != nil {
+		fatal("poolmgrd: clear stale placements", err)
+	}
 
 	flint, err := flintlockclient.New(cfg)
 	if err != nil {
@@ -182,6 +185,18 @@ func seedHosts(ctx context.Context, st store.Store, cfg *config.Config) error {
 		if err := st.UpsertHostIfMissing(ctx, host); err != nil {
 			return fmt.Errorf("seed host %q: %w", h.Name, err)
 		}
+	}
+	return nil
+}
+
+// clearStalePlacements drops every placement reservation in st. poolmgrd is
+// a single process and no reconciler has started yet, so nothing can be in
+// flight: any row still present was left by a previous process that died
+// mid-Provision, and would otherwise inflate its host's VM count until
+// someone noticed.
+func clearStalePlacements(ctx context.Context, st store.Store) error {
+	if err := st.ClearPlacements(ctx); err != nil {
+		return fmt.Errorf("clear stale placements: %w", err)
 	}
 	return nil
 }

@@ -109,10 +109,44 @@ func TestListHosts(t *testing.T) {
 	if len(resp.GetHosts()) != 2 {
 		t.Fatalf("ListHosts() = %d hosts, want 2", len(resp.GetHosts()))
 	}
-	if resp.GetHosts()[0].GetHost().GetName() != "host-a" || resp.GetHosts()[0].GetActiveVmCount() != 0 {
-		t.Errorf("ListHosts()[0] = %+v, want host-a with 0 active VMs", resp.GetHosts()[0])
+	if resp.GetHosts()[0].GetHost().GetName() != "host-a" || resp.GetHosts()[0].GetVmCount() != 0 {
+		t.Errorf("ListHosts()[0] = %+v, want host-a with 0 VMs", resp.GetHosts()[0])
 	}
 	if !resp.GetHosts()[1].GetHost().GetDrained() {
 		t.Errorf("ListHosts()[1] = %+v, want host-b drained", resp.GetHosts()[1])
+	}
+}
+
+// TestListHosts_VmCountIncludesDeletingAndReservations: vm_count is what an
+// operator reads to decide when a drained host is empty, so it must include
+// VMs whose deletion is still pending or that are quarantined (both still
+// exist on the host) and placements that are reserved but not yet recorded.
+func TestListHosts_VmCountIncludesDeletingAndReservations(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	seedTestHost(ctx, t, st, "host-a")
+
+	deleting := sampleAvailableVM("vm-deleting", "pool-a")
+	deleting.Phase = poolmgrv1alpha1.VMPhase_DELETING
+	quarantined := sampleAvailableVM("vm-quarantined", "pool-a")
+	quarantined.Phase = poolmgrv1alpha1.VMPhase_QUARANTINED
+	for _, vm := range []*poolmgrv1alpha1.VMRecord{deleting, quarantined} {
+		if err := st.CreateVM(ctx, vm); err != nil {
+			t.Fatalf("CreateVM(%s) error = %v", vm.GetUid(), err)
+		}
+	}
+	if err := st.ReservePlacement(ctx, "placement-1", "host-a", "pool-a", "default"); err != nil {
+		t.Fatalf("ReservePlacement() error = %v", err)
+	}
+
+	resp, err := api.NewHostAdminServer(st).ListHosts(ctx, &poolmgrv1alpha1.ListHostsRequest{})
+	if err != nil {
+		t.Fatalf("ListHosts() error = %v", err)
+	}
+	if len(resp.GetHosts()) != 1 {
+		t.Fatalf("ListHosts() = %d hosts, want 1", len(resp.GetHosts()))
+	}
+	if got := resp.GetHosts()[0].GetVmCount(); got != 3 {
+		t.Errorf("ListHosts() host-a vm_count = %d, want 3 (DELETING + QUARANTINED + reservation)", got)
 	}
 }

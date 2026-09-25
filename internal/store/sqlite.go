@@ -652,14 +652,64 @@ func (s *sqliteStore) ListDrainedHostNames(ctx context.Context) (map[string]bool
 	return drained, nil
 }
 
-func (s *sqliteStore) CountActiveVMsByHost(ctx context.Context, name string) (int32, error) {
+func (s *sqliteStore) ReservePlacement(ctx context.Context, id, host, poolName, poolNamespace string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin reserve placement tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// The drain check and the insert share one transaction on the store's
+	// single connection (see Open), so SetHostDrained's UPDATE can't land
+	// between them: either it committed first and this returns
+	// ErrHostDrained, or it waits and then sees the reservation counted.
+	var drained bool
+	err = tx.QueryRowContext(ctx, `SELECT drained FROM hosts WHERE name = ?`, host).Scan(&drained)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// Unregistered host: can't be drained, so nothing to refuse.
+	case err != nil:
+		return fmt.Errorf("store: select host drained: %w", err)
+	case drained:
+		return ErrHostDrained
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO placements (id, host, pool_name, pool_namespace, created_at)
+		VALUES (?, ?, ?, ?, ?)`,
+		id, host, poolName, poolNamespace, time.Now().UnixNano(),
+	); err != nil {
+		return fmt.Errorf("store: insert placement: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit reserve placement tx: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) ReleasePlacement(ctx context.Context, id string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM placements WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("store: release placement: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) ClearPlacements(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM placements`); err != nil {
+		return fmt.Errorf("store: clear placements: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) CountVMsByHost(ctx context.Context, name string) (int32, error) {
 	var count int32
 	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM vms WHERE flintlock_host = ? AND phase NOT IN (?, ?)`,
-		name, int32(poolmgrv1alpha1.VMPhase_DELETING), int32(poolmgrv1alpha1.VMPhase_FAILED),
+		SELECT (SELECT COUNT(*) FROM vms WHERE flintlock_host = ?)
+		     + (SELECT COUNT(*) FROM placements WHERE host = ?)`,
+		name, name,
 	).Scan(&count)
 	if err != nil {
-		return 0, fmt.Errorf("store: count active vms by host: %w", err)
+		return 0, fmt.Errorf("store: count vms by host: %w", err)
 	}
 	return count, nil
 }

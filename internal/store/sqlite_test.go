@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -1241,7 +1243,7 @@ func TestListDrainedHostNames(t *testing.T) {
 	}
 }
 
-func TestCountActiveVMsByHost(t *testing.T) {
+func TestCountVMsByHost(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
@@ -1251,21 +1253,140 @@ func TestCountActiveVMsByHost(t *testing.T) {
 			t.Fatalf("setup error = %v", err)
 		}
 	}
-	vm1 := sampleVMRecord("vm-1", "pool-a", "default", poolmgrv1alpha1.VMPhase_AVAILABLE)
-	vm1.FlintlockHost = "host-a"
-	vm2 := sampleVMRecord("vm-2", "pool-a", "default", poolmgrv1alpha1.VMPhase_LEASED)
-	vm2.FlintlockHost = "host-a"
-	vm3 := sampleVMRecord("vm-3", "pool-a", "default", poolmgrv1alpha1.VMPhase_DELETING)
-	vm3.FlintlockHost = "host-a"
-	must(s.CreateVM(ctx, vm1))
-	must(s.CreateVM(ctx, vm2))
-	must(s.CreateVM(ctx, vm3))
-
-	got, err := s.CountActiveVMsByHost(ctx, "host-a")
-	if err != nil {
-		t.Fatalf("CountActiveVMsByHost() error = %v", err)
+	// Every phase counts: a VM in DELETING or QUARANTINED still exists on the
+	// host, and a maintenance decision has to see it.
+	phases := []poolmgrv1alpha1.VMPhase{
+		poolmgrv1alpha1.VMPhase_AVAILABLE,
+		poolmgrv1alpha1.VMPhase_LEASED,
+		poolmgrv1alpha1.VMPhase_DELETING,
+		poolmgrv1alpha1.VMPhase_QUARANTINED,
+		poolmgrv1alpha1.VMPhase_FAILED,
 	}
-	if got != 2 {
-		t.Errorf("CountActiveVMsByHost() = %d, want 2 (DELETING excluded)", got)
+	for i, phase := range phases {
+		vm := sampleVMRecord(fmt.Sprintf("vm-%d", i), "pool-a", "default", phase)
+		vm.FlintlockHost = "host-a"
+		must(s.CreateVM(ctx, vm))
+	}
+	other := sampleVMRecord("vm-b", "pool-b", "default", poolmgrv1alpha1.VMPhase_AVAILABLE)
+	other.FlintlockHost = "host-b"
+	must(s.CreateVM(ctx, other))
+	must(s.UpsertHostIfMissing(ctx, sampleHost("host-a")))
+	must(s.ReservePlacement(ctx, "placement-1", "host-a", "pool-a", "default"))
+
+	for host, want := range map[string]int32{"host-a": 6, "host-b": 1, "host-c": 0} {
+		got, err := s.CountVMsByHost(ctx, host)
+		if err != nil {
+			t.Fatalf("CountVMsByHost(%q) error = %v", host, err)
+		}
+		if got != want {
+			t.Errorf("CountVMsByHost(%q) = %d, want %d", host, got, want)
+		}
+	}
+}
+
+func TestReservePlacement_DrainedHostFails(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if err := s.UpsertHostIfMissing(ctx, sampleHost("host-a")); err != nil {
+		t.Fatalf("setup error = %v", err)
+	}
+	if _, err := s.SetHostDrained(ctx, "host-a", true, "maintenance"); err != nil {
+		t.Fatalf("SetHostDrained() error = %v", err)
+	}
+
+	err := s.ReservePlacement(ctx, "placement-1", "host-a", "pool-a", "default")
+	if !errors.Is(err, ErrHostDrained) {
+		t.Fatalf("ReservePlacement() on drained host error = %v, want ErrHostDrained", err)
+	}
+	got, err := s.CountVMsByHost(ctx, "host-a")
+	if err != nil {
+		t.Fatalf("CountVMsByHost() error = %v", err)
+	}
+	if got != 0 {
+		t.Errorf("CountVMsByHost() = %d after refused reservation, want 0", got)
+	}
+}
+
+func TestReservePlacement_UnregisteredHostAllowed(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	// DrainHost refuses unregistered hosts, so a host with no registry row
+	// can never be drained and must not block placement.
+	if err := s.ReservePlacement(ctx, "placement-1", "host-unregistered", "pool-a", "default"); err != nil {
+		t.Fatalf("ReservePlacement() on unregistered host error = %v, want nil", err)
+	}
+	got, err := s.CountVMsByHost(ctx, "host-unregistered")
+	if err != nil {
+		t.Fatalf("CountVMsByHost() error = %v", err)
+	}
+	if got != 1 {
+		t.Errorf("CountVMsByHost() = %d, want 1 (the reservation)", got)
+	}
+}
+
+func TestReserveAndReleasePlacement(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if err := s.UpsertHostIfMissing(ctx, sampleHost("host-a")); err != nil {
+		t.Fatalf("setup error = %v", err)
+	}
+	if err := s.ReservePlacement(ctx, "placement-1", "host-a", "pool-a", "default"); err != nil {
+		t.Fatalf("ReservePlacement() error = %v", err)
+	}
+	count := func() int32 {
+		t.Helper()
+		got, err := s.CountVMsByHost(ctx, "host-a")
+		if err != nil {
+			t.Fatalf("CountVMsByHost() error = %v", err)
+		}
+		return got
+	}
+	if got := count(); got != 1 {
+		t.Fatalf("CountVMsByHost() = %d after reserve, want 1", got)
+	}
+
+	if err := s.ReleasePlacement(ctx, "placement-1"); err != nil {
+		t.Fatalf("ReleasePlacement() error = %v", err)
+	}
+	if got := count(); got != 0 {
+		t.Fatalf("CountVMsByHost() = %d after release, want 0", got)
+	}
+	// Releasing again (or releasing an id that never existed) is not an
+	// error: Provision releases on every exit path, including after an
+	// explicit release.
+	if err := s.ReleasePlacement(ctx, "placement-1"); err != nil {
+		t.Fatalf("ReleasePlacement() second call error = %v, want nil", err)
+	}
+}
+
+func TestClearPlacements(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("setup error = %v", err)
+		}
+	}
+	must(s.UpsertHostIfMissing(ctx, sampleHost("host-a")))
+	must(s.UpsertHostIfMissing(ctx, sampleHost("host-b")))
+	must(s.ReservePlacement(ctx, "placement-1", "host-a", "pool-a", "default"))
+	must(s.ReservePlacement(ctx, "placement-2", "host-b", "pool-a", "default"))
+
+	if err := s.ClearPlacements(ctx); err != nil {
+		t.Fatalf("ClearPlacements() error = %v", err)
+	}
+	for _, host := range []string{"host-a", "host-b"} {
+		got, err := s.CountVMsByHost(ctx, host)
+		if err != nil {
+			t.Fatalf("CountVMsByHost(%q) error = %v", host, err)
+		}
+		if got != 0 {
+			t.Errorf("CountVMsByHost(%q) = %d after clear, want 0", host, got)
+		}
 	}
 }

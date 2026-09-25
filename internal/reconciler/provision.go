@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -130,6 +131,46 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 	}
 	log = log.With("flintlock_host", host)
 
+	// The template is one shared spec instantiated for every VM in the
+	// pool, so no single id in it can be right for all of them: flintlockd
+	// rejects an empty one outright ("name is required"), and a fixed
+	// non-empty one would collide the moment the pool held more than one
+	// VM. Provision is what actually creates each VM, so it's the only
+	// place that can give each one its own.
+	//
+	// An 8-character suffix keeps enough entropy to make collisions
+	// practically impossible for any real pool size. The id's length no
+	// longer matters for the guest-agent socket: flintlock v0.15.2+ (see
+	// flintlockclient.MinFlintlockVersion) keys that path by uid alone.
+	id := fmt.Sprintf("%s-%s", pool.GetName(), uuid.NewString()[:8])
+
+	// Reserve the placement before anything else touches the host. The
+	// drained set above is a snapshot: DrainHost can land any time after
+	// it, and without this the VM would still be created on a host the
+	// operator has just been told is safe to take down. ReservePlacement
+	// checks the drain flag and records the placement atomically, and the
+	// reservation counts toward the host's VM total until the vms row
+	// replaces it, so ListHosts never shows 0 while a create is underway.
+	if err := p.store.ReservePlacement(ctx, id, host, pool.GetName(), pool.GetNamespace()); err != nil {
+		if errors.Is(err, store.ErrHostDrained) {
+			log.DebugContext(ctx, "reconciler: host drained after being picked, skipping placement")
+			return fmt.Errorf("%w: host %q drained before placement: %w", ErrNoEligibleHost, host, err)
+		}
+		return fmt.Errorf("reconciler: provision: reserve placement: %w", err)
+	}
+	// Released as soon as the vms row exists (below) or on any earlier
+	// failure. ctx is often already cancelled by the time a failure path
+	// runs (see ApplyHookFailurePolicy), so release on a detached context;
+	// a leaked reservation would inflate the host's count until restart.
+	release := sync.OnceFunc(func() {
+		relCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hookFailureCleanupTimeout)
+		defer cancel()
+		if err := p.store.ReleasePlacement(relCtx, id); err != nil {
+			log.WarnContext(ctx, "reconciler: release placement failed", "placement_id", id, "error", err)
+		}
+	})
+	defer release()
+
 	client, err := p.flint.Client(host)
 	if err != nil {
 		return fmt.Errorf("reconciler: provision: %w", err)
@@ -146,18 +187,7 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 		spec = &flintlocktypes.MicroVMSpec{}
 	}
 	spec.AllowGuestAgent = true
-	// The template is one shared spec instantiated for every VM in the
-	// pool, so no single id in it can be right for all of them: flintlockd
-	// rejects an empty one outright ("name is required"), and a fixed
-	// non-empty one would collide the moment the pool held more than one
-	// VM. Provision is what actually creates each VM, so it's the only
-	// place that can give each one its own.
-	//
-	// An 8-character suffix keeps enough entropy to make collisions
-	// practically impossible for any real pool size. The id's length no
-	// longer matters for the guest-agent socket: flintlock v0.15.2+ (see
-	// flintlockclient.MinFlintlockVersion) keys that path by uid alone.
-	spec.Id = fmt.Sprintf("%s-%s", pool.GetName(), uuid.NewString()[:8])
+	spec.Id = id
 	if spec.Namespace == "" {
 		spec.Namespace = pool.GetNamespace()
 	}
@@ -193,6 +223,10 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 		_, _ = client.DeleteMicroVM(ctx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: uid})
 		return fmt.Errorf("reconciler: provision: CreateVM: %w", err)
 	}
+	// The vms row now stands in for the reservation; release it here rather
+	// than at return so the host isn't counted twice for the rest of the
+	// (possibly minutes-long) hook phase.
+	release()
 	EmitEvent(ctx, p.store, pool, uid, poolmgrv1alpha1.EventType_VM_PROVISIONED)
 
 	if err := p.waitCreated(ctx, log, client, uid); err != nil {

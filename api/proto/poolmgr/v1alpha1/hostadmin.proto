@@ -28,13 +28,16 @@ message UndrainHostRequest {
 
 message ListHostsRequest {}
 
-// HostStatus pairs a host's registry record with its current live VM count.
+// HostStatus pairs a host's registry record with everything still counted against it.
 message HostStatus {
   Host host = 1;
 
-  // ActiveVmCount is the number of non-terminal (not DELETING/FAILED) VMs currently placed
-  // on this host, across all pools.
-  int32 active_vm_count = 2;
+  // VmCount is the number of VM records placed on this host in any phase (including
+  // DELETING, QUARANTINED and FAILED, all of which may still exist on the host) plus
+  // in-flight placements that have been reserved but not yet recorded, across all pools.
+  // Maintenance is safe once the host is drained and this reaches 0: nothing remains on
+  // it and nothing more can be placed there.
+  int32 vm_count = 2;
 }
 
 message ListHostsResponse {

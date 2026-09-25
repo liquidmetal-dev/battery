@@ -61,8 +61,9 @@ func (s *HostAdminServer) UndrainHost(ctx context.Context, req *poolmgrv1alpha1.
 	return host, nil
 }
 
-// ListHosts returns every registered host, each with its current active
-// (non-terminal) VM count across all pools.
+// ListHosts returns every registered host, each with the number of VM
+// records in any phase plus in-flight placements still counted against it,
+// across all pools. A drained host at 0 is safe to take down.
 func (s *HostAdminServer) ListHosts(ctx context.Context, _ *poolmgrv1alpha1.ListHostsRequest) (*poolmgrv1alpha1.ListHostsResponse, error) {
 	hosts, err := s.store.ListHosts(ctx)
 	if err != nil {
@@ -71,11 +72,11 @@ func (s *HostAdminServer) ListHosts(ctx context.Context, _ *poolmgrv1alpha1.List
 
 	resp := &poolmgrv1alpha1.ListHostsResponse{}
 	for _, h := range hosts {
-		count, err := s.store.CountActiveVMsByHost(ctx, h.GetName())
+		count, err := s.store.CountVMsByHost(ctx, h.GetName())
 		if err != nil {
-			return nil, status.Errorf(codes.Internal, "count active vms for host %q: %v", h.GetName(), err)
+			return nil, status.Errorf(codes.Internal, "count vms for host %q: %v", h.GetName(), err)
 		}
-		resp.Hosts = append(resp.Hosts, &poolmgrv1alpha1.HostStatus{Host: h, ActiveVmCount: count})
+		resp.Hosts = append(resp.Hosts, &poolmgrv1alpha1.HostStatus{Host: h, VmCount: count})
 	}
 	return resp, nil
 }

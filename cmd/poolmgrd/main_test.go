@@ -249,6 +249,29 @@ func TestSeedHosts_PreservesExistingDrainState(t *testing.T) {
 	}
 }
 
+// TestClearStalePlacements: a placement reservation left in the store by a
+// previous process (it died mid-Provision) must not survive startup, or the
+// host's VM count would stay inflated until someone noticed.
+func TestClearStalePlacements(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	if err := st.ReservePlacement(ctx, "stale-1", "host-a", "pool-a", "default"); err != nil {
+		t.Fatalf("ReservePlacement: %v", err)
+	}
+
+	if err := clearStalePlacements(ctx, st); err != nil {
+		t.Fatalf("clearStalePlacements: %v", err)
+	}
+
+	got, err := st.CountVMsByHost(ctx, "host-a")
+	if err != nil {
+		t.Fatalf("CountVMsByHost: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("CountVMsByHost(host-a) = %d after clearStalePlacements, want 0", got)
+	}
+}
+
 func TestBuildGRPCServer_InvalidConfig_ReturnsError(t *testing.T) {
 	st := openTestStore(t)
 	reg := metrics.NewRegistry()

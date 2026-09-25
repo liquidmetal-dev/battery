@@ -1,6 +1,7 @@
 package reconciler_test
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -60,5 +61,14 @@ func sampleVM(uid, poolName, host string, phase poolmgrv1alpha1.VMPhase) *poolmg
 		Phase:         phase,
 		CreatedAt:     now,
 		UpdatedAt:     now,
+	}
+}
+
+// seedHost registers name in st's host registry so it can be drained.
+func seedHost(t *testing.T, st store.Store, name string) {
+	t.Helper()
+	host := &poolmgrv1alpha1.Host{Name: name, Address: name + ":8443", UpdatedAt: timestamppb.Now()}
+	if err := st.UpsertHostIfMissing(context.Background(), host); err != nil {
+		t.Fatalf("UpsertHostIfMissing(%q): %v", name, err)
 	}
 }

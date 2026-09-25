@@ -246,7 +246,7 @@ func printClaimTable(w io.Writer, resp *poolmgrv1alpha1.ClaimVMResponse) error {
 
 // printHost renders a single Host to w in the given format. Used for
 // DrainHost/UndrainHost responses, which carry no VM count - unlike
-// printHostStatuses, its table has no ACTIVE_VMS column, so it never
+// printHostStatuses, its table has no VMS column, so it never
 // fabricates a count that wasn't returned by the RPC.
 func printHost(w io.Writer, host *poolmgrv1alpha1.Host, format OutputFormat) error {
 	switch format {
@@ -321,13 +321,13 @@ func printHostStatusesJSON(w io.Writer, hosts []*poolmgrv1alpha1.HostStatus) err
 
 func printHostStatusesTable(w io.Writer, hosts []*poolmgrv1alpha1.HostStatus) error {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "NAME\tADDRESS\tDRAINED\tACTIVE_VMS"); err != nil {
+	if _, err := fmt.Fprintln(tw, "NAME\tADDRESS\tDRAINED\tVMS"); err != nil {
 		return err
 	}
 	for _, hs := range hosts {
 		host := hs.GetHost()
 		if _, err := fmt.Fprintf(tw, "%s\t%s\t%t\t%d\n",
-			host.GetName(), host.GetAddress(), host.GetDrained(), hs.GetActiveVmCount()); err != nil {
+			host.GetName(), host.GetAddress(), host.GetDrained(), hs.GetVmCount()); err != nil {
 			return err
 		}
 	}

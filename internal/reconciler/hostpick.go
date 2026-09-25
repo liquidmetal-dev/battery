@@ -12,6 +12,9 @@ import (
 
 // ErrNoEligibleHost is returned by PickHost when a pool has no flintlock
 // hosts configured, or every host configured for it is currently drained.
+// Provision also wraps it when the host PickHost chose was drained before
+// the placement could be reserved. Either way the reconciler treats it as
+// an expected maintenance-time condition rather than a provision failure.
 var ErrNoEligibleHost = errors.New("reconciler: pool has no eligible flintlock hosts")
 
 // PickHost returns the host from pool.FlintlockHosts, excluding any name

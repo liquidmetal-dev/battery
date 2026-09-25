@@ -88,7 +88,7 @@ func newHostListCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List registered hosts, their drain state, and active VM counts",
+		Short: "List registered hosts, their drain state, and how many VMs are still counted against each",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			format, err := parseOutputFormat(output)
 			if err != nil {
