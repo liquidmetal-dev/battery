@@ -31,6 +31,10 @@ var ErrDuplicateRequestID = errors.New("store: duplicate lease request id")
 // at the moment the reservation was attempted.
 var ErrHostCordoned = errors.New("store: host is cordoned")
 
+// ErrHostExists is returned by CreateHost when a host with the same name is
+// already registered.
+var ErrHostExists = errors.New("store: host already exists")
+
 // Store is the repository interface for pool manager persistence.
 type Store interface {
 	CreatePool(ctx context.Context, p *poolmgrv1alpha1.PoolSpec) error
@@ -86,10 +90,22 @@ type Store interface {
 	ListVMsByPhase(ctx context.Context, phase poolmgrv1alpha1.VMPhase) ([]*poolmgrv1alpha1.VMRecord, error)
 
 	// UpsertHostIfMissing inserts a row for host if none exists for its name; otherwise it
-	// refreshes the stored address to host.Address (so a host's address in the static config
-	// file is kept current across restarts) while leaving its cordon state untouched. Used to
-	// seed the host registry from static config at startup without clobbering cordon state.
+	// refreshes the stored address and TLS settings to host's (so a host's connection details
+	// in the static config file are kept current across restarts) while leaving its cordon
+	// state untouched. Used to seed the host registry from static config at startup without
+	// clobbering cordon state.
 	UpsertHostIfMissing(ctx context.Context, host *poolmgrv1alpha1.Host) error
+	// CreateHost stores host as given, including its cordon fields. Returns ErrHostExists if
+	// a host with the same name is already registered.
+	CreateHost(ctx context.Context, host *poolmgrv1alpha1.Host) error
+	// UpdateHost replaces the address and TLS settings of the host named host.Name, stamps
+	// its updated_at with the current time, and returns the updated host. Cordon fields and
+	// host.UpdatedAt are ignored: SetHostCordoned owns cordon state. Returns ErrNotFound if
+	// no such host is registered.
+	UpdateHost(ctx context.Context, host *poolmgrv1alpha1.Host) (*poolmgrv1alpha1.Host, error)
+	// DeleteHost removes host name's registry row. Returns ErrNotFound if no such host is
+	// registered.
+	DeleteHost(ctx context.Context, name string) error
 	GetHost(ctx context.Context, name string) (*poolmgrv1alpha1.Host, error)
 	ListHosts(ctx context.Context) ([]*poolmgrv1alpha1.Host, error)
 	// SetHostCordoned sets host name's cordoned state and reason, returning the updated host.

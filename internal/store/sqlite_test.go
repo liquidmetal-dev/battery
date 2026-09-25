@@ -1072,6 +1072,148 @@ func sampleHost(name string) *poolmgrv1alpha1.Host {
 		Name:      name,
 		Address:   name + ".example.com:8443",
 		UpdatedAt: now,
+		Tls: &poolmgrv1alpha1.HostTLS{
+			CaFile:   "/etc/poolmgr/" + name + "/ca.pem",
+			CertFile: "/etc/poolmgr/" + name + "/cert.pem",
+			KeyFile:  "/etc/poolmgr/" + name + "/key.pem",
+		},
+	}
+}
+
+func TestCreateHost(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	want := sampleHost("host-a")
+	if err := s.CreateHost(ctx, want); err != nil {
+		t.Fatalf("CreateHost() error = %v", err)
+	}
+
+	got, err := s.GetHost(ctx, "host-a")
+	if err != nil {
+		t.Fatalf("GetHost() error = %v", err)
+	}
+	if !proto.Equal(got, want) {
+		t.Errorf("GetHost() = %+v, want %+v", got, want)
+	}
+
+	list, err := s.ListHosts(ctx)
+	if err != nil {
+		t.Fatalf("ListHosts() error = %v", err)
+	}
+	if len(list) != 1 || !proto.Equal(list[0], want) {
+		t.Errorf("ListHosts() = %+v, want [%+v]", list, want)
+	}
+}
+
+func TestCreateHostWithoutTLSReadsBackEmptyTLS(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	h := sampleHost("host-a")
+	h.Tls = nil
+	if err := s.CreateHost(ctx, h); err != nil {
+		t.Fatalf("CreateHost() error = %v", err)
+	}
+
+	got, err := s.GetHost(ctx, "host-a")
+	if err != nil {
+		t.Fatalf("GetHost() error = %v", err)
+	}
+	if got.GetTls() == nil || !proto.Equal(got.GetTls(), &poolmgrv1alpha1.HostTLS{}) {
+		t.Errorf("GetHost() tls = %v, want a set, empty HostTLS", got.GetTls())
+	}
+}
+
+func TestCreateHostDuplicate(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if err := s.CreateHost(ctx, sampleHost("host-a")); err != nil {
+		t.Fatalf("CreateHost() error = %v", err)
+	}
+	dup := sampleHost("host-a")
+	dup.Address = "other:8443"
+	if err := s.CreateHost(ctx, dup); !errors.Is(err, ErrHostExists) {
+		t.Fatalf("CreateHost() duplicate error = %v, want ErrHostExists", err)
+	}
+
+	got, err := s.GetHost(ctx, "host-a")
+	if err != nil {
+		t.Fatalf("GetHost() error = %v", err)
+	}
+	if got.GetAddress() != "host-a.example.com:8443" {
+		t.Errorf("GetHost() address = %q after rejected duplicate, want the original", got.GetAddress())
+	}
+}
+
+func TestUpdateHost(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if err := s.CreateHost(ctx, sampleHost("host-a")); err != nil {
+		t.Fatalf("CreateHost() error = %v", err)
+	}
+	cordoned, err := s.SetHostCordoned(ctx, "host-a", true, "maintenance")
+	if err != nil {
+		t.Fatalf("SetHostCordoned() error = %v", err)
+	}
+
+	// Cordon fields and updated_at on the request are ignored.
+	update := &poolmgrv1alpha1.Host{
+		Name:      "host-a",
+		Address:   "new:8443",
+		Tls:       &poolmgrv1alpha1.HostTLS{Insecure: true},
+		UpdatedAt: timestamppb.New(time.Unix(1, 0)),
+	}
+	got, err := s.UpdateHost(ctx, update)
+	if err != nil {
+		t.Fatalf("UpdateHost() error = %v", err)
+	}
+	if got.GetAddress() != "new:8443" || !proto.Equal(got.GetTls(), update.GetTls()) {
+		t.Errorf("UpdateHost() = %+v, want address %q and tls %v", got, "new:8443", update.GetTls())
+	}
+	if !got.GetCordoned() || got.GetCordonedReason() != "maintenance" ||
+		!proto.Equal(got.GetCordonedAt(), cordoned.GetCordonedAt()) {
+		t.Errorf("UpdateHost() = %+v, want cordon state preserved from %+v", got, cordoned)
+	}
+	if got.GetUpdatedAt().AsTime().Before(cordoned.GetUpdatedAt().AsTime()) {
+		t.Errorf("UpdateHost() updated_at = %v, want at or after %v", got.GetUpdatedAt().AsTime(), cordoned.GetUpdatedAt().AsTime())
+	}
+
+	stored, err := s.GetHost(ctx, "host-a")
+	if err != nil {
+		t.Fatalf("GetHost() error = %v", err)
+	}
+	if !proto.Equal(stored, got) {
+		t.Errorf("GetHost() = %+v, want what UpdateHost returned %+v", stored, got)
+	}
+}
+
+func TestUpdateHostNotFound(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.UpdateHost(ctx, sampleHost("missing")); !errors.Is(err, ErrNotFound) {
+		t.Errorf("UpdateHost() error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestDeleteHost(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if err := s.CreateHost(ctx, sampleHost("host-a")); err != nil {
+		t.Fatalf("CreateHost() error = %v", err)
+	}
+	if err := s.DeleteHost(ctx, "host-a"); err != nil {
+		t.Fatalf("DeleteHost() error = %v", err)
+	}
+	if _, err := s.GetHost(ctx, "host-a"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetHost() after delete error = %v, want ErrNotFound", err)
+	}
+	if err := s.DeleteHost(ctx, "host-a"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("DeleteHost() second call error = %v, want ErrNotFound", err)
 	}
 }
 
@@ -1123,6 +1265,7 @@ func TestUpsertHostIfMissingPreservesCordonState(t *testing.T) {
 // host's address changes in static config between poolmgrd restarts, a
 // reseed must pick up the new address (matching what flintlockclient.New
 // actually dials) while still leaving cordon state exactly as it found it.
+// The same holds for the host's TLS settings.
 func TestUpsertHostIfMissingRefreshesAddress(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -1138,6 +1281,7 @@ func TestUpsertHostIfMissingRefreshesAddress(t *testing.T) {
 
 	reseed := sampleHost("host-a")
 	reseed.Address = "new:8443"
+	reseed.Tls = &poolmgrv1alpha1.HostTLS{Insecure: true}
 	if err := s.UpsertHostIfMissing(ctx, reseed); err != nil {
 		t.Fatalf("UpsertHostIfMissing() reseed error = %v", err)
 	}
@@ -1148,6 +1292,9 @@ func TestUpsertHostIfMissingRefreshesAddress(t *testing.T) {
 	}
 	if got.GetAddress() != "new:8443" {
 		t.Errorf("GetHost() address = %q after reseed, want %q", got.GetAddress(), "new:8443")
+	}
+	if !proto.Equal(got.GetTls(), reseed.GetTls()) {
+		t.Errorf("GetHost() tls = %v after reseed, want %v", got.GetTls(), reseed.GetTls())
 	}
 	if !got.GetCordoned() {
 		t.Errorf("GetHost() cordoned = false after reseed, want true (cordon state preserved)")
@@ -1592,6 +1739,66 @@ func TestOpenUpgradesVersionZeroDB(t *testing.T) {
 	l.LeaseId = "lease-dup"
 	if err := s.CreateLease(ctx, l); !errors.Is(err, ErrDuplicateRequestID) {
 		t.Errorf("CreateLease() duplicate after upgrade error = %v, want ErrDuplicateRequestID", err)
+	}
+}
+
+func TestOpenUpgradesVersionOneDB(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "poolmgr.db")
+
+	// Build a database as a binary with only migration 1 would have: the
+	// six-column hosts table, user_version 1, and a cordoned host row.
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	if _, err := db.Exec(schemaSQL); err != nil {
+		t.Fatalf("apply baseline schema error = %v", err)
+	}
+	if _, err := db.Exec(migrations[0]); err != nil {
+		t.Fatalf("apply migration 1 error = %v", err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 1;`); err != nil {
+		t.Fatalf("set user_version error = %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO hosts (name, address, cordoned, cordoned_reason, cordoned_at, updated_at)
+		VALUES ('host-old', 'old:8443', 1, 'maintenance', 5, 6)`); err != nil {
+		t.Fatalf("insert host error = %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("db.Close() error = %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if got, want := schemaVersion(t, s), len(migrations); got != want {
+		t.Errorf("user_version = %d, want %d", got, want)
+	}
+
+	got, err := s.GetHost(ctx, "host-old")
+	if err != nil {
+		t.Fatalf("GetHost() error = %v", err)
+	}
+	want := &poolmgrv1alpha1.Host{
+		Name:           "host-old",
+		Address:        "old:8443",
+		Cordoned:       true,
+		CordonedReason: "maintenance",
+		CordonedAt:     timestamppb.New(time.Unix(0, 5)),
+		UpdatedAt:      timestamppb.New(time.Unix(0, 6)),
+		Tls:            &poolmgrv1alpha1.HostTLS{},
+	}
+	if !proto.Equal(got, want) {
+		t.Errorf("GetHost() = %+v, want the pre-upgrade row with default TLS %+v", got, want)
+	}
+
+	if err := s.CreateHost(ctx, sampleHost("host-new")); err != nil {
+		t.Fatalf("CreateHost() after upgrade error = %v", err)
 	}
 }
 

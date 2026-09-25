@@ -338,7 +338,10 @@ func TestPrintHostTable_NoFabricatedVMsColumn(t *testing.T) {
 // any phase) plus in-flight placements, not just "active" ones.
 func TestPrintHostStatusesTable_VMSColumn(t *testing.T) {
 	hosts := []*poolmgrv1alpha1.HostStatus{{
-		Host:    &poolmgrv1alpha1.Host{Name: "host-a", Address: "host-a.example.com:8443", Cordoned: true},
+		Host: &poolmgrv1alpha1.Host{
+			Name: "host-a", Address: "host-a.example.com:8443", Cordoned: true,
+			Tls: &poolmgrv1alpha1.HostTLS{CaFile: "ca.pem", CertFile: "cert.pem", KeyFile: "key.pem"},
+		},
 		VmCount: 3,
 	}}
 
@@ -348,7 +351,7 @@ func TestPrintHostStatusesTable_VMSColumn(t *testing.T) {
 	}
 
 	out := buf.String()
-	for _, want := range []string{"NAME", "ADDRESS", "CORDONED", "VMS", "host-a", "true", "3"} {
+	for _, want := range []string{"NAME", "ADDRESS", "TLS", "CORDONED", "VMS", "host-a", "mtls", "true", "3"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printHostStatuses() table output missing %q, got:\n%s", want, out)
 		}
@@ -358,8 +361,29 @@ func TestPrintHostStatusesTable_VMSColumn(t *testing.T) {
 	}
 }
 
+func TestHostTLSMode(t *testing.T) {
+	tests := []struct {
+		tls  *poolmgrv1alpha1.HostTLS
+		want string
+	}{
+		{nil, ""},
+		{&poolmgrv1alpha1.HostTLS{}, ""},
+		{&poolmgrv1alpha1.HostTLS{Insecure: true}, "insecure"},
+		{&poolmgrv1alpha1.HostTLS{CaFile: "ca.pem"}, "tls"},
+		{&poolmgrv1alpha1.HostTLS{CaFile: "ca.pem", CertFile: "cert.pem", KeyFile: "key.pem"}, "mtls"},
+	}
+	for _, tt := range tests {
+		if got := hostTLSMode(tt.tls); got != tt.want {
+			t.Errorf("hostTLSMode(%v) = %q, want %q", tt.tls, got, tt.want)
+		}
+	}
+}
+
 func TestPrintHostJSON_RoundTrip(t *testing.T) {
-	host := &poolmgrv1alpha1.Host{Name: "host-a", Address: "host-a.example.com:8443", Cordoned: true, CordonedReason: "maintenance"}
+	host := &poolmgrv1alpha1.Host{
+		Name: "host-a", Address: "host-a.example.com:8443", Cordoned: true, CordonedReason: "maintenance",
+		Tls: &poolmgrv1alpha1.HostTLS{CaFile: "ca.pem"},
+	}
 
 	var buf bytes.Buffer
 	if err := printHost(&buf, host, OutputJSON); err != nil {
