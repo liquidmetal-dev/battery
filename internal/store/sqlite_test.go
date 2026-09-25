@@ -1285,90 +1285,6 @@ func TestDeleteHostRefusesHostInUse(t *testing.T) {
 	}
 }
 
-func TestUpsertHostIfMissing(t *testing.T) {
-	s := openTestStore(t)
-	ctx := context.Background()
-
-	want := sampleHost("host-a")
-	if err := s.UpsertHostIfMissing(ctx, want); err != nil {
-		t.Fatalf("UpsertHostIfMissing() error = %v", err)
-	}
-
-	got, err := s.GetHost(ctx, "host-a")
-	if err != nil {
-		t.Fatalf("GetHost() error = %v", err)
-	}
-	if !proto.Equal(got, want) {
-		t.Errorf("GetHost() = %+v, want %+v", got, want)
-	}
-}
-
-func TestUpsertHostIfMissingPreservesCordonState(t *testing.T) {
-	s := openTestStore(t)
-	ctx := context.Background()
-
-	if err := s.UpsertHostIfMissing(ctx, sampleHost("host-a")); err != nil {
-		t.Fatalf("UpsertHostIfMissing() error = %v", err)
-	}
-	if _, err := s.SetHostCordoned(ctx, "host-a", true, "maintenance"); err != nil {
-		t.Fatalf("SetHostCordoned() error = %v", err)
-	}
-
-	// A second seed attempt (e.g. on process restart) must not clobber the
-	// cordon state set above.
-	if err := s.UpsertHostIfMissing(ctx, sampleHost("host-a")); err != nil {
-		t.Fatalf("UpsertHostIfMissing() second call error = %v", err)
-	}
-
-	got, err := s.GetHost(ctx, "host-a")
-	if err != nil {
-		t.Fatalf("GetHost() error = %v", err)
-	}
-	if !got.GetCordoned() {
-		t.Errorf("GetHost() cordoned = false after re-seed, want true (cordon state preserved)")
-	}
-}
-
-// TestUpsertHostIfMissingRefreshesAddress reproduces a reported issue: if a
-// host's address changes in static config between poolmgrd restarts, a
-// reseed must pick up the new address (matching what flintlockclient.New
-// actually dials) while still leaving cordon state exactly as it found it.
-// The same holds for the host's TLS settings.
-func TestUpsertHostIfMissingRefreshesAddress(t *testing.T) {
-	s := openTestStore(t)
-	ctx := context.Background()
-
-	host := sampleHost("host-a")
-	host.Address = "old:8443"
-	if err := s.UpsertHostIfMissing(ctx, host); err != nil {
-		t.Fatalf("UpsertHostIfMissing() error = %v", err)
-	}
-	if _, err := s.SetHostCordoned(ctx, "host-a", true, "maintenance"); err != nil {
-		t.Fatalf("SetHostCordoned() error = %v", err)
-	}
-
-	reseed := sampleHost("host-a")
-	reseed.Address = "new:8443"
-	reseed.Tls = &poolmgrv1alpha1.HostTLS{Insecure: true}
-	if err := s.UpsertHostIfMissing(ctx, reseed); err != nil {
-		t.Fatalf("UpsertHostIfMissing() reseed error = %v", err)
-	}
-
-	got, err := s.GetHost(ctx, "host-a")
-	if err != nil {
-		t.Fatalf("GetHost() error = %v", err)
-	}
-	if got.GetAddress() != "new:8443" {
-		t.Errorf("GetHost() address = %q after reseed, want %q", got.GetAddress(), "new:8443")
-	}
-	if !proto.Equal(got.GetTls(), reseed.GetTls()) {
-		t.Errorf("GetHost() tls = %v after reseed, want %v", got.GetTls(), reseed.GetTls())
-	}
-	if !got.GetCordoned() {
-		t.Errorf("GetHost() cordoned = false after reseed, want true (cordon state preserved)")
-	}
-}
-
 func TestGetHostNotFound(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -1388,8 +1304,8 @@ func TestListHosts(t *testing.T) {
 			t.Fatalf("setup error = %v", err)
 		}
 	}
-	must(s.UpsertHostIfMissing(ctx, sampleHost("host-b")))
-	must(s.UpsertHostIfMissing(ctx, sampleHost("host-a")))
+	must(s.CreateHost(ctx, sampleHost("host-b")))
+	must(s.CreateHost(ctx, sampleHost("host-a")))
 
 	got, err := s.ListHosts(ctx)
 	if err != nil {
@@ -1404,8 +1320,8 @@ func TestSetHostCordoned(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
-	if err := s.UpsertHostIfMissing(ctx, sampleHost("host-a")); err != nil {
-		t.Fatalf("UpsertHostIfMissing() error = %v", err)
+	if err := s.CreateHost(ctx, sampleHost("host-a")); err != nil {
+		t.Fatalf("CreateHost() error = %v", err)
 	}
 
 	cordoned, err := s.SetHostCordoned(ctx, "host-a", true, "kernel upgrade")
@@ -1431,31 +1347,6 @@ func TestSetHostCordonedNotFound(t *testing.T) {
 
 	if _, err := s.SetHostCordoned(ctx, "missing", true, ""); err != ErrNotFound {
 		t.Errorf("SetHostCordoned() error = %v, want ErrNotFound", err)
-	}
-}
-
-func TestListCordonedHostNames(t *testing.T) {
-	s := openTestStore(t)
-	ctx := context.Background()
-
-	must := func(err error) {
-		t.Helper()
-		if err != nil {
-			t.Fatalf("setup error = %v", err)
-		}
-	}
-	must(s.UpsertHostIfMissing(ctx, sampleHost("host-a")))
-	must(s.UpsertHostIfMissing(ctx, sampleHost("host-b")))
-	if _, err := s.SetHostCordoned(ctx, "host-a", true, ""); err != nil {
-		t.Fatalf("SetHostCordoned() error = %v", err)
-	}
-
-	got, err := s.ListCordonedHostNames(ctx)
-	if err != nil {
-		t.Fatalf("ListCordonedHostNames() error = %v", err)
-	}
-	if len(got) != 1 || !got["host-a"] {
-		t.Fatalf("ListCordonedHostNames() = %v, want {host-a: true}", got)
 	}
 }
 
@@ -1486,7 +1377,7 @@ func TestCountVMsByHost(t *testing.T) {
 	other := sampleVMRecord("vm-b", "pool-b", "default", poolmgrv1alpha1.VMPhase_AVAILABLE)
 	other.FlintlockHost = "host-b"
 	must(s.CreateVM(ctx, other))
-	must(s.UpsertHostIfMissing(ctx, sampleHost("host-a")))
+	must(s.CreateHost(ctx, sampleHost("host-a")))
 	must(s.ReservePlacement(ctx, "placement-1", "host-a", "pool-a", "default"))
 
 	for host, want := range map[string]int32{"host-a": 6, "host-b": 1, "host-c": 0} {
@@ -1504,7 +1395,7 @@ func TestReservePlacement_CordonedHostFails(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
-	if err := s.UpsertHostIfMissing(ctx, sampleHost("host-a")); err != nil {
+	if err := s.CreateHost(ctx, sampleHost("host-a")); err != nil {
 		t.Fatalf("setup error = %v", err)
 	}
 	if _, err := s.SetHostCordoned(ctx, "host-a", true, "maintenance"); err != nil {
@@ -1524,21 +1415,23 @@ func TestReservePlacement_CordonedHostFails(t *testing.T) {
 	}
 }
 
-func TestReservePlacement_UnregisteredHostAllowed(t *testing.T) {
+// TestReservePlacement_UnregisteredHostFails: a host with no registry row,
+// e.g. one RemoveHost deleted after PickHost chose it, must refuse the
+// placement and record nothing.
+func TestReservePlacement_UnregisteredHostFails(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
-	// CordonHost refuses unregistered hosts, so a host with no registry row
-	// can never be cordoned and must not block placement.
-	if err := s.ReservePlacement(ctx, "placement-1", "host-unregistered", "pool-a", "default"); err != nil {
-		t.Fatalf("ReservePlacement() on unregistered host error = %v, want nil", err)
+	err := s.ReservePlacement(ctx, "placement-1", "host-unregistered", "pool-a", "default")
+	if !errors.Is(err, ErrHostNotRegistered) {
+		t.Fatalf("ReservePlacement() on unregistered host error = %v, want ErrHostNotRegistered", err)
 	}
 	got, err := s.CountVMsByHost(ctx, "host-unregistered")
 	if err != nil {
 		t.Fatalf("CountVMsByHost() error = %v", err)
 	}
-	if got != 1 {
-		t.Errorf("CountVMsByHost() = %d, want 1 (the reservation)", got)
+	if got != 0 {
+		t.Errorf("CountVMsByHost() = %d, want 0 (nothing reserved)", got)
 	}
 }
 
@@ -1546,7 +1439,7 @@ func TestReserveAndReleasePlacement(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
-	if err := s.UpsertHostIfMissing(ctx, sampleHost("host-a")); err != nil {
+	if err := s.CreateHost(ctx, sampleHost("host-a")); err != nil {
 		t.Fatalf("setup error = %v", err)
 	}
 	if err := s.ReservePlacement(ctx, "placement-1", "host-a", "pool-a", "default"); err != nil {
@@ -1588,8 +1481,8 @@ func TestClearPlacements(t *testing.T) {
 			t.Fatalf("setup error = %v", err)
 		}
 	}
-	must(s.UpsertHostIfMissing(ctx, sampleHost("host-a")))
-	must(s.UpsertHostIfMissing(ctx, sampleHost("host-b")))
+	must(s.CreateHost(ctx, sampleHost("host-a")))
+	must(s.CreateHost(ctx, sampleHost("host-b")))
 	must(s.ReservePlacement(ctx, "placement-1", "host-a", "pool-a", "default"))
 	must(s.ReservePlacement(ctx, "placement-2", "host-b", "pool-a", "default"))
 

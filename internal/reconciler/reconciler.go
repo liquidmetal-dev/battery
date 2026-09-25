@@ -196,11 +196,13 @@ func (r *Reconciler) provisionN(ctx context.Context, n int) {
 			defer wg.Done()
 			if err := r.provisioner.Provision(ctx, r.pool); err != nil {
 				if errors.Is(err, ErrNoEligibleHost) {
-					// Every host available to the pool is cordoned: an expected
-					// steady state during host maintenance, not a failure, so
-					// it's logged quietly and this cycle is simply skipped
-					// rather than escalated like a real provision error.
-					r.log.DebugContext(ctx, "reconciler: no eligible host to provision on (all hosts cordoned?)")
+					// Every host available to the pool is cordoned or not
+					// registered: an expected steady state during host
+					// maintenance (or before the first poolmgrctl host add),
+					// not a failure, so it's logged quietly and this cycle is
+					// simply skipped rather than escalated like a real
+					// provision error.
+					r.log.DebugContext(ctx, "reconciler: no eligible host to provision on (all hosts cordoned or unregistered?)")
 					return
 				}
 				r.log.ErrorContext(ctx, "reconciler: provision failed", "error", err)

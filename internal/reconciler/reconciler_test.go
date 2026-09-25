@@ -42,6 +42,7 @@ func TestReconciler_MinSizeThreshold_TickDrivenTopUp(t *testing.T) {
 	vm := &fakeMicroVM{}
 	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
 	st := openTestStore(t)
+	seedHost(t, st, "host-a")
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 2, []string{"host-a"})
 	pool.ReplenishmentStrategy.MinSize = int32Ptr(2)
@@ -67,6 +68,7 @@ func TestReconciler_MinSizeThreshold_CountsPreLeaseHookRunningAsInFlight(t *test
 	vm := &fakeMicroVM{}
 	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
 	st := openTestStore(t)
+	seedHost(t, st, "host-a")
 	ctx := context.Background()
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 2, []string{"host-a"})
@@ -130,6 +132,7 @@ func TestReconciler_EventDriven_SeedsFreshPool(t *testing.T) {
 			vm := &fakeMicroVM{}
 			flint := startFakeFlintlock(t, vm, alwaysReadyExec())
 			st := openTestStore(t)
+			seedHost(t, st, "host-a")
 
 			// A fresh pool with no VMs: without seeding, nothing can be
 			// claimed or deleted, so replenishment would never trigger.
@@ -159,6 +162,7 @@ func TestReconciler_ImmediateOnLease_OnlyOnClaimNotification(t *testing.T) {
 	vm := &fakeMicroVM{}
 	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
 	st := openTestStore(t)
+	seedHost(t, st, "host-a")
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE, 2, []string{"host-a"})
 	seedAvailableVMs(t, st, pool, 2)
@@ -187,6 +191,7 @@ func TestReconciler_ReplaceOnDelete_OnlyOnDeleteNotification(t *testing.T) {
 	vm := &fakeMicroVM{}
 	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
 	st := openTestStore(t)
+	seedHost(t, st, "host-a")
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE, 2, []string{"host-a"})
 	seedAvailableVMs(t, st, pool, 2)

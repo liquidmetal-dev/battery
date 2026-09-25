@@ -23,8 +23,8 @@ import (
 func seedTestHost(ctx context.Context, t *testing.T, st store.Store, name string) {
 	t.Helper()
 	host := &poolmgrv1alpha1.Host{Name: name, Address: name + ":8443", UpdatedAt: timestamppb.Now()}
-	if err := st.UpsertHostIfMissing(ctx, host); err != nil {
-		t.Fatalf("UpsertHostIfMissing(%q) error = %v", name, err)
+	if err := st.CreateHost(ctx, host); err != nil {
+		t.Fatalf("CreateHost(%q) error = %v", name, err)
 	}
 }
 

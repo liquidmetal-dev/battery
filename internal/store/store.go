@@ -32,6 +32,10 @@ var ErrDuplicateRequestID = errors.New("store: duplicate lease request id")
 // at the moment the reservation was attempted.
 var ErrHostCordoned = errors.New("store: host is cordoned")
 
+// ErrHostNotRegistered is returned by ReservePlacement when the host has no
+// registry row, e.g. because RemoveHost deleted it after PickHost chose it.
+var ErrHostNotRegistered = errors.New("store: host not registered")
+
 // ErrHostExists is returned by CreateHost when a host with the same name is
 // already registered.
 var ErrHostExists = errors.New("store: host already exists")
@@ -104,12 +108,6 @@ type Store interface {
 	// ListVMsByPhase returns all VMs (across all pools) currently in phase.
 	ListVMsByPhase(ctx context.Context, phase poolmgrv1alpha1.VMPhase) ([]*poolmgrv1alpha1.VMRecord, error)
 
-	// UpsertHostIfMissing inserts a row for host if none exists for its name; otherwise it
-	// refreshes the stored address and TLS settings to host's (so a host's connection details
-	// in the static config file are kept current across restarts) while leaving its cordon
-	// state untouched. Used to seed the host registry from static config at startup without
-	// clobbering cordon state.
-	UpsertHostIfMissing(ctx context.Context, host *poolmgrv1alpha1.Host) error
 	// CreateHost stores host as given, including its cordon fields. Returns ErrHostExists if
 	// a host with the same name is already registered.
 	CreateHost(ctx context.Context, host *poolmgrv1alpha1.Host) error
@@ -129,14 +127,10 @@ type Store interface {
 	// SetHostCordoned sets host name's cordoned state and reason, returning the updated host.
 	// Returns ErrNotFound if no such host is registered.
 	SetHostCordoned(ctx context.Context, name string, cordoned bool, reason string) (*poolmgrv1alpha1.Host, error)
-	// ListCordonedHostNames returns the set of currently-cordoned host names, for PickHost's
-	// placement filter.
-	ListCordonedHostNames(ctx context.Context) (map[string]bool, error)
 	// ReservePlacement records that a VM with the given id is about to be created on host
 	// for pool (poolName, poolNamespace), in the same transaction as a check that host is
-	// not cordoned. Returns ErrHostCordoned if it is, in which case nothing is recorded and
-	// the caller must not create the VM there. A host with no registry row is treated as
-	// not cordoned (CordonHost refuses unregistered hosts, so it can never be). The
+	// registered and not cordoned. Returns ErrHostNotRegistered or ErrHostCordoned if not,
+	// in which case nothing is recorded and the caller must not create the VM there. The
 	// reservation counts toward CountVMsByHost until ReleasePlacement(id).
 	ReservePlacement(ctx context.Context, id, host, poolName, poolNamespace string) error
 	// ReleasePlacement removes the reservation for id. Idempotent: releasing an id that
