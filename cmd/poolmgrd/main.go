@@ -89,7 +89,13 @@ func main() {
 		fatal("poolmgrd: clear stale placements", err)
 	}
 
-	flint, err := flintlockclient.New(cfg)
+	// The store holds every host seedHosts just wrote, with its TLS
+	// settings, so the pool is built from it rather than from cfg.
+	hosts, err := st.ListHosts(ctx)
+	if err != nil {
+		fatal("poolmgrd: list hosts", err)
+	}
+	flint, err := flintlockclient.New(hosts)
 	if err != nil {
 		fatal("poolmgrd: flintlock client pool", err)
 	}

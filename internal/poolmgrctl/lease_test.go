@@ -17,7 +17,6 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/liquidmetal-dev/battery/internal/api"
-	"github.com/liquidmetal-dev/battery/internal/config"
 	"github.com/liquidmetal-dev/battery/internal/flintlockclient"
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
@@ -39,13 +38,13 @@ func bufconnLeaseWithFlint(t *testing.T) (*grpc.ClientConn, store.Store) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	flint, err := flintlockclient.New(&config.Config{Hosts: []config.HostConfig{
+	flint, err := flintlockclient.New([]*poolmgrv1alpha1.Host{
 		// Nothing needs to actually be listening here: ExecClient/Client/
 		// Address just look up an already-constructed client by host name,
 		// and any RPC against this address (only attempted best-effort, for
 		// network interfaces) is left to fail harmlessly.
-		{Name: "host-a", Address: "127.0.0.1:1", TLS: config.TLSConfig{Insecure: true}},
-	}})
+		{Name: "host-a", Address: "127.0.0.1:1", Tls: &poolmgrv1alpha1.HostTLS{Insecure: true}},
+	})
 	if err != nil {
 		t.Fatalf("flintlockclient.New() error = %v", err)
 	}
