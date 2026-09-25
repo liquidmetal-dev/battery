@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package poolmgr.v1alpha1;
+
+import "poolmgr/v1alpha1/types.proto";
+
+option go_package = "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1;poolmgrv1alpha1";
+
+// HostAdmin manages the cordon state of registered flintlock hosts. Cordoning a host stops
+// the reconciler from placing new VMs there; existing VMs are unaffected and wind down
+// through normal lease expiry or release.
+service HostAdmin {
+  rpc CordonHost(CordonHostRequest) returns (Host);
+  rpc UncordonHost(UncordonHostRequest) returns (Host);
+  rpc ListHosts(ListHostsRequest) returns (ListHostsResponse);
+}
+
+message CordonHostRequest {
+  string name = 1;
+
+  // Reason is an optional free-text note recorded alongside the cordon.
+  string reason = 2;
+}
+
+message UncordonHostRequest {
+  string name = 1;
+}
+
+message ListHostsRequest {}
+
+// HostStatus pairs a host's registry record with everything still counted against it.
+message HostStatus {
+  Host host = 1;
+
+  // VmCount is the number of VM records placed on this host in any phase (including
+  // DELETING, QUARANTINED and FAILED, all of which may still exist on the host) plus
+  // in-flight placements that have been reserved but not yet recorded, across all pools.
+  // Maintenance is safe once the host is cordoned and this reaches 0: nothing remains on
+  // it and nothing more can be placed there.
+  int32 vm_count = 2;
+}
+
+message ListHostsResponse {
+  repeated HostStatus hosts = 1;
+}

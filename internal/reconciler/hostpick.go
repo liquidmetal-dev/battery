@@ -11,15 +11,24 @@ import (
 )
 
 // ErrNoEligibleHost is returned by PickHost when a pool has no flintlock
-// hosts configured.
+// hosts configured, or every host configured for it is currently cordoned.
+// Provision also wraps it when the host PickHost chose was cordoned before
+// the placement could be reserved. Either way the reconciler treats it as
+// an expected maintenance-time condition rather than a provision failure.
 var ErrNoEligibleHost = errors.New("reconciler: pool has no eligible flintlock hosts")
 
-// PickHost returns the host from pool.FlintlockHosts with the fewest
-// non-terminal VMs currently recorded for the pool, ties broken by the
-// hosts' order in FlintlockHosts. This is deliberately simple: v1 does no
-// real host resource-capacity probing, just even spread by VM count.
-func PickHost(ctx context.Context, st store.Store, pool *poolmgrv1alpha1.PoolSpec) (string, error) {
-	hosts := pool.GetFlintlockHosts()
+// PickHost returns the host from pool.FlintlockHosts, excluding any name
+// present in cordoned, with the fewest non-terminal VMs currently recorded
+// for the pool, ties broken by the hosts' order in FlintlockHosts. This is
+// deliberately simple: v1 does no real host resource-capacity probing, just
+// even spread by VM count. cordoned may be nil, meaning no host is cordoned.
+func PickHost(ctx context.Context, st store.Store, pool *poolmgrv1alpha1.PoolSpec, cordoned map[string]bool) (string, error) {
+	var hosts []string
+	for _, h := range pool.GetFlintlockHosts() {
+		if !cordoned[h] {
+			hosts = append(hosts, h)
+		}
+	}
 	if len(hosts) == 0 {
 		return "", fmt.Errorf("%w: pool %s/%s", ErrNoEligibleHost, pool.GetNamespace(), pool.GetName())
 	}

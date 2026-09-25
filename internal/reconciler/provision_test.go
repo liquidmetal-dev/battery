@@ -140,6 +140,9 @@ func TestProvision_RejectsOldFlintlock(t *testing.T) {
 	if vms := onlyVMsInPool(t, st, "pool-a"); len(vms) != 0 {
 		t.Fatalf("expected no VM records, got %d", len(vms))
 	}
+	if got := countVMsOnHost(t, st, "host-a"); got != 0 {
+		t.Fatalf("CountVMsByHost(host-a) = %d after refused host, want 0 (placement must be released)", got)
+	}
 }
 
 func TestProvision_CreatePollTimeout(t *testing.T) {
@@ -378,6 +381,106 @@ func TestProvision_ContextCancelledMidProvision_StillAppliesHookFailurePolicy(t 
 	}
 	if vms[0].GetPhase() != poolmgrv1alpha1.VMPhase_QUARANTINED {
 		t.Fatalf("expected phase QUARANTINED after cancellation, got %v - ApplyHookFailurePolicy's cleanup must not use the already-cancelled ctx", vms[0].GetPhase())
+	}
+	// Exactly the quarantined row: the placement reservation must have been
+	// released even though ctx was cancelled, or it leaks until restart.
+	if got := countVMsOnHost(t, st, "host-a"); got != 1 {
+		t.Fatalf("CountVMsByHost(host-a) = %d after cancellation, want 1 (reservation must be released on a detached ctx)", got)
+	}
+}
+
+func countVMsOnHost(t *testing.T, st store.Store, host string) int32 {
+	t.Helper()
+	got, err := st.CountVMsByHost(context.Background(), host)
+	if err != nil {
+		t.Fatalf("CountVMsByHost(%q): %v", host, err)
+	}
+	return got
+}
+
+// TestProvision_HostCordonedAfterPick_DoesNotCreateMicroVM is the race from
+// the review of PR #83: CordonHost lands after PickHost chose the host but before
+// the microvm exists. The placement reservation is checked atomically with
+// the cordon flag, so the provision must back off without touching flintlock
+// and report it as ErrNoEligibleHost (the quiet path in provisionN).
+func TestProvision_HostCordonedAfterPick_DoesNotCreateMicroVM(t *testing.T) {
+	vm := &fakeMicroVM{}
+	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
+	st := &failingStore{Store: openTestStore(t), cordonHostBeforeReserve: "host-a"}
+	seedHost(t, st, "host-a")
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 1, []string{"host-a"})
+	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), nil)
+
+	err := p.Provision(context.Background(), pool)
+	if !errors.Is(err, reconciler.ErrNoEligibleHost) {
+		t.Fatalf("Provision() error = %v, want ErrNoEligibleHost", err)
+	}
+	if !errors.Is(err, store.ErrHostCordoned) {
+		t.Fatalf("Provision() error = %v, want it to also wrap store.ErrHostCordoned", err)
+	}
+	if got := len(vm.createdSpecs()); got != 0 {
+		t.Fatalf("expected no CreateMicroVM calls on a host cordoned mid-provision, got %d", got)
+	}
+	if vms := onlyVMsInPool(t, st, "pool-a"); len(vms) != 0 {
+		t.Fatalf("expected no VM records, got %d", len(vms))
+	}
+	if got := countVMsOnHost(t, st, "host-a"); got != 0 {
+		t.Fatalf("CountVMsByHost(host-a) = %d, want 0", got)
+	}
+}
+
+// TestProvision_ReservationCountsWhileCreating checks that a host's VM count
+// already includes a placement while flintlock is still creating the microvm
+// (before any vms row exists), and that the reservation is swapped for the
+// row rather than double-counted once the VM is recorded.
+func TestProvision_ReservationCountsWhileCreating(t *testing.T) {
+	st := openTestStore(t)
+	seedHost(t, st, "host-a")
+
+	var duringCreate int32 = -1
+	vm := &fakeMicroVM{onCreate: func() {
+		// Provision is blocked in CreateMicroVM here, with no store tx open.
+		duringCreate = countVMsOnHost(t, st, "host-a")
+	}}
+	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 1, []string{"host-a"})
+	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), nil)
+	if err := p.Provision(context.Background(), pool); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	if duringCreate != 1 {
+		t.Fatalf("CountVMsByHost(host-a) during CreateMicroVM = %d, want 1 (the placement reservation)", duringCreate)
+	}
+	if got := countVMsOnHost(t, st, "host-a"); got != 1 {
+		t.Fatalf("CountVMsByHost(host-a) after Provision = %d, want 1 (vms row only; reservation released)", got)
+	}
+}
+
+// TestProvision_CreateVMFailure_ReleasesReservation: a failure after the
+// microvm exists but before its row is written must release the placement
+// along with deleting the orphaned microvm.
+func TestProvision_CreateVMFailure_ReleasesReservation(t *testing.T) {
+	st := &failingStore{Store: openTestStore(t), failCreateVM: true}
+	seedHost(t, st, "host-a")
+
+	var duringCreate int32 = -1
+	vm := &fakeMicroVM{onCreate: func() { duringCreate = countVMsOnHost(t, st, "host-a") }}
+	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 1, []string{"host-a"})
+	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), nil)
+
+	if err := p.Provision(context.Background(), pool); !errors.Is(err, errInjected) {
+		t.Fatalf("Provision() error = %v, want wrapped errInjected", err)
+	}
+	if duringCreate != 1 {
+		t.Fatalf("CountVMsByHost(host-a) during CreateMicroVM = %d, want 1", duringCreate)
+	}
+	if got := countVMsOnHost(t, st, "host-a"); got != 0 {
+		t.Fatalf("CountVMsByHost(host-a) after failed Provision = %d, want 0", got)
 	}
 }
 

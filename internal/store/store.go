@@ -23,6 +23,10 @@ var ErrNoAvailableVM = errors.New("store: no available vm in pool")
 // expiry was extended (by a Heartbeat) since the caller last observed it.
 var ErrLeaseNotExpired = errors.New("store: lease not expired")
 
+// ErrHostCordoned is returned by ReservePlacement when the host was cordoned
+// at the moment the reservation was attempted.
+var ErrHostCordoned = errors.New("store: host is cordoned")
+
 // Store is the repository interface for pool manager persistence.
 type Store interface {
 	CreatePool(ctx context.Context, p *poolmgrv1alpha1.PoolSpec) error
@@ -70,6 +74,38 @@ type Store interface {
 
 	// ListVMsByPhase returns all VMs (across all pools) currently in phase.
 	ListVMsByPhase(ctx context.Context, phase poolmgrv1alpha1.VMPhase) ([]*poolmgrv1alpha1.VMRecord, error)
+
+	// UpsertHostIfMissing inserts a row for host if none exists for its name; otherwise it
+	// refreshes the stored address to host.Address (so a host's address in the static config
+	// file is kept current across restarts) while leaving its cordon state untouched. Used to
+	// seed the host registry from static config at startup without clobbering cordon state.
+	UpsertHostIfMissing(ctx context.Context, host *poolmgrv1alpha1.Host) error
+	GetHost(ctx context.Context, name string) (*poolmgrv1alpha1.Host, error)
+	ListHosts(ctx context.Context) ([]*poolmgrv1alpha1.Host, error)
+	// SetHostCordoned sets host name's cordoned state and reason, returning the updated host.
+	// Returns ErrNotFound if no such host is registered.
+	SetHostCordoned(ctx context.Context, name string, cordoned bool, reason string) (*poolmgrv1alpha1.Host, error)
+	// ListCordonedHostNames returns the set of currently-cordoned host names, for PickHost's
+	// placement filter.
+	ListCordonedHostNames(ctx context.Context) (map[string]bool, error)
+	// ReservePlacement records that a VM with the given id is about to be created on host
+	// for pool (poolName, poolNamespace), in the same transaction as a check that host is
+	// not cordoned. Returns ErrHostCordoned if it is, in which case nothing is recorded and
+	// the caller must not create the VM there. A host with no registry row is treated as
+	// not cordoned (CordonHost refuses unregistered hosts, so it can never be). The
+	// reservation counts toward CountVMsByHost until ReleasePlacement(id).
+	ReservePlacement(ctx context.Context, id, host, poolName, poolNamespace string) error
+	// ReleasePlacement removes the reservation for id. Idempotent: releasing an id that
+	// doesn't exist is not an error.
+	ReleasePlacement(ctx context.Context, id string) error
+	// ClearPlacements removes every reservation. Called once at poolmgrd startup: nothing
+	// can be in flight then, so any surviving row was left behind by a crash.
+	ClearPlacements(ctx context.Context) error
+	// CountVMsByHost returns the number of VM records placed on host name in any phase
+	// (including DELETING, QUARANTINED and FAILED, all of which may still exist on the host)
+	// plus in-flight placement reservations for it, across all pools. A cordoned host whose
+	// count is 0 has nothing left on it and nothing on the way, so it is safe to take down.
+	CountVMsByHost(ctx context.Context, name string) (int32, error)
 
 	Close() error
 }

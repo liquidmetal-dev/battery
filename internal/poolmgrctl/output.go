@@ -244,6 +244,96 @@ func printClaimTable(w io.Writer, resp *poolmgrv1alpha1.ClaimVMResponse) error {
 	return nil
 }
 
+// printHost renders a single Host to w in the given format. Used for
+// CordonHost/UncordonHost responses, which carry no VM count - unlike
+// printHostStatuses, its table has no VMS column, so it never
+// fabricates a count that wasn't returned by the RPC.
+func printHost(w io.Writer, host *poolmgrv1alpha1.Host, format OutputFormat) error {
+	switch format {
+	case OutputJSON:
+		return printHostJSON(w, host)
+	case OutputTable, "":
+		return printHostTable(w, host)
+	default:
+		return fmt.Errorf("invalid output format %q", format)
+	}
+}
+
+func printHostTable(w io.Writer, host *poolmgrv1alpha1.Host) error {
+	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "NAME\tADDRESS\tCORDONED"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(tw, "%s\t%s\t%t\n", host.GetName(), host.GetAddress(), host.GetCordoned()); err != nil {
+		return err
+	}
+	return tw.Flush()
+}
+
+func printHostJSON(w io.Writer, host *poolmgrv1alpha1.Host) error {
+	marshalOpts := protojson.MarshalOptions{Multiline: true}
+	b, err := marshalOpts.Marshal(host)
+	if err != nil {
+		return fmt.Errorf("marshal host: %w", err)
+	}
+	if _, err := w.Write(b); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(w)
+	return err
+}
+
+// printHostStatuses renders hosts to w in the given format, following the
+// same table/JSON convention as printPools/printLeases.
+func printHostStatuses(w io.Writer, hosts []*poolmgrv1alpha1.HostStatus, format OutputFormat) error {
+	switch format {
+	case OutputJSON:
+		return printHostStatusesJSON(w, hosts)
+	case OutputTable, "":
+		return printHostStatusesTable(w, hosts)
+	default:
+		return fmt.Errorf("invalid output format %q", format)
+	}
+}
+
+func printHostStatusesJSON(w io.Writer, hosts []*poolmgrv1alpha1.HostStatus) error {
+	marshalOpts := protojson.MarshalOptions{Multiline: true}
+
+	buf := []byte("[")
+	for i, h := range hosts {
+		if i > 0 {
+			buf = append(buf, ',')
+		}
+		b, err := marshalOpts.Marshal(h)
+		if err != nil {
+			return fmt.Errorf("marshal host: %w", err)
+		}
+		buf = append(buf, b...)
+	}
+	buf = append(buf, ']')
+
+	if _, err := w.Write(buf); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintln(w)
+	return err
+}
+
+func printHostStatusesTable(w io.Writer, hosts []*poolmgrv1alpha1.HostStatus) error {
+	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "NAME\tADDRESS\tCORDONED\tVMS"); err != nil {
+		return err
+	}
+	for _, hs := range hosts {
+		host := hs.GetHost()
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%t\t%d\n",
+			host.GetName(), host.GetAddress(), host.GetCordoned(), hs.GetVmCount()); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
 // formatTimestamp renders a *timestamppb.Timestamp as RFC3339, or "" if ts
 // is nil/unset.
 func formatTimestamp(ts *timestamppb.Timestamp) string {

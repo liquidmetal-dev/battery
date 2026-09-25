@@ -547,6 +547,173 @@ func scanEvents(rows *sql.Rows) ([]*poolmgrv1alpha1.Event, error) {
 	return events, nil
 }
 
+func (s *sqliteStore) UpsertHostIfMissing(ctx context.Context, host *poolmgrv1alpha1.Host) error {
+	row, err := hostToRow(host)
+	if err != nil {
+		return fmt.Errorf("store: marshal host: %w", err)
+	}
+
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO hosts (name, address, cordoned, cordoned_reason, cordoned_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT (name) DO UPDATE SET address = excluded.address`,
+		row.name, row.address, row.cordoned, row.cordonedReason, row.cordonedAt, row.updatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("store: upsert host: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) GetHost(ctx context.Context, name string) (*poolmgrv1alpha1.Host, error) {
+	r := s.db.QueryRowContext(ctx, `
+		SELECT name, address, cordoned, cordoned_reason, cordoned_at, updated_at
+		FROM hosts WHERE name = ?`, name)
+
+	var row hostRow
+	err := r.Scan(&row.name, &row.address, &row.cordoned, &row.cordonedReason, &row.cordonedAt, &row.updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: query host: %w", err)
+	}
+	return rowToHost(row), nil
+}
+
+func (s *sqliteStore) ListHosts(ctx context.Context) ([]*poolmgrv1alpha1.Host, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT name, address, cordoned, cordoned_reason, cordoned_at, updated_at
+		FROM hosts ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("store: query hosts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var hosts []*poolmgrv1alpha1.Host
+	for rows.Next() {
+		var row hostRow
+		if err := rows.Scan(&row.name, &row.address, &row.cordoned, &row.cordonedReason, &row.cordonedAt, &row.updatedAt); err != nil {
+			return nil, fmt.Errorf("store: scan host: %w", err)
+		}
+		hosts = append(hosts, rowToHost(row))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate hosts: %w", err)
+	}
+	return hosts, nil
+}
+
+func (s *sqliteStore) SetHostCordoned(ctx context.Context, name string, cordoned bool, reason string) (*poolmgrv1alpha1.Host, error) {
+	now := time.Now()
+
+	var cordonedReason sql.NullString
+	var cordonedAt sql.NullInt64
+	if cordoned {
+		if reason != "" {
+			cordonedReason = sql.NullString{String: reason, Valid: true}
+		}
+		cordonedAt = sql.NullInt64{Int64: now.UnixNano(), Valid: true}
+	}
+
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE hosts SET cordoned = ?, cordoned_reason = ?, cordoned_at = ?, updated_at = ?
+		WHERE name = ?`,
+		cordoned, cordonedReason, cordonedAt, now.UnixNano(), name,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: set host cordoned: %w", err)
+	}
+	if err := checkRowsAffected(res); err != nil {
+		return nil, err
+	}
+
+	return s.GetHost(ctx, name)
+}
+
+func (s *sqliteStore) ListCordonedHostNames(ctx context.Context) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM hosts WHERE cordoned = 1`)
+	if err != nil {
+		return nil, fmt.Errorf("store: query cordoned hosts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	cordoned := make(map[string]bool)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("store: scan cordoned host: %w", err)
+		}
+		cordoned[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate cordoned hosts: %w", err)
+	}
+	return cordoned, nil
+}
+
+func (s *sqliteStore) ReservePlacement(ctx context.Context, id, host, poolName, poolNamespace string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin reserve placement tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// The cordon check and the insert share one transaction on the store's
+	// single connection (see Open), so SetHostCordoned's UPDATE can't land
+	// between them: either it committed first and this returns
+	// ErrHostCordoned, or it waits and then sees the reservation counted.
+	var cordoned bool
+	err = tx.QueryRowContext(ctx, `SELECT cordoned FROM hosts WHERE name = ?`, host).Scan(&cordoned)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// Unregistered host: can't be cordoned, so nothing to refuse.
+	case err != nil:
+		return fmt.Errorf("store: select host cordoned: %w", err)
+	case cordoned:
+		return ErrHostCordoned
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO placements (id, host, pool_name, pool_namespace, created_at)
+		VALUES (?, ?, ?, ?, ?)`,
+		id, host, poolName, poolNamespace, time.Now().UnixNano(),
+	); err != nil {
+		return fmt.Errorf("store: insert placement: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit reserve placement tx: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) ReleasePlacement(ctx context.Context, id string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM placements WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("store: release placement: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) ClearPlacements(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM placements`); err != nil {
+		return fmt.Errorf("store: clear placements: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) CountVMsByHost(ctx context.Context, name string) (int32, error) {
+	var count int32
+	err := s.db.QueryRowContext(ctx, `
+		SELECT (SELECT COUNT(*) FROM vms WHERE flintlock_host = ?)
+		     + (SELECT COUNT(*) FROM placements WHERE host = ?)`,
+		name, name,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("store: count vms by host: %w", err)
+	}
+	return count, nil
+}
+
 func checkRowsAffected(res sql.Result) error {
 	n, err := res.RowsAffected()
 	if err != nil {

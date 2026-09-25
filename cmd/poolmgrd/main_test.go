@@ -71,6 +71,9 @@ func TestBuildGRPCServer_RegistersApplicationServices(t *testing.T) {
 	if _, err := poolmgrv1alpha1.NewPoolAdminClient(conn).ListPools(context.Background(), &poolmgrv1alpha1.ListPoolsRequest{}); err != nil {
 		t.Fatalf("ListPools: %v", err)
 	}
+	if _, err := poolmgrv1alpha1.NewHostAdminClient(conn).ListHosts(context.Background(), &poolmgrv1alpha1.ListHostsRequest{}); err != nil {
+		t.Fatalf("ListHosts: %v", err)
+	}
 }
 
 func TestBuildGRPCServer_RegistersHealthService(t *testing.T) {
@@ -197,6 +200,75 @@ func TestSweeperRun_ShutsDownOnContextCancel(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("sweeper.Run did not return promptly after context cancellation")
+	}
+}
+
+func TestSeedHosts(t *testing.T) {
+	st := openTestStore(t)
+	cfg := &config.Config{Hosts: []config.HostConfig{
+		{Name: "host-a", Address: "10.0.0.1:8443"},
+		{Name: "host-b", Address: "10.0.0.2:8443"},
+	}}
+
+	if err := seedHosts(context.Background(), st, cfg); err != nil {
+		t.Fatalf("seedHosts: %v", err)
+	}
+
+	hosts, err := st.ListHosts(context.Background())
+	if err != nil {
+		t.Fatalf("ListHosts: %v", err)
+	}
+	if len(hosts) != 2 || hosts[0].GetName() != "host-a" || hosts[1].GetName() != "host-b" {
+		t.Fatalf("ListHosts() = %+v, want [host-a, host-b]", hosts)
+	}
+}
+
+func TestSeedHosts_PreservesExistingCordonState(t *testing.T) {
+	st := openTestStore(t)
+	cfg := &config.Config{Hosts: []config.HostConfig{{Name: "host-a", Address: "10.0.0.1:8443"}}}
+
+	if err := seedHosts(context.Background(), st, cfg); err != nil {
+		t.Fatalf("seedHosts: %v", err)
+	}
+	if _, err := st.SetHostCordoned(context.Background(), "host-a", true, "maintenance"); err != nil {
+		t.Fatalf("SetHostCordoned: %v", err)
+	}
+
+	// Simulates a poolmgrd restart: seedHosts runs again against the same
+	// (now non-empty) store.
+	if err := seedHosts(context.Background(), st, cfg); err != nil {
+		t.Fatalf("seedHosts (second call): %v", err)
+	}
+
+	host, err := st.GetHost(context.Background(), "host-a")
+	if err != nil {
+		t.Fatalf("GetHost: %v", err)
+	}
+	if !host.GetCordoned() {
+		t.Errorf("GetHost() cordoned = false after re-seed, want true (cordon state preserved)")
+	}
+}
+
+// TestClearStalePlacements: a placement reservation left in the store by a
+// previous process (it died mid-Provision) must not survive startup, or the
+// host's VM count would stay inflated until someone noticed.
+func TestClearStalePlacements(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	if err := st.ReservePlacement(ctx, "stale-1", "host-a", "pool-a", "default"); err != nil {
+		t.Fatalf("ReservePlacement: %v", err)
+	}
+
+	if err := clearStalePlacements(ctx, st); err != nil {
+		t.Fatalf("clearStalePlacements: %v", err)
+	}
+
+	got, err := st.CountVMsByHost(ctx, "host-a")
+	if err != nil {
+		t.Fatalf("CountVMsByHost: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("CountVMsByHost(host-a) = %d after clearStalePlacements, want 0", got)
 	}
 }
 

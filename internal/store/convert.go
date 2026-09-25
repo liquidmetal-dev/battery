@@ -243,6 +243,53 @@ func rowToLease(row leaseRow) *poolmgrv1alpha1.LeaseRecord {
 	}
 }
 
+// hostRow is the flat column representation of a hosts table row.
+type hostRow struct {
+	name           string
+	address        string
+	cordoned       bool
+	cordonedReason sql.NullString
+	cordonedAt     sql.NullInt64
+	updatedAt      int64
+}
+
+func hostToRow(h *poolmgrv1alpha1.Host) (hostRow, error) {
+	updatedAt, err := requireTimestamp("updated_at", h.GetUpdatedAt())
+	if err != nil {
+		return hostRow{}, err
+	}
+
+	row := hostRow{
+		name:      h.GetName(),
+		address:   h.GetAddress(),
+		cordoned:  h.GetCordoned(),
+		updatedAt: updatedAt.UnixNano(),
+	}
+	if h.GetCordonedReason() != "" {
+		row.cordonedReason = sql.NullString{String: h.GetCordonedReason(), Valid: true}
+	}
+	if h.GetCordonedAt() != nil {
+		row.cordonedAt = sql.NullInt64{Int64: h.GetCordonedAt().AsTime().UnixNano(), Valid: true}
+	}
+	return row, nil
+}
+
+func rowToHost(row hostRow) *poolmgrv1alpha1.Host {
+	h := &poolmgrv1alpha1.Host{
+		Name:      row.name,
+		Address:   row.address,
+		Cordoned:  row.cordoned,
+		UpdatedAt: timestamppb.New(time.Unix(0, row.updatedAt)),
+	}
+	if row.cordonedReason.Valid {
+		h.CordonedReason = row.cordonedReason.String
+	}
+	if row.cordonedAt.Valid {
+		h.CordonedAt = timestamppb.New(time.Unix(0, row.cordonedAt.Int64))
+	}
+	return h
+}
+
 func marshalProtoJSON(m proto.Message) (string, error) {
 	b, err := protojson.Marshal(m)
 	if err != nil {
