@@ -204,6 +204,8 @@ type leaseRow struct {
 	claimedAt       int64
 	lastHeartbeatAt int64
 	expiresAt       int64
+	// requestID is NULL when the lease was claimed without a request ID.
+	requestID sql.NullString
 }
 
 func leaseToRow(l *poolmgrv1alpha1.LeaseRecord) (leaseRow, error) {
@@ -228,6 +230,7 @@ func leaseToRow(l *poolmgrv1alpha1.LeaseRecord) (leaseRow, error) {
 		claimedAt:       claimedAt.UnixNano(),
 		lastHeartbeatAt: lastHeartbeatAt.UnixNano(),
 		expiresAt:       expiresAt.UnixNano(),
+		requestID:       sql.NullString{String: l.GetRequestId(), Valid: l.GetRequestId() != ""},
 	}, nil
 }
 
@@ -240,6 +243,7 @@ func rowToLease(row leaseRow) *poolmgrv1alpha1.LeaseRecord {
 		ClaimedAt:       timestamppb.New(time.Unix(0, row.claimedAt)),
 		LastHeartbeatAt: timestamppb.New(time.Unix(0, row.lastHeartbeatAt)),
 		ExpiresAt:       timestamppb.New(time.Unix(0, row.expiresAt)),
+		RequestId:       row.requestID.String,
 	}
 }
 

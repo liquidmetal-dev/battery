@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -1388,5 +1389,266 @@ func TestClearPlacements(t *testing.T) {
 		if got != 0 {
 			t.Errorf("CountVMsByHost(%q) = %d after clear, want 0", host, got)
 		}
+	}
+}
+
+func TestCreateLeaseRequestID(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	want := sampleLeaseRecord("lease-1", "vm-1", "pool-a", "default", time.Unix(1_700_001_000, 0))
+	want.RequestId = "req-1"
+	if err := s.CreateLease(ctx, want); err != nil {
+		t.Fatalf("CreateLease() error = %v", err)
+	}
+
+	got, err := s.GetLease(ctx, "lease-1")
+	if err != nil {
+		t.Fatalf("GetLease() error = %v", err)
+	}
+	if !proto.Equal(got, want) {
+		t.Errorf("GetLease() = %+v, want %+v", got, want)
+	}
+
+	leases, err := s.ListLeases(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListLeases() error = %v", err)
+	}
+	if len(leases) != 1 || leases[0].GetRequestId() != "req-1" {
+		t.Errorf("ListLeases() = %+v, want one lease with request id %q", leases, "req-1")
+	}
+
+	expired, err := s.ListExpiredLeases(ctx, time.Unix(1_800_000_000, 0))
+	if err != nil {
+		t.Fatalf("ListExpiredLeases() error = %v", err)
+	}
+	if len(expired) != 1 || expired[0].GetRequestId() != "req-1" {
+		t.Errorf("ListExpiredLeases() = %+v, want one lease with request id %q", expired, "req-1")
+	}
+
+	deleted, err := s.DeleteLeaseIfExpired(ctx, "lease-1", time.Unix(1_800_000_000, 0))
+	if err != nil {
+		t.Fatalf("DeleteLeaseIfExpired() error = %v", err)
+	}
+	if deleted.GetRequestId() != "req-1" {
+		t.Errorf("DeleteLeaseIfExpired() request id = %q, want %q", deleted.GetRequestId(), "req-1")
+	}
+}
+
+func TestCreateLeaseDuplicateRequestID(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	first := sampleLeaseRecord("lease-1", "vm-1", "pool-a", "default", time.Unix(1_700_001_000, 0))
+	first.RequestId = "req-1"
+	if err := s.CreateLease(ctx, first); err != nil {
+		t.Fatalf("CreateLease(first) error = %v", err)
+	}
+
+	second := sampleLeaseRecord("lease-2", "vm-2", "pool-a", "default", time.Unix(1_700_001_000, 0))
+	second.RequestId = "req-1"
+	if err := s.CreateLease(ctx, second); !errors.Is(err, ErrDuplicateRequestID) {
+		t.Fatalf("CreateLease(second) error = %v, want ErrDuplicateRequestID", err)
+	}
+	if _, err := s.GetLease(ctx, "lease-2"); err != ErrNotFound {
+		t.Errorf("GetLease(lease-2) error = %v, want ErrNotFound", err)
+	}
+
+	// Once the first lease ends, its request ID is free again.
+	if err := s.DeleteLease(ctx, "lease-1"); err != nil {
+		t.Fatalf("DeleteLease() error = %v", err)
+	}
+	if err := s.CreateLease(ctx, second); err != nil {
+		t.Errorf("CreateLease(second) after delete error = %v", err)
+	}
+}
+
+func TestCreateLeaseDuplicateLeaseIDIsNotDuplicateRequestID(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	first := sampleLeaseRecord("lease-1", "vm-1", "pool-a", "default", time.Unix(1_700_001_000, 0))
+	first.RequestId = "req-1"
+	if err := s.CreateLease(ctx, first); err != nil {
+		t.Fatalf("CreateLease(first) error = %v", err)
+	}
+
+	second := sampleLeaseRecord("lease-1", "vm-2", "pool-a", "default", time.Unix(1_700_001_000, 0))
+	second.RequestId = "req-2"
+	err := s.CreateLease(ctx, second)
+	if err == nil || errors.Is(err, ErrDuplicateRequestID) {
+		t.Errorf("CreateLease() with duplicate lease id error = %v, want a non-ErrDuplicateRequestID error", err)
+	}
+}
+
+func TestCreateLeaseEmptyRequestIDs(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	for _, id := range []string{"lease-1", "lease-2"} {
+		if err := s.CreateLease(ctx, sampleLeaseRecord(id, "vm-"+id, "pool-a", "default", time.Unix(1_700_001_000, 0))); err != nil {
+			t.Fatalf("CreateLease(%s) error = %v", id, err)
+		}
+	}
+
+	got, err := s.GetLease(ctx, "lease-1")
+	if err != nil {
+		t.Fatalf("GetLease() error = %v", err)
+	}
+	if got.GetRequestId() != "" {
+		t.Errorf("GetLease() request id = %q, want empty", got.GetRequestId())
+	}
+	if _, err := s.GetLeaseByRequestID(ctx, ""); err != ErrNotFound {
+		t.Errorf("GetLeaseByRequestID(\"\") error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestGetLeaseByRequestID(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	want := sampleLeaseRecord("lease-1", "vm-1", "pool-a", "default", time.Unix(1_700_001_000, 0))
+	want.RequestId = "req-1"
+	if err := s.CreateLease(ctx, want); err != nil {
+		t.Fatalf("CreateLease() error = %v", err)
+	}
+
+	got, err := s.GetLeaseByRequestID(ctx, "req-1")
+	if err != nil {
+		t.Fatalf("GetLeaseByRequestID() error = %v", err)
+	}
+	if !proto.Equal(got, want) {
+		t.Errorf("GetLeaseByRequestID() = %+v, want %+v", got, want)
+	}
+
+	if _, err := s.GetLeaseByRequestID(ctx, "missing"); err != ErrNotFound {
+		t.Errorf("GetLeaseByRequestID(missing) error = %v, want ErrNotFound", err)
+	}
+}
+
+// schemaVersion returns s's PRAGMA user_version.
+func schemaVersion(t *testing.T, s Store) int {
+	t.Helper()
+	var v int
+	if err := s.(*sqliteStore).db.QueryRow(`PRAGMA user_version;`).Scan(&v); err != nil {
+		t.Fatalf("read user_version error = %v", err)
+	}
+	return v
+}
+
+func TestOpenFreshDBIsAtLatestVersion(t *testing.T) {
+	s := openTestStore(t)
+
+	if got, want := schemaVersion(t, s), len(migrations); got != want {
+		t.Errorf("user_version = %d, want %d", got, want)
+	}
+}
+
+func TestOpenUpgradesVersionZeroDB(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "poolmgr.db")
+
+	// Build a database as a binary from before migrations existed would
+	// have: only the baseline schema, user_version 0, and a lease row.
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	if _, err := db.Exec(schemaSQL); err != nil {
+		t.Fatalf("apply baseline schema error = %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO leases (lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at)
+		VALUES ('lease-old', 'vm-1', 'pool-a', 'default', 1, 2, 3)`); err != nil {
+		t.Fatalf("insert lease error = %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("db.Close() error = %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if got, want := schemaVersion(t, s), len(migrations); got != want {
+		t.Errorf("user_version = %d, want %d", got, want)
+	}
+
+	got, err := s.GetLease(ctx, "lease-old")
+	if err != nil {
+		t.Fatalf("GetLease() error = %v", err)
+	}
+	if got.GetVmUid() != "vm-1" || got.GetExpiresAt().AsTime().UnixNano() != 3 || got.GetRequestId() != "" {
+		t.Errorf("GetLease() = %+v, want the pre-upgrade row with no request id", got)
+	}
+
+	l := sampleLeaseRecord("lease-new", "vm-2", "pool-a", "default", time.Unix(1_700_001_000, 0))
+	l.RequestId = "req-1"
+	if err := s.CreateLease(ctx, l); err != nil {
+		t.Fatalf("CreateLease() after upgrade error = %v", err)
+	}
+	l.LeaseId = "lease-dup"
+	if err := s.CreateLease(ctx, l); !errors.Is(err, ErrDuplicateRequestID) {
+		t.Errorf("CreateLease() duplicate after upgrade error = %v, want ErrDuplicateRequestID", err)
+	}
+}
+
+func TestOpenMigratedDBIsNoop(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "poolmgr.db")
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	want := sampleLeaseRecord("lease-1", "vm-1", "pool-a", "default", time.Unix(1_700_001_000, 0))
+	want.RequestId = "req-1"
+	if err := s.CreateLease(ctx, want); err != nil {
+		t.Fatalf("CreateLease() error = %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	// Reopening must not re-run migration 1: its ALTER TABLE would fail on
+	// the column that already exists.
+	s, err = Open(path)
+	if err != nil {
+		t.Fatalf("second Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if got, want := schemaVersion(t, s), len(migrations); got != want {
+		t.Errorf("user_version = %d, want %d", got, want)
+	}
+	got, err := s.GetLeaseByRequestID(ctx, "req-1")
+	if err != nil {
+		t.Fatalf("GetLeaseByRequestID() error = %v", err)
+	}
+	if !proto.Equal(got, want) {
+		t.Errorf("GetLeaseByRequestID() = %+v, want %+v", got, want)
+	}
+}
+
+func TestOpenRejectsNewerSchemaVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "poolmgr.db")
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d;`, len(migrations)+1)); err != nil {
+		t.Fatalf("set user_version error = %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("db.Close() error = %v", err)
+	}
+
+	s, err := Open(path)
+	if err == nil {
+		_ = s.Close()
+		t.Fatal("Open() error = nil, want an error for a newer schema version")
 	}
 }
