@@ -90,11 +90,23 @@ func NewLeaseServer(st store.Store, flint *flintlockclient.Pool, cfg HookExecCon
 	return &LeaseServer{store: st, flint: flint, cfg: cfg, notifier: notifier, metrics: m}
 }
 
+// maxRequestIDLength is the longest ClaimVMRequest.request_id ClaimVM
+// accepts, in bytes.
+const maxRequestIDLength = 255
+
 // ClaimVM atomically claims an AVAILABLE VM from the named pool, runs the
 // pool's pre_lease_commands, and creates a Lease. It fails with
 // RESOURCE_EXHAUSTED when no VM is AVAILABLE.
+//
+// If req.request_id is set and a lease created with it still exists,
+// ClaimVM returns that lease again instead of claiming another VM (see
+// replayClaim), so a client can retry a claim whose response it lost.
 func (s *LeaseServer) ClaimVM(ctx context.Context, req *poolmgrv1alpha1.ClaimVMRequest) (*poolmgrv1alpha1.ClaimVMResponse, error) {
 	poolName, poolNS := req.GetPool().GetName(), req.GetPool().GetNamespace()
+	requestID := req.GetRequestId()
+	if len(requestID) > maxRequestIDLength {
+		return nil, status.Errorf(codes.InvalidArgument, "request_id is %d bytes, at most %d allowed", len(requestID), maxRequestIDLength)
+	}
 
 	pool, err := s.store.GetPool(ctx, poolName, poolNS)
 	if errors.Is(err, store.ErrNotFound) {
@@ -102,6 +114,16 @@ func (s *LeaseServer) ClaimVM(ctx context.Context, req *poolmgrv1alpha1.ClaimVMR
 	}
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "get pool: %v", err)
+	}
+
+	if requestID != "" {
+		lease, err := s.store.GetLeaseByRequestID(ctx, requestID)
+		if err == nil {
+			return s.replayClaim(ctx, lease, poolName, poolNS)
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return nil, status.Errorf(codes.Internal, "get lease by request id: %v", err)
+		}
 	}
 
 	vm, err := s.store.ClaimAvailableVM(ctx, poolName, poolNS)
@@ -140,27 +162,95 @@ func (s *LeaseServer) ClaimVM(ctx context.Context, req *poolmgrv1alpha1.ClaimVMR
 		ClaimedAt:       timestamppb.New(now),
 		LastHeartbeatAt: timestamppb.New(now),
 		ExpiresAt:       timestamppb.New(expiresAt),
+		RequestId:       requestID,
 	}
 	if err := s.store.CreateLease(ctx, lease); err != nil {
+		if errors.Is(err, store.ErrDuplicateRequestID) {
+			return s.yieldClaim(ctx, pool, vm, requestID)
+		}
 		s.applyHookFailurePolicy(ctx, pool, vm)
 		return nil, status.Errorf(codes.Internal, "create lease: %v", err)
 	}
 
 	reconciler.EmitEvent(ctx, s.store, pool, vm.GetUid(), poolmgrv1alpha1.EventType_VM_CLAIMED)
-	s.metrics.RecordVMClaim(poolName, poolNS)
+	s.metrics.RecordVMClaim(poolName, poolNS, false)
 	s.notifier.NotifyVMClaimed(poolName, poolNS)
 
-	// Best-effort: the lease is already committed at this point, so a
-	// failure to fetch network interfaces just means an empty map in the
-	// response - the caller can still Heartbeat/ReleaseVM successfully.
+	return s.claimResponse(ctx, leaseID, vm), nil
+}
+
+// replayClaim answers a ClaimVM whose request_id matches an existing lease:
+// it returns that lease's response again, without claiming a VM or touching
+// the lease's expiry (a replay is not a heartbeat). A request_id reused for
+// a different pool is a client bug and fails with INVALID_ARGUMENT.
+func (s *LeaseServer) replayClaim(ctx context.Context, lease *poolmgrv1alpha1.LeaseRecord, poolName, poolNS string) (*poolmgrv1alpha1.ClaimVMResponse, error) {
+	if lease.GetPoolName() != poolName || lease.GetPoolNamespace() != poolNS {
+		return nil, status.Errorf(codes.InvalidArgument, "request_id %q was used to claim from pool %s/%s, not %s/%s",
+			lease.GetRequestId(), lease.GetPoolNamespace(), lease.GetPoolName(), poolNS, poolName)
+	}
+
+	vm, err := s.store.GetVM(ctx, lease.GetVmUid())
+	if errors.Is(err, store.ErrNotFound) {
+		// Releasing a lease deletes the VM row before the lease row, so this
+		// lease is on its way out. Once it's gone the request_id is free
+		// again and a retry makes a fresh claim.
+		return nil, status.Errorf(codes.Aborted, "lease %s for request_id %q is being released, retry", lease.GetLeaseId(), lease.GetRequestId())
+	}
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "get vm: %v", err)
+	}
+
+	s.metrics.RecordVMClaim(poolName, poolNS, true)
+	return s.claimResponse(ctx, lease.GetLeaseId(), vm), nil
+}
+
+// yieldClaim handles losing a race with a concurrent ClaimVM for the same
+// request_id: both passed the lookup and claimed a VM, and the other one
+// created its lease first. It puts vm back to AVAILABLE and returns the
+// winner's lease via replayClaim. No VM_CLAIMED event or claim notification
+// went out for vm, so there is none to undo.
+//
+// As in applyHookFailurePolicy, the VM is returned on a context detached
+// from ctx so a cancelled RPC can't strand it LEASED with no lease.
+func (s *LeaseServer) yieldClaim(ctx context.Context, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord, requestID string) (*poolmgrv1alpha1.ClaimVMResponse, error) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.CleanupTimeout)
+	defer cancel()
+
+	vm.Phase = poolmgrv1alpha1.VMPhase_AVAILABLE
+	vm.LeaseId = nil
+	vm.UpdatedAt = timestamppb.Now()
+	if err := s.store.UpdateVM(cleanupCtx, vm); err != nil {
+		s.applyHookFailurePolicy(ctx, pool, vm)
+		return nil, status.Errorf(codes.Internal, "return vm to available: %v", err)
+	}
+
+	lease, err := s.store.GetLeaseByRequestID(ctx, requestID)
+	if errors.Is(err, store.ErrNotFound) {
+		// The winner's lease already ended.
+		return nil, status.Errorf(codes.Aborted, "concurrent claim for request_id %q already ended, retry", requestID)
+	}
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "get lease by request id: %v", err)
+	}
+	return s.replayClaim(ctx, lease, pool.GetName(), pool.GetNamespace())
+}
+
+// claimResponse builds the ClaimVMResponse for leaseID on vm, for both a
+// fresh claim and a replay.
+//
+// Fetching network interfaces is best-effort: the lease is already
+// committed at this point, so a failure just means an empty map in the
+// response - the caller can still Heartbeat/ReleaseVM successfully.
+func (s *LeaseServer) claimResponse(ctx context.Context, leaseID string, vm *poolmgrv1alpha1.VMRecord) *poolmgrv1alpha1.ClaimVMResponse {
+	hostName := vm.GetFlintlockHost()
+
 	var netIfaces map[string]*flintlocktypes.NetworkInterfaceStatus
-	if client, cerr := s.flint.Client(vm.GetFlintlockHost()); cerr == nil {
+	if client, cerr := s.flint.Client(hostName); cerr == nil {
 		if resp, gerr := client.GetMicroVM(ctx, &microvmv1alpha1.GetMicroVMRequest{Uid: vm.GetUid()}); gerr == nil {
 			netIfaces = resp.GetMicrovm().GetStatus().GetNetworkInterfaces()
 		}
 	}
 
-	hostName := vm.GetFlintlockHost()
 	addr, _ := s.flint.Address(hostName)
 
 	return &poolmgrv1alpha1.ClaimVMResponse{
@@ -171,7 +261,7 @@ func (s *LeaseServer) ClaimVM(ctx context.Context, req *poolmgrv1alpha1.ClaimVMR
 			Name:    hostName,
 			Address: addr,
 		},
-	}, nil
+	}
 }
 
 // runPreLeaseHooks transitions vm to PRE_LEASE_HOOK_RUNNING and executes

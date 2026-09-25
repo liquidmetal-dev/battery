@@ -3,7 +3,10 @@ package api_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,6 +14,8 @@ import (
 	microvmexecv1alpha1 "github.com/liquidmetal-dev/flintlock/api/services/microvmexec/v1alpha1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/liquidmetal-dev/battery/internal/api"
 	"github.com/liquidmetal-dev/battery/internal/metrics"
@@ -85,7 +90,7 @@ func TestClaimVM_Success(t *testing.T) {
 		t.Fatalf("expected NotifyVMClaimed(pool-a) once, got %v", notifier.claimed)
 	}
 
-	if body := scrapeMetrics(t, reg); !strings.Contains(body, `poolmgr_vm_claims_total{pool_name="pool-a",pool_namespace="default"} 1`) {
+	if body := scrapeMetrics(t, reg); !strings.Contains(body, `poolmgr_vm_claims_total{pool_name="pool-a",pool_namespace="default",replayed="false"} 1`) {
 		t.Fatalf("expected 1 vm claim recorded, got:\n%s", body)
 	}
 }
@@ -306,6 +311,373 @@ func TestClaimVM_PreLeaseHookFailure_DeleteAndReplace(t *testing.T) {
 	if len(notifier.deleted) != 1 || notifier.deleted[0] != "default/pool-a" {
 		t.Fatalf("expected NotifyVMDeleted(pool-a) once after a DELETE_AND_REPLACE hook failure, got %v", notifier.deleted)
 	}
+}
+
+// claimRequest returns a ClaimVMRequest for poolName in "default" with
+// requestID.
+func claimRequest(poolName, requestID string) *poolmgrv1alpha1.ClaimVMRequest {
+	return &poolmgrv1alpha1.ClaimVMRequest{
+		Pool:      &poolmgrv1alpha1.PoolRef{Name: poolName, Namespace: "default"},
+		RequestId: requestID,
+	}
+}
+
+// setupPoolWithVMs creates pool (in "default") and an AVAILABLE VM for
+// each of uids.
+func setupPoolWithVMs(t *testing.T, st store.Store, pool *poolmgrv1alpha1.PoolSpec, uids ...string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := st.CreatePool(ctx, pool); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
+	for _, uid := range uids {
+		if err := st.CreateVM(ctx, sampleAvailableVM(uid, pool.GetName())); err != nil {
+			t.Fatalf("CreateVM(%s): %v", uid, err)
+		}
+	}
+}
+
+// assertVMPhase fails the test unless uid's VM is in phase want.
+func assertVMPhase(t *testing.T, st store.Store, uid string, want poolmgrv1alpha1.VMPhase) {
+	t.Helper()
+	got, err := st.GetVM(context.Background(), uid)
+	if err != nil {
+		t.Fatalf("GetVM(%s): %v", uid, err)
+	}
+	if got.GetPhase() != want {
+		t.Fatalf("expected %s phase %v, got %v", uid, want, got.GetPhase())
+	}
+}
+
+func TestClaimVM_EmptyRequestIDClaimsEachTime(t *testing.T) {
+	flint := startFakeFlintlock(t, &fakeMicroVM{}, &fakeMicroVMExec{})
+	st := openTestStore(t)
+	ctx := context.Background()
+	setupPoolWithVMs(t, st, samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil), "vm-1", "vm-2")
+
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil, nil)
+	first, err := s.ClaimVM(ctx, claimRequest("pool-a", ""))
+	if err != nil {
+		t.Fatalf("first ClaimVM: %v", err)
+	}
+	second, err := s.ClaimVM(ctx, claimRequest("pool-a", ""))
+	if err != nil {
+		t.Fatalf("second ClaimVM: %v", err)
+	}
+	if first.GetLeaseId() == second.GetLeaseId() || first.GetVmUid() == second.GetVmUid() {
+		t.Fatalf("expected two distinct claims, got %+v and %+v", first, second)
+	}
+
+	lease, err := st.GetLease(ctx, first.GetLeaseId())
+	if err != nil {
+		t.Fatalf("GetLease: %v", err)
+	}
+	if lease.GetRequestId() != "" {
+		t.Fatalf("expected empty request_id on lease, got %q", lease.GetRequestId())
+	}
+}
+
+func TestClaimVM_RequestIDTooLong(t *testing.T) {
+	flint := startFakeFlintlock(t, &fakeMicroVM{}, &fakeMicroVMExec{})
+	st := openTestStore(t)
+	ctx := context.Background()
+	setupPoolWithVMs(t, st, samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil), "vm-1")
+
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil, nil)
+	_, err := s.ClaimVM(ctx, claimRequest("pool-a", strings.Repeat("x", 256)))
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument, got %v", err)
+	}
+	assertVMPhase(t, st, "vm-1", poolmgrv1alpha1.VMPhase_AVAILABLE)
+
+	if _, err := s.ClaimVM(ctx, claimRequest("pool-a", strings.Repeat("x", 255))); err != nil {
+		t.Fatalf("ClaimVM with a 255-byte request_id: %v", err)
+	}
+}
+
+func TestClaimVM_ReplayReturnsSameLease(t *testing.T) {
+	flint := startFakeFlintlock(t, &fakeMicroVM{}, &fakeMicroVMExec{})
+	st := openTestStore(t)
+	ctx := context.Background()
+	setupPoolWithVMs(t, st, samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, []string{"do-thing"}), "vm-1", "vm-2")
+
+	notifier := &spyNotifier{}
+	reg := metrics.NewRegistry()
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, notifier, reg)
+
+	first, err := s.ClaimVM(ctx, claimRequest("pool-a", "req-1"))
+	if err != nil {
+		t.Fatalf("first ClaimVM: %v", err)
+	}
+	before, err := st.GetLease(ctx, first.GetLeaseId())
+	if err != nil {
+		t.Fatalf("GetLease: %v", err)
+	}
+	if before.GetRequestId() != "req-1" {
+		t.Fatalf("expected lease request_id req-1, got %q", before.GetRequestId())
+	}
+
+	time.Sleep(2 * time.Millisecond) // a heartbeat now would move expires_at
+	second, err := s.ClaimVM(ctx, claimRequest("pool-a", "req-1"))
+	if err != nil {
+		t.Fatalf("replayed ClaimVM: %v", err)
+	}
+	if !proto.Equal(first, second) {
+		t.Fatalf("expected replay to return the same response\nfirst:  %+v\nsecond: %+v", first, second)
+	}
+
+	after, err := st.GetLease(ctx, first.GetLeaseId())
+	if err != nil {
+		t.Fatalf("GetLease: %v", err)
+	}
+	if !after.GetExpiresAt().AsTime().Equal(before.GetExpiresAt().AsTime()) {
+		t.Fatalf("expected replay to leave expires_at alone, was %v, now %v", before.GetExpiresAt().AsTime(), after.GetExpiresAt().AsTime())
+	}
+
+	other := "vm-1"
+	if first.GetVmUid() == "vm-1" {
+		other = "vm-2"
+	}
+	assertVMPhase(t, st, other, poolmgrv1alpha1.VMPhase_AVAILABLE)
+
+	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
+	if err != nil {
+		t.Fatalf("ListEventsSince: %v", err)
+	}
+	if len(events) != 1 || events[0].GetType() != poolmgrv1alpha1.EventType_VM_CLAIMED {
+		t.Fatalf("expected 1 VM_CLAIMED event, got %+v", events)
+	}
+	if len(notifier.claimed) != 1 {
+		t.Fatalf("expected NotifyVMClaimed once, got %v", notifier.claimed)
+	}
+
+	body := scrapeMetrics(t, reg)
+	for _, want := range []string{
+		`poolmgr_vm_claims_total{pool_name="pool-a",pool_namespace="default",replayed="false"} 1`,
+		`poolmgr_vm_claims_total{pool_name="pool-a",pool_namespace="default",replayed="true"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected %s, got:\n%s", want, body)
+		}
+	}
+}
+
+func TestClaimVM_ReplayDifferentPool(t *testing.T) {
+	flint := startFakeFlintlock(t, &fakeMicroVM{}, &fakeMicroVMExec{})
+	st := openTestStore(t)
+	ctx := context.Background()
+	setupPoolWithVMs(t, st, samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil), "vm-a1")
+	setupPoolWithVMs(t, st, samplePool("pool-b", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil), "vm-b1")
+
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil, nil)
+	if _, err := s.ClaimVM(ctx, claimRequest("pool-a", "req-1")); err != nil {
+		t.Fatalf("ClaimVM(pool-a): %v", err)
+	}
+	_, err := s.ClaimVM(ctx, claimRequest("pool-b", "req-1"))
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument, got %v", err)
+	}
+	assertVMPhase(t, st, "vm-b1", poolmgrv1alpha1.VMPhase_AVAILABLE)
+}
+
+func TestClaimVM_RequestIDReusableAfterRelease(t *testing.T) {
+	flint := startFakeFlintlock(t, &fakeMicroVM{}, &fakeMicroVMExec{})
+	st := openTestStore(t)
+	ctx := context.Background()
+	setupPoolWithVMs(t, st, samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil), "vm-1", "vm-2")
+
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil, nil)
+	first, err := s.ClaimVM(ctx, claimRequest("pool-a", "req-1"))
+	if err != nil {
+		t.Fatalf("first ClaimVM: %v", err)
+	}
+	if _, err := s.ReleaseVM(ctx, &poolmgrv1alpha1.ReleaseVMRequest{LeaseId: first.GetLeaseId()}); err != nil {
+		t.Fatalf("ReleaseVM: %v", err)
+	}
+
+	second, err := s.ClaimVM(ctx, claimRequest("pool-a", "req-1"))
+	if err != nil {
+		t.Fatalf("second ClaimVM: %v", err)
+	}
+	if second.GetLeaseId() == first.GetLeaseId() || second.GetVmUid() == first.GetVmUid() {
+		t.Fatalf("expected a fresh claim after release, got %+v (first was %+v)", second, first)
+	}
+}
+
+func TestClaimVM_ReplayVMGone(t *testing.T) {
+	flint := startFakeFlintlock(t, &fakeMicroVM{}, &fakeMicroVMExec{})
+	st := openTestStore(t)
+	ctx := context.Background()
+	setupPoolWithVMs(t, st, samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil), "vm-1")
+
+	// A lease whose VM row is already gone: ReleaseVM deletes the VM
+	// before the lease.
+	now := timestamppb.Now()
+	if err := st.CreateLease(ctx, &poolmgrv1alpha1.LeaseRecord{
+		LeaseId:         "lease-1",
+		VmUid:           "vm-gone",
+		PoolName:        "pool-a",
+		PoolNamespace:   "default",
+		ClaimedAt:       now,
+		LastHeartbeatAt: now,
+		ExpiresAt:       now,
+		RequestId:       "req-1",
+	}); err != nil {
+		t.Fatalf("CreateLease: %v", err)
+	}
+
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil, nil)
+	_, err := s.ClaimVM(ctx, claimRequest("pool-a", "req-1"))
+	if status.Code(err) != codes.Aborted {
+		t.Fatalf("expected Aborted, got %v", err)
+	}
+	assertVMPhase(t, st, "vm-1", poolmgrv1alpha1.VMPhase_AVAILABLE)
+}
+
+// racingCreateLeaseStore wraps a store.Store and, on the first CreateLease
+// with a request_id, first claims another VM and commits a lease for it
+// with the same request_id. This reproduces two ClaimVMs with one
+// request_id that both passed the lookup, with the other one winning.
+type racingCreateLeaseStore struct {
+	store.Store
+
+	mu          sync.Mutex
+	winnerLease *poolmgrv1alpha1.LeaseRecord
+}
+
+func (s *racingCreateLeaseStore) CreateLease(ctx context.Context, l *poolmgrv1alpha1.LeaseRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if l.GetRequestId() == "" || s.winnerLease != nil {
+		return s.Store.CreateLease(ctx, l)
+	}
+
+	vm, err := s.ClaimAvailableVM(ctx, l.GetPoolName(), l.GetPoolNamespace())
+	if err != nil {
+		return fmt.Errorf("racer: claim: %w", err)
+	}
+	winner := proto.Clone(l).(*poolmgrv1alpha1.LeaseRecord)
+	winner.LeaseId = "winner-lease"
+	winner.VmUid = vm.GetUid()
+	vm.LeaseId = &winner.LeaseId
+	if err := s.UpdateVM(ctx, vm); err != nil {
+		return fmt.Errorf("racer: update vm: %w", err)
+	}
+	if err := s.Store.CreateLease(ctx, winner); err != nil {
+		return fmt.Errorf("racer: create lease: %w", err)
+	}
+	s.winnerLease = winner
+	return s.Store.CreateLease(ctx, l)
+}
+
+func TestClaimVM_ConcurrentDuplicateRequestID(t *testing.T) {
+	flint := startFakeFlintlock(t, &fakeMicroVM{}, &fakeMicroVMExec{})
+	st := openTestStore(t)
+	ctx := context.Background()
+	setupPoolWithVMs(t, st, samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, []string{"do-thing"}), "vm-1", "vm-2")
+
+	racer := &racingCreateLeaseStore{Store: st}
+	notifier := &spyNotifier{}
+	reg := metrics.NewRegistry()
+	s := api.NewLeaseServer(racer, flint, api.HookExecConfig{}, notifier, reg)
+
+	resp, err := s.ClaimVM(ctx, claimRequest("pool-a", "req-1"))
+	if err != nil {
+		t.Fatalf("ClaimVM: %v", err)
+	}
+	winner := racer.winnerLease
+	if winner == nil {
+		t.Fatalf("expected the racer to have created a competing lease")
+	}
+	if resp.GetLeaseId() != winner.GetLeaseId() || resp.GetVmUid() != winner.GetVmUid() {
+		t.Fatalf("expected the winner's lease %s on %s, got lease %s on %s",
+			winner.GetLeaseId(), winner.GetVmUid(), resp.GetLeaseId(), resp.GetVmUid())
+	}
+	if len(resp.GetNetworkInterfaces()) != 1 {
+		t.Fatalf("expected 1 network interface, got %v", resp.GetNetworkInterfaces())
+	}
+
+	loser := "vm-1"
+	if winner.GetVmUid() == "vm-1" {
+		loser = "vm-2"
+	}
+	gotLoser, err := st.GetVM(ctx, loser)
+	if err != nil {
+		t.Fatalf("GetVM(%s): %v", loser, err)
+	}
+	if gotLoser.GetPhase() != poolmgrv1alpha1.VMPhase_AVAILABLE || gotLoser.GetLeaseId() != "" {
+		t.Fatalf("expected loser %s back to AVAILABLE with no lease, got phase %v lease %q", loser, gotLoser.GetPhase(), gotLoser.GetLeaseId())
+	}
+
+	leases, err := st.ListLeases(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListLeases: %v", err)
+	}
+	if len(leases) != 1 || leases[0].GetLeaseId() != winner.GetLeaseId() {
+		t.Fatalf("expected only the winner's lease, got %+v", leases)
+	}
+
+	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
+	if err != nil {
+		t.Fatalf("ListEventsSince: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected no events from the losing claim, got %+v", events)
+	}
+	if len(notifier.claimed) != 0 || len(notifier.deleted) != 0 {
+		t.Fatalf("expected no notifications from the losing claim, got claimed=%v deleted=%v", notifier.claimed, notifier.deleted)
+	}
+
+	body := scrapeMetrics(t, reg)
+	if !strings.Contains(body, `poolmgr_vm_claims_total{pool_name="pool-a",pool_namespace="default",replayed="true"} 1`) {
+		t.Fatalf("expected 1 replayed claim recorded, got:\n%s", body)
+	}
+	if strings.Contains(body, `replayed="false"`) {
+		t.Fatalf("expected no fresh claim recorded for the losing request, got:\n%s", body)
+	}
+}
+
+func TestClaimVM_HookFailureThenRetryClaimsFresh(t *testing.T) {
+	var calls atomic.Int32
+	exec := &fakeMicroVMExec{
+		respond: func(*microvmexecv1alpha1.ExecStart) (int32, string) {
+			if calls.Add(1) == 1 {
+				return 1, ""
+			}
+			return 0, ""
+		},
+	}
+	flint := startFakeFlintlock(t, &fakeMicroVM{}, exec)
+	st := openTestStore(t)
+	ctx := context.Background()
+	setupPoolWithVMs(t, st, samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, []string{"do-thing"}), "vm-1", "vm-2")
+
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil, nil)
+	if _, err := s.ClaimVM(ctx, claimRequest("pool-a", "req-1")); status.Code(err) != codes.Internal {
+		t.Fatalf("expected Internal from the failing hook, got %v", err)
+	}
+	if _, err := st.GetLeaseByRequestID(ctx, "req-1"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected no lease after a hook failure, GetLeaseByRequestID error = %v", err)
+	}
+
+	resp, err := s.ClaimVM(ctx, claimRequest("pool-a", "req-1"))
+	if err != nil {
+		t.Fatalf("retried ClaimVM: %v", err)
+	}
+	lease, err := st.GetLeaseByRequestID(ctx, "req-1")
+	if err != nil {
+		t.Fatalf("GetLeaseByRequestID: %v", err)
+	}
+	if lease.GetLeaseId() != resp.GetLeaseId() {
+		t.Fatalf("expected the retry's lease %s to carry req-1, got %s", resp.GetLeaseId(), lease.GetLeaseId())
+	}
+
+	quarantined := "vm-1"
+	if resp.GetVmUid() == "vm-1" {
+		quarantined = "vm-2"
+	}
+	assertVMPhase(t, st, quarantined, poolmgrv1alpha1.VMPhase_QUARANTINED)
+	assertVMPhase(t, st, resp.GetVmUid(), poolmgrv1alpha1.VMPhase_LEASED)
 }
 
 func TestHeartbeat_Success(t *testing.T) {
