@@ -6,12 +6,14 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
+	"modernc.org/sqlite" // also registers the "sqlite" database/sql driver
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 //go:embed schema.sql
@@ -22,7 +24,7 @@ type sqliteStore struct {
 }
 
 // Open opens (creating if necessary) a SQLite database at path and applies
-// the pool manager schema.
+// the pool manager schema and any pending migrations.
 func Open(path string) (Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -46,8 +48,73 @@ func Open(path string) (Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("store: apply schema: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 
 	return &sqliteStore{db: db}, nil
+}
+
+// migrations are the schema changes applied on top of schema.sql, which is
+// the version-0 baseline. migrations[i] takes a database from
+// PRAGMA user_version i to i+1. Append new migrations to the end; never edit,
+// remove, or reorder one that has shipped.
+var migrations = []string{
+	// 1: request_id on leases, for idempotent ClaimVM. The index is partial
+	// so that the many leases claimed without a request ID (stored as NULL)
+	// never conflict with each other.
+	`ALTER TABLE leases ADD COLUMN request_id TEXT;
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_leases_request_id
+		ON leases (request_id) WHERE request_id IS NOT NULL;`,
+	// 2: per-host TLS settings, so a host's connection details live in the
+	// store rather than only in the config file. The defaults describe
+	// "no TLS settings", which is what a pre-existing row had.
+	`ALTER TABLE hosts ADD COLUMN tls_insecure INTEGER NOT NULL DEFAULT 0;
+	ALTER TABLE hosts ADD COLUMN ca_file TEXT NOT NULL DEFAULT '';
+	ALTER TABLE hosts ADD COLUMN cert_file TEXT NOT NULL DEFAULT '';
+	ALTER TABLE hosts ADD COLUMN key_file TEXT NOT NULL DEFAULT '';`,
+}
+
+// migrate brings db from its current PRAGMA user_version up to
+// len(migrations), applying each pending migration in its own transaction
+// together with the user_version bump, so a failed migration leaves the
+// database at the last version that fully applied.
+func migrate(db *sql.DB) error {
+	var version int
+	if err := db.QueryRow(`PRAGMA user_version;`).Scan(&version); err != nil {
+		return fmt.Errorf("store: read schema version: %w", err)
+	}
+	if version > len(migrations) {
+		return fmt.Errorf("store: database schema version %d is newer than this binary supports (%d)", version, len(migrations))
+	}
+
+	for v := version; v < len(migrations); v++ {
+		if err := applyMigration(db, v+1, migrations[v]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyMigration(db *sql.DB, version int, stmts string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: begin migration %d: %w", version, err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if _, err := tx.Exec(stmts); err != nil {
+		return fmt.Errorf("store: apply migration %d: %w", version, err)
+	}
+	// PRAGMA does not accept bound parameters; version is an int we control.
+	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d;`, version)); err != nil {
+		return fmt.Errorf("store: set schema version %d: %w", version, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit migration %d: %w", version, err)
+	}
+	return nil
 }
 
 func (s *sqliteStore) Close() error {
@@ -331,28 +398,60 @@ func (s *sqliteStore) CreateLease(ctx context.Context, l *poolmgrv1alpha1.LeaseR
 	}
 
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO leases (lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		row.leaseID, row.vmUID, row.poolName, row.poolNamespace, row.claimedAt, row.lastHeartbeatAt, row.expiresAt,
+		INSERT INTO leases (lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at, request_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		row.leaseID, row.vmUID, row.poolName, row.poolNamespace, row.claimedAt, row.lastHeartbeatAt, row.expiresAt, row.requestID,
 	)
+	if isRequestIDConflict(err) {
+		return ErrDuplicateRequestID
+	}
 	if err != nil {
 		return fmt.Errorf("store: insert lease: %w", err)
 	}
 	return nil
 }
 
+// isRequestIDConflict reports whether err is idx_leases_request_id rejecting
+// an INSERT, as opposed to any other constraint (such as a duplicate
+// lease_id) that SQLite also reports as a UNIQUE violation.
+func isRequestIDConflict(err error) bool {
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) || sqliteErr.Code() != sqlite3.SQLITE_CONSTRAINT_UNIQUE {
+		return false
+	}
+	return strings.Contains(sqliteErr.Error(), "leases.request_id")
+}
+
 func (s *sqliteStore) GetLease(ctx context.Context, leaseID string) (*poolmgrv1alpha1.LeaseRecord, error) {
 	r := s.db.QueryRowContext(ctx, `
-		SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at
+		SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at, request_id
 		FROM leases WHERE lease_id = ?`, leaseID)
 
 	var row leaseRow
-	err := r.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt)
+	err := r.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt, &row.requestID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: query lease: %w", err)
+	}
+	return rowToLease(row), nil
+}
+
+func (s *sqliteStore) GetLeaseByRequestID(ctx context.Context, requestID string) (*poolmgrv1alpha1.LeaseRecord, error) {
+	// An empty request ID is stored as NULL, which never matches, so this
+	// returns ErrNotFound for "" without a special case.
+	r := s.db.QueryRowContext(ctx, `
+		SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at, request_id
+		FROM leases WHERE request_id = ?`, requestID)
+
+	var row leaseRow
+	err := r.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt, &row.requestID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: query lease by request id: %w", err)
 	}
 	return rowToLease(row), nil
 }
@@ -378,7 +477,7 @@ func (s *sqliteStore) DeleteLease(ctx context.Context, leaseID string) error {
 
 func (s *sqliteStore) ListExpiredLeases(ctx context.Context, now time.Time) ([]*poolmgrv1alpha1.LeaseRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at
+		SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at, request_id
 		FROM leases WHERE expires_at <= ? ORDER BY expires_at`, now.UnixNano())
 	if err != nil {
 		return nil, fmt.Errorf("store: query expired leases: %w", err)
@@ -388,7 +487,7 @@ func (s *sqliteStore) ListExpiredLeases(ctx context.Context, now time.Time) ([]*
 	var leases []*poolmgrv1alpha1.LeaseRecord
 	for rows.Next() {
 		var row leaseRow
-		if err := rows.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt); err != nil {
+		if err := rows.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt, &row.requestID); err != nil {
 			return nil, fmt.Errorf("store: scan lease: %w", err)
 		}
 		leases = append(leases, rowToLease(row))
@@ -400,7 +499,7 @@ func (s *sqliteStore) ListExpiredLeases(ctx context.Context, now time.Time) ([]*
 }
 
 func (s *sqliteStore) ListLeases(ctx context.Context, poolRef *poolmgrv1alpha1.PoolRef) ([]*poolmgrv1alpha1.LeaseRecord, error) {
-	query := `SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at FROM leases`
+	query := `SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at, request_id FROM leases`
 	var args []any
 	if poolRef != nil {
 		query += ` WHERE pool_name = ? AND pool_namespace = ?`
@@ -417,7 +516,7 @@ func (s *sqliteStore) ListLeases(ctx context.Context, poolRef *poolmgrv1alpha1.P
 	var leases []*poolmgrv1alpha1.LeaseRecord
 	for rows.Next() {
 		var row leaseRow
-		if err := rows.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt); err != nil {
+		if err := rows.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt, &row.requestID); err != nil {
 			return nil, fmt.Errorf("store: scan lease: %w", err)
 		}
 		leases = append(leases, rowToLease(row))
@@ -437,9 +536,9 @@ func (s *sqliteStore) DeleteLeaseIfExpired(ctx context.Context, leaseID string, 
 
 	var row leaseRow
 	err = tx.QueryRowContext(ctx, `
-		SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at
+		SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at, request_id
 		FROM leases WHERE lease_id = ?`, leaseID,
-	).Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt)
+	).Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt, &row.requestID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -547,31 +646,141 @@ func scanEvents(rows *sql.Rows) ([]*poolmgrv1alpha1.Event, error) {
 	return events, nil
 }
 
-func (s *sqliteStore) UpsertHostIfMissing(ctx context.Context, host *poolmgrv1alpha1.Host) error {
+// hostColumns lists the hosts table's columns in the order hostRow.scanDest
+// expects them.
+const hostColumns = `name, address, cordoned, cordoned_reason, cordoned_at, updated_at,
+	tls_insecure, ca_file, cert_file, key_file`
+
+// scanDest returns pointers to row's fields in hostColumns order.
+func (row *hostRow) scanDest() []any {
+	return []any{
+		&row.name, &row.address, &row.cordoned, &row.cordonedReason, &row.cordonedAt, &row.updatedAt,
+		&row.tlsInsecure, &row.caFile, &row.certFile, &row.keyFile,
+	}
+}
+
+func (s *sqliteStore) CreateHost(ctx context.Context, host *poolmgrv1alpha1.Host) error {
 	row, err := hostToRow(host)
 	if err != nil {
 		return fmt.Errorf("store: marshal host: %w", err)
 	}
 
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO hosts (name, address, cordoned, cordoned_reason, cordoned_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT (name) DO UPDATE SET address = excluded.address`,
+		INSERT INTO hosts (`+hostColumns+`)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.name, row.address, row.cordoned, row.cordonedReason, row.cordonedAt, row.updatedAt,
+		row.tlsInsecure, row.caFile, row.certFile, row.keyFile,
+	)
+	if isHostNameConflict(err) {
+		return ErrHostExists
+	}
+	if err != nil {
+		return fmt.Errorf("store: insert host: %w", err)
+	}
+	return nil
+}
+
+// isHostNameConflict reports whether err is the hosts primary key rejecting
+// an INSERT.
+func isHostNameConflict(err error) bool {
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	switch sqliteErr.Code() {
+	case sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY, sqlite3.SQLITE_CONSTRAINT_UNIQUE:
+		return strings.Contains(sqliteErr.Error(), "hosts.name")
+	}
+	return false
+}
+
+func (s *sqliteStore) UpdateHost(ctx context.Context, host *poolmgrv1alpha1.Host) (*poolmgrv1alpha1.Host, error) {
+	tls := host.GetTls()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE hosts SET address = ?, tls_insecure = ?, ca_file = ?, cert_file = ?, key_file = ?, updated_at = ?
+		WHERE name = ?`,
+		host.GetAddress(), tls.GetInsecure(), tls.GetCaFile(), tls.GetCertFile(), tls.GetKeyFile(),
+		time.Now().UnixNano(), host.GetName(),
 	)
 	if err != nil {
-		return fmt.Errorf("store: upsert host: %w", err)
+		return nil, fmt.Errorf("store: update host: %w", err)
+	}
+	if err := checkRowsAffected(res); err != nil {
+		return nil, err
+	}
+
+	return s.GetHost(ctx, host.GetName())
+}
+
+func (s *sqliteStore) DeleteHost(ctx context.Context, name string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin delete host tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// The checks and the delete share one transaction on the store's single
+	// connection (see Open), so neither a pool write nor a ReservePlacement
+	// can land between them.
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM hosts WHERE name = ?)`, name).Scan(&exists); err != nil {
+		return fmt.Errorf("store: select host: %w", err)
+	}
+	if !exists {
+		return ErrNotFound
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT DISTINCT pools.namespace, pools.name
+		FROM pools, json_each(pools.flintlock_hosts)
+		WHERE json_each.value = ?
+		ORDER BY pools.namespace, pools.name`, name)
+	if err != nil {
+		return fmt.Errorf("store: query pools naming host: %w", err)
+	}
+	var pools []string
+	for rows.Next() {
+		var ns, pool string
+		if err := rows.Scan(&ns, &pool); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("store: scan pool naming host: %w", err)
+		}
+		pools = append(pools, ns+"/"+pool)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("store: iterate pools naming host: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("store: iterate pools naming host: %w", err)
+	}
+
+	var count int32
+	if err := tx.QueryRowContext(ctx, `
+		SELECT (SELECT COUNT(*) FROM vms WHERE flintlock_host = ?)
+		     + (SELECT COUNT(*) FROM placements WHERE host = ?)`,
+		name, name,
+	).Scan(&count); err != nil {
+		return fmt.Errorf("store: count vms by host: %w", err)
+	}
+
+	if len(pools) > 0 || count > 0 {
+		return &HostInUseError{Pools: pools, VMCount: count}
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM hosts WHERE name = ?`, name); err != nil {
+		return fmt.Errorf("store: delete host: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit delete host tx: %w", err)
 	}
 	return nil
 }
 
 func (s *sqliteStore) GetHost(ctx context.Context, name string) (*poolmgrv1alpha1.Host, error) {
-	r := s.db.QueryRowContext(ctx, `
-		SELECT name, address, cordoned, cordoned_reason, cordoned_at, updated_at
-		FROM hosts WHERE name = ?`, name)
+	r := s.db.QueryRowContext(ctx, `SELECT `+hostColumns+` FROM hosts WHERE name = ?`, name)
 
 	var row hostRow
-	err := r.Scan(&row.name, &row.address, &row.cordoned, &row.cordonedReason, &row.cordonedAt, &row.updatedAt)
+	err := r.Scan(row.scanDest()...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -582,9 +791,7 @@ func (s *sqliteStore) GetHost(ctx context.Context, name string) (*poolmgrv1alpha
 }
 
 func (s *sqliteStore) ListHosts(ctx context.Context) ([]*poolmgrv1alpha1.Host, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, address, cordoned, cordoned_reason, cordoned_at, updated_at
-		FROM hosts ORDER BY name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+hostColumns+` FROM hosts ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("store: query hosts: %w", err)
 	}
@@ -593,7 +800,7 @@ func (s *sqliteStore) ListHosts(ctx context.Context) ([]*poolmgrv1alpha1.Host, e
 	var hosts []*poolmgrv1alpha1.Host
 	for rows.Next() {
 		var row hostRow
-		if err := rows.Scan(&row.name, &row.address, &row.cordoned, &row.cordonedReason, &row.cordonedAt, &row.updatedAt); err != nil {
+		if err := rows.Scan(row.scanDest()...); err != nil {
 			return nil, fmt.Errorf("store: scan host: %w", err)
 		}
 		hosts = append(hosts, rowToHost(row))
@@ -631,27 +838,6 @@ func (s *sqliteStore) SetHostCordoned(ctx context.Context, name string, cordoned
 	return s.GetHost(ctx, name)
 }
 
-func (s *sqliteStore) ListCordonedHostNames(ctx context.Context) (map[string]bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT name FROM hosts WHERE cordoned = 1`)
-	if err != nil {
-		return nil, fmt.Errorf("store: query cordoned hosts: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	cordoned := make(map[string]bool)
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, fmt.Errorf("store: scan cordoned host: %w", err)
-		}
-		cordoned[name] = true
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: iterate cordoned hosts: %w", err)
-	}
-	return cordoned, nil
-}
-
 func (s *sqliteStore) ReservePlacement(ctx context.Context, id, host, poolName, poolNamespace string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -663,11 +849,14 @@ func (s *sqliteStore) ReservePlacement(ctx context.Context, id, host, poolName, 
 	// single connection (see Open), so SetHostCordoned's UPDATE can't land
 	// between them: either it committed first and this returns
 	// ErrHostCordoned, or it waits and then sees the reservation counted.
+	// DeleteHost is serialized the same way: either it committed first and
+	// this returns ErrHostNotRegistered, or it sees the reservation and
+	// refuses.
 	var cordoned bool
 	err = tx.QueryRowContext(ctx, `SELECT cordoned FROM hosts WHERE name = ?`, host).Scan(&cordoned)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		// Unregistered host: can't be cordoned, so nothing to refuse.
+		return ErrHostNotRegistered
 	case err != nil:
 		return fmt.Errorf("store: select host cordoned: %w", err)
 	case cordoned:

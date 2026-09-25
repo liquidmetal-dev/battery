@@ -17,7 +17,6 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/liquidmetal-dev/battery/internal/api"
-	"github.com/liquidmetal-dev/battery/internal/config"
 	"github.com/liquidmetal-dev/battery/internal/flintlockclient"
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
@@ -39,13 +38,13 @@ func bufconnLeaseWithFlint(t *testing.T) (*grpc.ClientConn, store.Store) {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	flint, err := flintlockclient.New(&config.Config{Hosts: []config.HostConfig{
+	flint, err := flintlockclient.New([]*poolmgrv1alpha1.Host{
 		// Nothing needs to actually be listening here: ExecClient/Client/
 		// Address just look up an already-constructed client by host name,
 		// and any RPC against this address (only attempted best-effort, for
 		// network interfaces) is left to fail harmlessly.
-		{Name: "host-a", Address: "127.0.0.1:1", TLS: config.TLSConfig{Insecure: true}},
-	}})
+		{Name: "host-a", Address: "127.0.0.1:1", Tls: &poolmgrv1alpha1.HostTLS{Insecure: true}},
+	})
 	if err != nil {
 		t.Fatalf("flintlockclient.New() error = %v", err)
 	}
@@ -342,5 +341,49 @@ func TestLeaseList_NamespaceWithoutPool_ValidationError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--pool and --namespace must be given together") {
 		t.Errorf("error = %q, want it to mention --pool/--namespace must be given together", err.Error())
+	}
+}
+
+// recordingLeaseClient is a LeaseClient that records the last ClaimVM
+// request and returns a canned response. Its other methods are left nil
+// and panic if called.
+type recordingLeaseClient struct {
+	poolmgrv1alpha1.LeaseClient
+
+	claimReq *poolmgrv1alpha1.ClaimVMRequest
+}
+
+func (c *recordingLeaseClient) ClaimVM(_ context.Context, req *poolmgrv1alpha1.ClaimVMRequest, _ ...grpc.CallOption) (*poolmgrv1alpha1.ClaimVMResponse, error) {
+	c.claimReq = req
+	return &poolmgrv1alpha1.ClaimVMResponse{LeaseId: "lease-1", VmUid: "vm-1"}, nil
+}
+
+func TestLeaseClaim_RequestID(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"set", []string{"--request-id", "req-1"}, "req-1"},
+		{"unset", nil, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &recordingLeaseClient{}
+			ctx := context.WithValue(context.Background(), clientsKey{}, &apiClients{lease: client})
+
+			cmd := newLeaseClaimCmd()
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetContext(ctx)
+			cmd.SetArgs(append([]string{"--pool", "pool-a", "--namespace", "default"}, tt.args...))
+
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if got := client.claimReq.GetRequestId(); got != tt.want {
+				t.Errorf("ClaimVMRequest.RequestId = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

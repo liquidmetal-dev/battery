@@ -102,15 +102,15 @@ Key grounding facts confirmed directly from the flintlock and guest-agent source
 
 ### Components
 
-- **API Server** — gRPC server implementing three services (below). TLS mode (mTLS or
+- **API Server** — gRPC server implementing four services: `PoolAdmin`, `Lease`, `Events`, and `HostAdmin`. TLS mode (mTLS or
   insecure) is a startup config choice, matching flintlock's own `--tls-insecure` pattern.
 - **Reconciler** — one control loop per pool (goroutine), driven by a ticker plus event
   triggers (VM claimed, VM deleted). Responsible for: comparing desired vs actual pool state,
   invoking the configured replenishment strategy, running create/pre-lease hooks on new VMs
   before marking them `Available`, and sweeping expired leases.
-- **Flintlock Client Pool** — holds a gRPC client per configured flintlock host (from static
-  config or a discovery list); the reconciler picks a host for each new VM using a simple
-  placement policy (see Scheduling).
+- **Flintlock Client Pool** — holds a gRPC client per registered flintlock host (dialled from
+  the store at startup, and changed at runtime by the `HostAdmin` API); the reconciler picks a
+  host for each new VM using a simple placement policy (see Scheduling).
 - **poolmgr-hostagent** (new small component, one instance per flintlock host) — a thin gRPC
   server, colocated with `flintlockd`, that receives `WaitReady(vsock_path)` /
   `Run(vsock_path, cmd)` calls from the pool manager and executes them locally by shelling out
@@ -127,13 +127,16 @@ Key grounding facts confirmed directly from the flintlock and guest-agent source
 
 ### Multi-host fleet & scheduling (v1 scope)
 
-Flintlock hosts are static config entries (address + TLS materials) grouped implicitly by
-whatever the pool's spec requires (resource capacity is not tracked in v1 beyond a simple
-round-robin/least-loaded-by-VM-count placement across the hosts eligible for a pool). Each pool
-definition lists which flintlock host(s) it's allowed to place VMs on. A pool's VMs can span
-multiple hosts. No cross-pool bin-packing or live host capacity probing in v1 — this keeps
-scheduling simple and is an explicit place to extend later (e.g. querying host resource usage)
-without changing the external API.
+Flintlock hosts are records in the store (name, address, TLS file paths, cordon state), managed
+at runtime through the `HostAdmin` API (`poolmgrctl host add|update|remove|cordon`) rather than
+listed in the config file; see [the host API ADR](../adr/2026-09-24-host-api.md). A fresh
+manager has no hosts until one is added. Resource capacity is not tracked in v1 beyond a simple
+least-loaded-by-VM-count placement across the hosts eligible for a pool. Each pool
+definition lists which flintlock host(s) it's allowed to place VMs on, and each must already be
+registered. A pool's VMs can span multiple hosts, and cordoned hosts are skipped. No cross-pool
+bin-packing or live host capacity probing in v1 — this keeps scheduling simple and is an
+explicit place to extend later (e.g. querying host resource usage) without changing the
+external API.
 
 ## Data Model
 
@@ -194,6 +197,10 @@ service Events {
 `MicroVMStatus.network_interfaces`) plus the `lease_id`. `ClaimVM` fails with a distinct status
 (e.g. `RESOURCE_EXHAUSTED`) when no VM is `AVAILABLE`.
 
+`ClaimVMRequest.request_id` makes `ClaimVM` safe to retry: while the lease it created exists, a
+repeat request with the same `request_id` returns that lease rather than claiming another VM.
+See the [idempotent claims ADR](../adr/2026-09-24-idempotent-claims.md).
+
 ## Lease Lifecycle
 
 1. Consumer calls `ClaimVM(pool_name)`. Manager atomically picks an `AVAILABLE` VM, runs the
@@ -236,7 +243,7 @@ pool's `hook_failure_policy`.
 Per-pool gauges/counters (labeled by `pool_name`):
 - `poolmgr_pool_size` (target), `poolmgr_pool_available`, `poolmgr_pool_leased`,
   `poolmgr_pool_provisioning`, `poolmgr_pool_quarantined`
-- `poolmgr_vm_claims_total`, `poolmgr_vm_releases_total{reason="api|expiry"}`
+- `poolmgr_vm_claims_total{replayed="true|false"}`, `poolmgr_vm_releases_total{reason="api|expiry"}`
 - `poolmgr_vm_provision_duration_seconds` (histogram), `poolmgr_hook_duration_seconds{hook="create|pre_lease"}`
 - `poolmgr_hook_failures_total{hook,pool_name}`
 - `poolmgr_lease_duration_seconds` (histogram)

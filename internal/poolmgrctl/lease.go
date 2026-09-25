@@ -24,7 +24,7 @@ func newLeaseCmd() *cobra.Command {
 }
 
 func newLeaseClaimCmd() *cobra.Command {
-	var pool, namespace, output string
+	var pool, namespace, requestID, output string
 
 	cmd := &cobra.Command{
 		Use:   "claim",
@@ -38,7 +38,8 @@ func newLeaseClaimCmd() *cobra.Command {
 			lease := clientsFromContext(cmd.Context()).lease
 
 			resp, err := lease.ClaimVM(cmd.Context(), &poolmgrv1alpha1.ClaimVMRequest{
-				Pool: &poolmgrv1alpha1.PoolRef{Name: pool, Namespace: namespace},
+				Pool:      &poolmgrv1alpha1.PoolRef{Name: pool, Namespace: namespace},
+				RequestId: requestID,
 			})
 			if err != nil {
 				return wrapGRPCErr(err)
@@ -50,6 +51,7 @@ func newLeaseClaimCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&pool, "pool", "", "pool name")
 	cmd.Flags().StringVar(&namespace, "namespace", "", "pool namespace")
+	cmd.Flags().StringVar(&requestID, "request-id", "", "ID that makes the claim safe to retry: a repeat claim with the same ID returns the same lease (e.g. a UUID)")
 	cmd.Flags().StringVarP(&output, "output", "o", string(OutputTable), "output format: table|json")
 	_ = cmd.MarkFlagRequired("pool")
 	_ = cmd.MarkFlagRequired("namespace")

@@ -5,7 +5,7 @@
 // itself built the same way cmd/poolmgrd's main() and its own
 // cmd/poolmgrd/e2e_test.go do (store.Open, a fake-flintlock-backed
 // flintlockclient.Pool, poolmanager.Manager, internal/server.New plus the
-// PoolAdmin/Lease/Events services) - both listening on loopback ports.
+// PoolAdmin/Lease/Events/HostAdmin services) - both listening on loopback ports.
 //
 // Unlike cmd/poolmgrd/e2e_test.go, which talks to poolmgrd via generated
 // gRPC client stubs, this test goes through the actual poolmgrctl CLI: it
@@ -65,7 +65,7 @@ const grpcShutdownTimeout = 5 * time.Second
 
 // startE2EPoolmgrd builds and serves a real poolmgrd - the same
 // construction cmd/poolmgrd's main()/buildGRPCServer use (store, flint,
-// poolmanager.Manager, internal/server.New plus the PoolAdmin/Lease/Events
+// poolmanager.Manager, internal/server.New plus the PoolAdmin/Lease/Events/HostAdmin
 // services) minus the CLI/config-file/signal-handling glue - on a loopback
 // port, and returns the address poolmgrctl should dial.
 func startE2EPoolmgrd(t *testing.T, flint *flintlockclient.Pool) string {
@@ -93,6 +93,7 @@ func startE2EPoolmgrd(t *testing.T, flint *flintlockclient.Pool) string {
 	poolmgrv1alpha1.RegisterPoolAdminServer(srv, api.NewPoolAdminServer(st, poolMgr))
 	poolmgrv1alpha1.RegisterLeaseServer(srv, api.NewLeaseServer(st, flint, api.HookExecConfig{}, poolMgr, reg))
 	poolmgrv1alpha1.RegisterEventsServer(srv, api.NewEventsServer(st, 0, 0))
+	poolmgrv1alpha1.RegisterHostAdminServer(srv, api.NewHostAdminServer(st, flint))
 
 	healthSrv := health.NewServer()
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
@@ -197,8 +198,26 @@ func TestE2E_PoolmgrctlLifecycle(t *testing.T) {
 	spec := e2etest.MinSizeThresholdPoolSpec(poolName, 1, 1)
 	specPath := writeE2ESpecFile(t, spec)
 
+	// Step 0: register the fake flintlock host, which pool create requires.
+	// host add dials it and checks its version, which host get then shows.
+	flintAddr, err := flint.Address("host-a")
+	if err != nil {
+		t.Fatalf("flint.Address: %v", err)
+	}
+	out, err := runCLI(ctx, addr, "host", "add", "host-a", "--address", flintAddr, "--flintlock-insecure")
+	if err != nil {
+		t.Fatalf("host add: %v\noutput:\n%s", err, out)
+	}
+	out, err = runCLI(ctx, addr, "host", "get", "host-a")
+	if err != nil {
+		t.Fatalf("host get: %v\noutput:\n%s", err, out)
+	}
+	if !strings.Contains(out, flintlockclient.MinFlintlockVersion) {
+		t.Fatalf("host get output missing flintlock version %q, got:\n%s", flintlockclient.MinFlintlockVersion, out)
+	}
+
 	// Step 1: pool create.
-	out, err := runCLI(ctx, addr, "pool", "create", "--spec-file", specPath)
+	out, err = runCLI(ctx, addr, "pool", "create", "--spec-file", specPath)
 	if err != nil {
 		t.Fatalf("pool create: %v\noutput:\n%s", err, out)
 	}

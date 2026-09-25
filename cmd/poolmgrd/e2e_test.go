@@ -44,7 +44,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	"github.com/liquidmetal-dev/battery/internal/config"
@@ -83,18 +82,6 @@ func startE2EPoolmgrd(t *testing.T, flint *flintlockclient.Pool) e2ePoolmgrd {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	// Seed the host registry the same way main()'s seedHosts does, so
-	// HostAdmin.CordonHost/UncordonHost have a known host to act on. The fake
-	// flintlock started by e2etest.StartFakeFlintlock is always named
-	// "host-a" (see e2etest.StartFakeFlintlock); its real address isn't
-	// needed here since nothing in this suite dials HostAdmin's reported
-	// address directly.
-	if err := st.UpsertHostIfMissing(context.Background(), &poolmgrv1alpha1.Host{
-		Name: "host-a", Address: "host-a", UpdatedAt: timestamppb.Now(),
-	}); err != nil {
-		t.Fatalf("seed host-a: %v", err)
-	}
-
 	reg := metrics.NewRegistry()
 
 	runCtx, cancel := context.WithCancel(context.Background())
@@ -121,12 +108,32 @@ func startE2EPoolmgrd(t *testing.T, flint *flintlockclient.Pool) e2ePoolmgrd {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	return e2ePoolmgrd{
+	pm := e2ePoolmgrd{
 		PoolAdmin: poolmgrv1alpha1.NewPoolAdminClient(conn),
 		Lease:     poolmgrv1alpha1.NewLeaseClient(conn),
 		Events:    poolmgrv1alpha1.NewEventsClient(conn),
 		HostAdmin: poolmgrv1alpha1.NewHostAdminClient(conn),
 	}
+
+	// Register the fake flintlock the way an operator would, with
+	// HostAdmin.AddHost (poolmgrctl host add): the store is the only source
+	// of hosts, and CreatePool refuses a pool naming an unregistered one.
+	// AddHost dials the fake and checks its version like any real host.
+	flintAddr, err := flint.Address("host-a")
+	if err != nil {
+		t.Fatalf("flint.Address: %v", err)
+	}
+	if _, err := pm.HostAdmin.AddHost(context.Background(), &poolmgrv1alpha1.AddHostRequest{
+		Host: &poolmgrv1alpha1.Host{
+			Name:    "host-a",
+			Address: flintAddr,
+			Tls:     &poolmgrv1alpha1.HostTLS{Insecure: true},
+		},
+	}); err != nil {
+		t.Fatalf("AddHost(host-a): %v", err)
+	}
+
+	return pm
 }
 
 // waitForAvailable polls GetPool until its available count equals want, or

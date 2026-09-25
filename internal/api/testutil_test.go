@@ -21,7 +21,6 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/liquidmetal-dev/battery/internal/config"
 	"github.com/liquidmetal-dev/battery/internal/flintlockclient"
 	"github.com/liquidmetal-dev/battery/internal/metrics"
 	"github.com/liquidmetal-dev/battery/internal/store"
@@ -56,6 +55,15 @@ func openTestStore(t *testing.T) store.Store {
 		}
 	})
 	return s
+}
+
+// openPoolAdminTestStore returns openTestStore with host-a registered, so
+// samplePool specs pass CreatePool's and UpdatePool's flintlock_hosts check.
+func openPoolAdminTestStore(t *testing.T) store.Store {
+	t.Helper()
+	st := openTestStore(t)
+	seedTestHost(context.Background(), t, st, "host-a")
+	return st
 }
 
 // samplePool returns a minimal, valid PoolSpec on host-a with the given
@@ -220,9 +228,9 @@ func startFakeFlintlock(t *testing.T, vm *fakeMicroVM, exec *fakeMicroVMExec) *f
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 
-	pool, err := flintlockclient.New(&config.Config{Hosts: []config.HostConfig{
-		{Name: "host-a", Address: lis.Addr().String(), TLS: config.TLSConfig{Insecure: true}},
-	}})
+	pool, err := flintlockclient.New([]*poolmgrv1alpha1.Host{
+		{Name: "host-a", Address: lis.Addr().String(), Tls: &poolmgrv1alpha1.HostTLS{Insecure: true}},
+	})
 	if err != nil {
 		t.Fatalf("flintlockclient.New: %v", err)
 	}

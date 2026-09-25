@@ -164,6 +164,7 @@ func TestPrintLeasesTable(t *testing.T) {
 		sampleLeaseForOutput("lease-1", "pool-a", "default", "vm-1"),
 		sampleLeaseForOutput("lease-2", "pool-b", "other", "vm-2"),
 	}
+	leases[0].RequestId = "req-1"
 
 	var buf bytes.Buffer
 	if err := printLeases(&buf, leases, OutputTable); err != nil {
@@ -172,8 +173,8 @@ func TestPrintLeasesTable(t *testing.T) {
 
 	out := buf.String()
 	for _, want := range []string{
-		"LEASE_ID", "POOL", "NAMESPACE", "VM_UID", "CLAIMED_AT", "EXPIRES_AT",
-		"lease-1", "pool-a", "default", "vm-1", "2026-09-12T10:00:00Z", "2026-09-12T11:00:00Z",
+		"LEASE_ID", "POOL", "NAMESPACE", "VM_UID", "CLAIMED_AT", "EXPIRES_AT", "REQUEST_ID",
+		"lease-1", "pool-a", "default", "vm-1", "2026-09-12T10:00:00Z", "2026-09-12T11:00:00Z", "req-1",
 		"lease-2", "pool-b", "other", "vm-2",
 	} {
 		if !strings.Contains(out, want) {
@@ -203,6 +204,7 @@ func TestPrintLeasesJSON_RoundTrip(t *testing.T) {
 		sampleLeaseForOutput("lease-1", "pool-a", "default", "vm-1"),
 		sampleLeaseForOutput("lease-2", "pool-b", "other", "vm-2"),
 	}
+	leases[0].RequestId = "req-1"
 
 	var buf bytes.Buffer
 	if err := printLeases(&buf, leases, OutputJSON); err != nil {
@@ -336,8 +338,12 @@ func TestPrintHostTable_NoFabricatedVMsColumn(t *testing.T) {
 // any phase) plus in-flight placements, not just "active" ones.
 func TestPrintHostStatusesTable_VMSColumn(t *testing.T) {
 	hosts := []*poolmgrv1alpha1.HostStatus{{
-		Host:    &poolmgrv1alpha1.Host{Name: "host-a", Address: "host-a.example.com:8443", Cordoned: true},
-		VmCount: 3,
+		Host: &poolmgrv1alpha1.Host{
+			Name: "host-a", Address: "host-a.example.com:8443", Cordoned: true,
+			Tls: &poolmgrv1alpha1.HostTLS{CaFile: "ca.pem", CertFile: "cert.pem", KeyFile: "key.pem"},
+		},
+		VmCount:          3,
+		FlintlockVersion: "v0.15.2",
 	}}
 
 	var buf bytes.Buffer
@@ -346,7 +352,7 @@ func TestPrintHostStatusesTable_VMSColumn(t *testing.T) {
 	}
 
 	out := buf.String()
-	for _, want := range []string{"NAME", "ADDRESS", "CORDONED", "VMS", "host-a", "true", "3"} {
+	for _, want := range []string{"NAME", "ADDRESS", "TLS", "CORDONED", "VMS", "VERSION", "host-a", "mtls", "true", "3", "v0.15.2"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printHostStatuses() table output missing %q, got:\n%s", want, out)
 		}
@@ -356,8 +362,29 @@ func TestPrintHostStatusesTable_VMSColumn(t *testing.T) {
 	}
 }
 
+func TestHostTLSMode(t *testing.T) {
+	tests := []struct {
+		tls  *poolmgrv1alpha1.HostTLS
+		want string
+	}{
+		{nil, ""},
+		{&poolmgrv1alpha1.HostTLS{}, ""},
+		{&poolmgrv1alpha1.HostTLS{Insecure: true}, "insecure"},
+		{&poolmgrv1alpha1.HostTLS{CaFile: "ca.pem"}, "tls"},
+		{&poolmgrv1alpha1.HostTLS{CaFile: "ca.pem", CertFile: "cert.pem", KeyFile: "key.pem"}, "mtls"},
+	}
+	for _, tt := range tests {
+		if got := hostTLSMode(tt.tls); got != tt.want {
+			t.Errorf("hostTLSMode(%v) = %q, want %q", tt.tls, got, tt.want)
+		}
+	}
+}
+
 func TestPrintHostJSON_RoundTrip(t *testing.T) {
-	host := &poolmgrv1alpha1.Host{Name: "host-a", Address: "host-a.example.com:8443", Cordoned: true, CordonedReason: "maintenance"}
+	host := &poolmgrv1alpha1.Host{
+		Name: "host-a", Address: "host-a.example.com:8443", Cordoned: true, CordonedReason: "maintenance",
+		Tls: &poolmgrv1alpha1.HostTLS{CaFile: "ca.pem"},
+	}
 
 	var buf bytes.Buffer
 	if err := printHost(&buf, host, OutputJSON); err != nil {
@@ -382,5 +409,19 @@ func TestParseOutputFormat(t *testing.T) {
 	}
 	if _, err := parseOutputFormat("yaml"); err == nil {
 		t.Error("parseOutputFormat(yaml) expected error, got nil")
+	}
+}
+
+func TestPrintHostStatusesTable_UnknownVersion(t *testing.T) {
+	hosts := []*poolmgrv1alpha1.HostStatus{{Host: &poolmgrv1alpha1.Host{Name: "host-a"}}}
+
+	var buf bytes.Buffer
+	if err := printHostStatuses(&buf, hosts, OutputTable); err != nil {
+		t.Fatalf("printHostStatuses() error = %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 2 || !strings.HasSuffix(lines[1], "-") {
+		t.Errorf("printHostStatuses() table output = %q, want a VERSION of \"-\" for an unchecked host", buf.String())
 	}
 }

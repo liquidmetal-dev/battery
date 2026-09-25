@@ -204,6 +204,8 @@ type leaseRow struct {
 	claimedAt       int64
 	lastHeartbeatAt int64
 	expiresAt       int64
+	// requestID is NULL when the lease was claimed without a request ID.
+	requestID sql.NullString
 }
 
 func leaseToRow(l *poolmgrv1alpha1.LeaseRecord) (leaseRow, error) {
@@ -228,6 +230,7 @@ func leaseToRow(l *poolmgrv1alpha1.LeaseRecord) (leaseRow, error) {
 		claimedAt:       claimedAt.UnixNano(),
 		lastHeartbeatAt: lastHeartbeatAt.UnixNano(),
 		expiresAt:       expiresAt.UnixNano(),
+		requestID:       sql.NullString{String: l.GetRequestId(), Valid: l.GetRequestId() != ""},
 	}, nil
 }
 
@@ -240,6 +243,7 @@ func rowToLease(row leaseRow) *poolmgrv1alpha1.LeaseRecord {
 		ClaimedAt:       timestamppb.New(time.Unix(0, row.claimedAt)),
 		LastHeartbeatAt: timestamppb.New(time.Unix(0, row.lastHeartbeatAt)),
 		ExpiresAt:       timestamppb.New(time.Unix(0, row.expiresAt)),
+		RequestId:       row.requestID.String,
 	}
 }
 
@@ -251,6 +255,10 @@ type hostRow struct {
 	cordonedReason sql.NullString
 	cordonedAt     sql.NullInt64
 	updatedAt      int64
+	tlsInsecure    bool
+	caFile         string
+	certFile       string
+	keyFile        string
 }
 
 func hostToRow(h *poolmgrv1alpha1.Host) (hostRow, error) {
@@ -260,10 +268,14 @@ func hostToRow(h *poolmgrv1alpha1.Host) (hostRow, error) {
 	}
 
 	row := hostRow{
-		name:      h.GetName(),
-		address:   h.GetAddress(),
-		cordoned:  h.GetCordoned(),
-		updatedAt: updatedAt.UnixNano(),
+		name:        h.GetName(),
+		address:     h.GetAddress(),
+		cordoned:    h.GetCordoned(),
+		updatedAt:   updatedAt.UnixNano(),
+		tlsInsecure: h.GetTls().GetInsecure(),
+		caFile:      h.GetTls().GetCaFile(),
+		certFile:    h.GetTls().GetCertFile(),
+		keyFile:     h.GetTls().GetKeyFile(),
 	}
 	if h.GetCordonedReason() != "" {
 		row.cordonedReason = sql.NullString{String: h.GetCordonedReason(), Valid: true}
@@ -274,12 +286,20 @@ func hostToRow(h *poolmgrv1alpha1.Host) (hostRow, error) {
 	return row, nil
 }
 
+// rowToHost always sets Tls, even when every TLS column holds its default,
+// so callers never need to tell an unset message from an empty one.
 func rowToHost(row hostRow) *poolmgrv1alpha1.Host {
 	h := &poolmgrv1alpha1.Host{
 		Name:      row.name,
 		Address:   row.address,
 		Cordoned:  row.cordoned,
 		UpdatedAt: timestamppb.New(time.Unix(0, row.updatedAt)),
+		Tls: &poolmgrv1alpha1.HostTLS{
+			Insecure: row.tlsInsecure,
+			CaFile:   row.caFile,
+			CertFile: row.certFile,
+			KeyFile:  row.keyFile,
+		},
 	}
 	if row.cordonedReason.Valid {
 		h.CordonedReason = row.cordonedReason.String

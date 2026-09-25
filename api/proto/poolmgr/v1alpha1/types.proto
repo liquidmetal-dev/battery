@@ -127,6 +127,9 @@ message LeaseRecord {
   // PoolNamespace is the namespace of the pool identified by pool_name (together they form
   // the pool's PoolRef identity).
   string pool_namespace = 7;
+  // RequestId is the ClaimVMRequest.request_id that created this lease.
+  // Empty if the client did not set one.
+  string request_id = 8;
 }
 
 // EventType names the kind of change an Event describes.
@@ -195,4 +198,15 @@ message Host {
   google.protobuf.Timestamp cordoned_at = 5;
 
   google.protobuf.Timestamp updated_at = 6;
+
+  HostTLS tls = 7;
+}
+
+// HostTLS carries what config.TLSConfig carried for a host. File paths are
+// resolved on the machine that runs poolmgrd, not on the caller's machine.
+message HostTLS {
+  bool insecure = 1;
+  string ca_file = 2;
+  string cert_file = 3;
+  string key_file = 4;
 }
