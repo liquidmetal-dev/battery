@@ -38,6 +38,10 @@ message HostStatus {
   // Maintenance is safe once the host is cordoned and this reaches 0: nothing remains on
   // it and nothing more can be placed there.
   int32 vm_count = 2;
+
+  // FlintlockVersion is the version the last successful ServerInfo call
+  // reported. Empty until the manager has checked the host.
+  string flintlock_version = 3;
 }
 
 message ListHostsResponse {

@@ -176,12 +176,23 @@ func parseLogLevel(s string) (slog.Level, error) {
 
 // seedHosts upserts a hosts registry row for every host in cfg, so the
 // HostAdmin API has a known-host set to validate Cordon/UncordonHost calls
-// against. An existing row has its address refreshed to match cfg, but its
-// cordon state is left untouched - see store.Store.UpsertHostIfMissing.
+// against. An existing row has its address and TLS settings refreshed to
+// match cfg, but its cordon state is left untouched - see
+// store.Store.UpsertHostIfMissing.
 func seedHosts(ctx context.Context, st store.Store, cfg *config.Config) error {
 	now := timestamppb.Now()
 	for _, h := range cfg.Hosts {
-		host := &poolmgrv1alpha1.Host{Name: h.Name, Address: h.Address, UpdatedAt: now}
+		host := &poolmgrv1alpha1.Host{
+			Name:    h.Name,
+			Address: h.Address,
+			Tls: &poolmgrv1alpha1.HostTLS{
+				Insecure: h.TLS.Insecure,
+				CaFile:   h.TLS.CAFile,
+				CertFile: h.TLS.CertFile,
+				KeyFile:  h.TLS.KeyFile,
+			},
+			UpdatedAt: now,
+		}
 		if err := st.UpsertHostIfMissing(ctx, host); err != nil {
 			return fmt.Errorf("seed host %q: %w", h.Name, err)
 		}

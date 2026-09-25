@@ -262,10 +262,10 @@ func printHost(w io.Writer, host *poolmgrv1alpha1.Host, format OutputFormat) err
 
 func printHostTable(w io.Writer, host *poolmgrv1alpha1.Host) error {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "NAME\tADDRESS\tCORDONED"); err != nil {
+	if _, err := fmt.Fprintln(tw, "NAME\tADDRESS\tTLS\tCORDONED"); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(tw, "%s\t%s\t%t\n", host.GetName(), host.GetAddress(), host.GetCordoned()); err != nil {
+	if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%t\n", host.GetName(), host.GetAddress(), hostTLSMode(host.GetTls()), host.GetCordoned()); err != nil {
 		return err
 	}
 	return tw.Flush()
@@ -322,17 +322,34 @@ func printHostStatusesJSON(w io.Writer, hosts []*poolmgrv1alpha1.HostStatus) err
 
 func printHostStatusesTable(w io.Writer, hosts []*poolmgrv1alpha1.HostStatus) error {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "NAME\tADDRESS\tCORDONED\tVMS"); err != nil {
+	if _, err := fmt.Fprintln(tw, "NAME\tADDRESS\tTLS\tCORDONED\tVMS"); err != nil {
 		return err
 	}
 	for _, hs := range hosts {
 		host := hs.GetHost()
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%t\t%d\n",
-			host.GetName(), host.GetAddress(), host.GetCordoned(), hs.GetVmCount()); err != nil {
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%t\t%d\n",
+			host.GetName(), host.GetAddress(), hostTLSMode(host.GetTls()), host.GetCordoned(), hs.GetVmCount()); err != nil {
 			return err
 		}
 	}
 	return tw.Flush()
+}
+
+// hostTLSMode summarizes how the manager connects to a host, for the TLS
+// table column: "insecure" (no TLS), "mtls" (a client certificate is
+// presented), "tls" (server verified via a CA file only), or "" if no TLS
+// settings are recorded. File paths are left to -o json.
+func hostTLSMode(t *poolmgrv1alpha1.HostTLS) string {
+	switch {
+	case t.GetInsecure():
+		return "insecure"
+	case t.GetCertFile() != "":
+		return "mtls"
+	case t.GetCaFile() != "":
+		return "tls"
+	default:
+		return ""
+	}
 }
 
 // formatTimestamp renders a *timestamppb.Timestamp as RFC3339, or "" if ts

@@ -67,6 +67,13 @@ var migrations = []string{
 	`ALTER TABLE leases ADD COLUMN request_id TEXT;
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_leases_request_id
 		ON leases (request_id) WHERE request_id IS NOT NULL;`,
+	// 2: per-host TLS settings, so a host's connection details live in the
+	// store rather than only in the config file. The defaults describe
+	// "no TLS settings", which is what a pre-existing row had.
+	`ALTER TABLE hosts ADD COLUMN tls_insecure INTEGER NOT NULL DEFAULT 0;
+	ALTER TABLE hosts ADD COLUMN ca_file TEXT NOT NULL DEFAULT '';
+	ALTER TABLE hosts ADD COLUMN cert_file TEXT NOT NULL DEFAULT '';
+	ALTER TABLE hosts ADD COLUMN key_file TEXT NOT NULL DEFAULT '';`,
 }
 
 // migrate brings db from its current PRAGMA user_version up to
@@ -639,6 +646,19 @@ func scanEvents(rows *sql.Rows) ([]*poolmgrv1alpha1.Event, error) {
 	return events, nil
 }
 
+// hostColumns lists the hosts table's columns in the order hostRow.scanDest
+// expects them.
+const hostColumns = `name, address, cordoned, cordoned_reason, cordoned_at, updated_at,
+	tls_insecure, ca_file, cert_file, key_file`
+
+// scanDest returns pointers to row's fields in hostColumns order.
+func (row *hostRow) scanDest() []any {
+	return []any{
+		&row.name, &row.address, &row.cordoned, &row.cordonedReason, &row.cordonedAt, &row.updatedAt,
+		&row.tlsInsecure, &row.caFile, &row.certFile, &row.keyFile,
+	}
+}
+
 func (s *sqliteStore) UpsertHostIfMissing(ctx context.Context, host *poolmgrv1alpha1.Host) error {
 	row, err := hostToRow(host)
 	if err != nil {
@@ -646,10 +666,16 @@ func (s *sqliteStore) UpsertHostIfMissing(ctx context.Context, host *poolmgrv1al
 	}
 
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO hosts (name, address, cordoned, cordoned_reason, cordoned_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT (name) DO UPDATE SET address = excluded.address`,
+		INSERT INTO hosts (`+hostColumns+`)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (name) DO UPDATE SET
+			address = excluded.address,
+			tls_insecure = excluded.tls_insecure,
+			ca_file = excluded.ca_file,
+			cert_file = excluded.cert_file,
+			key_file = excluded.key_file`,
 		row.name, row.address, row.cordoned, row.cordonedReason, row.cordonedAt, row.updatedAt,
+		row.tlsInsecure, row.caFile, row.certFile, row.keyFile,
 	)
 	if err != nil {
 		return fmt.Errorf("store: upsert host: %w", err)
@@ -657,13 +683,72 @@ func (s *sqliteStore) UpsertHostIfMissing(ctx context.Context, host *poolmgrv1al
 	return nil
 }
 
+func (s *sqliteStore) CreateHost(ctx context.Context, host *poolmgrv1alpha1.Host) error {
+	row, err := hostToRow(host)
+	if err != nil {
+		return fmt.Errorf("store: marshal host: %w", err)
+	}
+
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO hosts (`+hostColumns+`)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		row.name, row.address, row.cordoned, row.cordonedReason, row.cordonedAt, row.updatedAt,
+		row.tlsInsecure, row.caFile, row.certFile, row.keyFile,
+	)
+	if isHostNameConflict(err) {
+		return ErrHostExists
+	}
+	if err != nil {
+		return fmt.Errorf("store: insert host: %w", err)
+	}
+	return nil
+}
+
+// isHostNameConflict reports whether err is the hosts primary key rejecting
+// an INSERT.
+func isHostNameConflict(err error) bool {
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	switch sqliteErr.Code() {
+	case sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY, sqlite3.SQLITE_CONSTRAINT_UNIQUE:
+		return strings.Contains(sqliteErr.Error(), "hosts.name")
+	}
+	return false
+}
+
+func (s *sqliteStore) UpdateHost(ctx context.Context, host *poolmgrv1alpha1.Host) (*poolmgrv1alpha1.Host, error) {
+	tls := host.GetTls()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE hosts SET address = ?, tls_insecure = ?, ca_file = ?, cert_file = ?, key_file = ?, updated_at = ?
+		WHERE name = ?`,
+		host.GetAddress(), tls.GetInsecure(), tls.GetCaFile(), tls.GetCertFile(), tls.GetKeyFile(),
+		time.Now().UnixNano(), host.GetName(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: update host: %w", err)
+	}
+	if err := checkRowsAffected(res); err != nil {
+		return nil, err
+	}
+
+	return s.GetHost(ctx, host.GetName())
+}
+
+func (s *sqliteStore) DeleteHost(ctx context.Context, name string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM hosts WHERE name = ?`, name)
+	if err != nil {
+		return fmt.Errorf("store: delete host: %w", err)
+	}
+	return checkRowsAffected(res)
+}
+
 func (s *sqliteStore) GetHost(ctx context.Context, name string) (*poolmgrv1alpha1.Host, error) {
-	r := s.db.QueryRowContext(ctx, `
-		SELECT name, address, cordoned, cordoned_reason, cordoned_at, updated_at
-		FROM hosts WHERE name = ?`, name)
+	r := s.db.QueryRowContext(ctx, `SELECT `+hostColumns+` FROM hosts WHERE name = ?`, name)
 
 	var row hostRow
-	err := r.Scan(&row.name, &row.address, &row.cordoned, &row.cordonedReason, &row.cordonedAt, &row.updatedAt)
+	err := r.Scan(row.scanDest()...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -674,9 +759,7 @@ func (s *sqliteStore) GetHost(ctx context.Context, name string) (*poolmgrv1alpha
 }
 
 func (s *sqliteStore) ListHosts(ctx context.Context) ([]*poolmgrv1alpha1.Host, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, address, cordoned, cordoned_reason, cordoned_at, updated_at
-		FROM hosts ORDER BY name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+hostColumns+` FROM hosts ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("store: query hosts: %w", err)
 	}
@@ -685,7 +768,7 @@ func (s *sqliteStore) ListHosts(ctx context.Context) ([]*poolmgrv1alpha1.Host, e
 	var hosts []*poolmgrv1alpha1.Host
 	for rows.Next() {
 		var row hostRow
-		if err := rows.Scan(&row.name, &row.address, &row.cordoned, &row.cordonedReason, &row.cordonedAt, &row.updatedAt); err != nil {
+		if err := rows.Scan(row.scanDest()...); err != nil {
 			return nil, fmt.Errorf("store: scan host: %w", err)
 		}
 		hosts = append(hosts, rowToHost(row))
