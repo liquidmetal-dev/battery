@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -325,5 +326,33 @@ func TestBuildGRPCServer_InvalidConfig_ReturnsError(t *testing.T) {
 
 	if _, err := buildGRPCServer(cfg, st, nil, reg, poolMgr); err == nil {
 		t.Fatalf("expected error for invalid config, got nil")
+	}
+}
+
+// TestBuildFlintlockPool_SkipsBadHosts: one stored host that can't be
+// dialled must not stop poolmgrd starting; the others still join the pool.
+func TestBuildFlintlockPool_SkipsBadHosts(t *testing.T) {
+	hosts := []*poolmgrv1alpha1.Host{
+		{Name: "host-a", Address: "10.0.0.1:9090", Tls: &poolmgrv1alpha1.HostTLS{Insecure: true}},
+		{Name: "host-bad", Address: "10.0.0.2:9090", Tls: &poolmgrv1alpha1.HostTLS{CaFile: "/nonexistent/ca.pem"}},
+		{Name: "host-c", Address: "10.0.0.3:9090", Tls: &poolmgrv1alpha1.HostTLS{Insecure: true}},
+	}
+
+	flint := buildFlintlockPool(context.Background(), hosts)
+	t.Cleanup(func() { _ = flint.Close() })
+
+	got := flint.Hosts()
+	slices.Sort(got)
+	if want := []string{"host-a", "host-c"}; !slices.Equal(got, want) {
+		t.Errorf("Hosts() = %v, want %v", got, want)
+	}
+}
+
+func TestBuildFlintlockPool_NoHosts(t *testing.T) {
+	flint := buildFlintlockPool(context.Background(), nil)
+	t.Cleanup(func() { _ = flint.Close() })
+
+	if got := flint.Hosts(); len(got) != 0 {
+		t.Errorf("Hosts() = %v, want none", got)
 	}
 }

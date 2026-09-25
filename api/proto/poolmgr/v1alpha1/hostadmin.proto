@@ -2,17 +2,28 @@ syntax = "proto3";
 
 package poolmgr.v1alpha1;
 
+import "google/protobuf/empty.proto";
 import "poolmgr/v1alpha1/types.proto";
 
 option go_package = "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1;poolmgrv1alpha1";
 
-// HostAdmin manages the cordon state of registered flintlock hosts. Cordoning a host stops
-// the reconciler from placing new VMs there; existing VMs are unaffected and wind down
-// through normal lease expiry or release.
+// HostAdmin manages the registry of flintlock hosts and their cordon state. Cordoning a
+// host stops the reconciler from placing new VMs there; existing VMs are unaffected and
+// wind down through normal lease expiry or release.
 service HostAdmin {
   rpc CordonHost(CordonHostRequest) returns (Host);
   rpc UncordonHost(UncordonHostRequest) returns (Host);
   rpc ListHosts(ListHostsRequest) returns (ListHostsResponse);
+
+  // AddHost registers a new host. Unless skip_validation is set, the manager first dials
+  // it and checks its flintlock version, and stores nothing if either fails.
+  rpc AddHost(AddHostRequest) returns (Host);
+  // UpdateHost replaces an existing host's address and TLS settings and redials it.
+  rpc UpdateHost(UpdateHostRequest) returns (Host);
+  // RemoveHost unregisters a host. It fails while any pool spec names the host in
+  // flintlock_hosts, or while any VM or in-flight placement is still counted against it.
+  rpc RemoveHost(RemoveHostRequest) returns (google.protobuf.Empty);
+  rpc GetHost(GetHostRequest) returns (HostStatus);
 }
 
 message CordonHostRequest {
@@ -27,6 +38,33 @@ message UncordonHostRequest {
 }
 
 message ListHostsRequest {}
+
+message AddHostRequest {
+  // Name, address, and tls are read. Cordon fields and timestamps are
+  // ignored: a new host starts uncordoned.
+  Host host = 1;
+
+  // SkipValidation adds the host without dialing it. Use it to register a
+  // host before it is reachable.
+  bool skip_validation = 2;
+}
+
+message UpdateHostRequest {
+  // Host is matched by host.name and carries the new address and tls. Cordon
+  // fields are ignored; CordonHost and UncordonHost own them.
+  Host host = 1;
+
+  // SkipValidation updates the host without dialing it.
+  bool skip_validation = 2;
+}
+
+message RemoveHostRequest {
+  string name = 1;
+}
+
+message GetHostRequest {
+  string name = 1;
+}
 
 // HostStatus pairs a host's registry record with everything still counted against it.
 message HostStatus {

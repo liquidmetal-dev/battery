@@ -7,6 +7,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
@@ -34,6 +35,20 @@ var ErrHostCordoned = errors.New("store: host is cordoned")
 // ErrHostExists is returned by CreateHost when a host with the same name is
 // already registered.
 var ErrHostExists = errors.New("store: host already exists")
+
+// HostInUseError is returned by DeleteHost when something still depends on
+// the host: pool specs that name it in flintlock_hosts, or VM records and
+// placement reservations counted against it.
+type HostInUseError struct {
+	// Pools lists each pool that names the host, as "namespace/name".
+	Pools []string
+	// VMCount is CountVMsByHost for the host.
+	VMCount int32
+}
+
+func (e *HostInUseError) Error() string {
+	return fmt.Sprintf("store: host in use: named by pools %v, %d vms", e.Pools, e.VMCount)
+}
 
 // Store is the repository interface for pool manager persistence.
 type Store interface {
@@ -103,8 +118,11 @@ type Store interface {
 	// host.UpdatedAt are ignored: SetHostCordoned owns cordon state. Returns ErrNotFound if
 	// no such host is registered.
 	UpdateHost(ctx context.Context, host *poolmgrv1alpha1.Host) (*poolmgrv1alpha1.Host, error)
-	// DeleteHost removes host name's registry row. Returns ErrNotFound if no such host is
-	// registered.
+	// DeleteHost removes host name's registry row, but only if nothing depends on it: in the
+	// same transaction it checks that no pool spec names the host in flintlock_hosts and
+	// that CountVMsByHost is 0, returning a *HostInUseError (and deleting nothing) if
+	// either fails. A ReservePlacement can therefore never land between the check and the
+	// delete. Returns ErrNotFound if no such host is registered.
 	DeleteHost(ctx context.Context, name string) error
 	GetHost(ctx context.Context, name string) (*poolmgrv1alpha1.Host, error)
 	ListHosts(ctx context.Context) ([]*poolmgrv1alpha1.Host, error)

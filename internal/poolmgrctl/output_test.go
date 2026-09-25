@@ -342,7 +342,8 @@ func TestPrintHostStatusesTable_VMSColumn(t *testing.T) {
 			Name: "host-a", Address: "host-a.example.com:8443", Cordoned: true,
 			Tls: &poolmgrv1alpha1.HostTLS{CaFile: "ca.pem", CertFile: "cert.pem", KeyFile: "key.pem"},
 		},
-		VmCount: 3,
+		VmCount:          3,
+		FlintlockVersion: "v0.15.2",
 	}}
 
 	var buf bytes.Buffer
@@ -351,7 +352,7 @@ func TestPrintHostStatusesTable_VMSColumn(t *testing.T) {
 	}
 
 	out := buf.String()
-	for _, want := range []string{"NAME", "ADDRESS", "TLS", "CORDONED", "VMS", "host-a", "mtls", "true", "3"} {
+	for _, want := range []string{"NAME", "ADDRESS", "TLS", "CORDONED", "VMS", "VERSION", "host-a", "mtls", "true", "3", "v0.15.2"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printHostStatuses() table output missing %q, got:\n%s", want, out)
 		}
@@ -408,5 +409,19 @@ func TestParseOutputFormat(t *testing.T) {
 	}
 	if _, err := parseOutputFormat("yaml"); err == nil {
 		t.Error("parseOutputFormat(yaml) expected error, got nil")
+	}
+}
+
+func TestPrintHostStatusesTable_UnknownVersion(t *testing.T) {
+	hosts := []*poolmgrv1alpha1.HostStatus{{Host: &poolmgrv1alpha1.Host{Name: "host-a"}}}
+
+	var buf bytes.Buffer
+	if err := printHostStatuses(&buf, hosts, OutputTable); err != nil {
+		t.Fatalf("printHostStatuses() error = %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 2 || !strings.HasSuffix(lines[1], "-") {
+		t.Errorf("printHostStatuses() table output = %q, want a VERSION of \"-\" for an unchecked host", buf.String())
 	}
 }

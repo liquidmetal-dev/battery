@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
 
@@ -50,5 +51,28 @@ func TestRootCmd_UnknownFlag_ReturnsPlainError(t *testing.T) {
 	}
 	if got := ExitCode(err); got != 1 {
 		t.Errorf("ExitCode(%v) = %d, want 1", err, got)
+	}
+}
+
+// TestRootCmd_NoSubcommandShadowsConnectionFlags: a subcommand's local flag
+// with the name of a root persistent flag (--insecure, --ca-file, ...)
+// silently takes its value, leaving poolmgrctl's own connection to poolmgrd
+// unconfigured. host add/update's TLS flags are prefixed for this reason.
+func TestRootCmd_NoSubcommandShadowsConnectionFlags(t *testing.T) {
+	root := NewRootCmd()
+
+	var walk func(cmd *cobra.Command)
+	walk = func(cmd *cobra.Command) {
+		cmd.LocalNonPersistentFlags().VisitAll(func(f *pflag.Flag) {
+			if root.PersistentFlags().Lookup(f.Name) != nil {
+				t.Errorf("%q defines --%s, which shadows the root persistent flag", cmd.CommandPath(), f.Name)
+			}
+		})
+		for _, sub := range cmd.Commands() {
+			walk(sub)
+		}
+	}
+	for _, sub := range root.Commands() {
+		walk(sub)
 	}
 }

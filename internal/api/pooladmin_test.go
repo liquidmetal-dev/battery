@@ -3,6 +3,7 @@ package api_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,7 +19,7 @@ import (
 
 func TestCreateGetPool(t *testing.T) {
 	ctx := context.Background()
-	st := openTestStore(t)
+	st := openPoolAdminTestStore(t)
 	s := api.NewPoolAdminServer(st, nil)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
@@ -42,7 +43,7 @@ func TestCreateGetPool(t *testing.T) {
 
 func TestCreatePoolForcesAllowGuestAgent(t *testing.T) {
 	ctx := context.Background()
-	st := openTestStore(t)
+	st := openPoolAdminTestStore(t)
 	s := api.NewPoolAdminServer(st, nil)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
@@ -71,7 +72,7 @@ func TestCreatePoolForcesAllowGuestAgent(t *testing.T) {
 // before any code reaches a direct (non-getter) field access.
 func TestCreatePoolNilSpec(t *testing.T) {
 	ctx := context.Background()
-	st := openTestStore(t)
+	st := openPoolAdminTestStore(t)
 	s := api.NewPoolAdminServer(st, nil)
 
 	_, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{})
@@ -112,7 +113,7 @@ func TestCreatePoolValidation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			st := openTestStore(t)
+			st := openPoolAdminTestStore(t)
 			s := api.NewPoolAdminServer(st, nil)
 
 			spec := base()
@@ -128,7 +129,7 @@ func TestCreatePoolValidation(t *testing.T) {
 
 func TestCreatePoolAlreadyExists(t *testing.T) {
 	ctx := context.Background()
-	st := openTestStore(t)
+	st := openPoolAdminTestStore(t)
 	s := api.NewPoolAdminServer(st, nil)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
@@ -144,7 +145,7 @@ func TestCreatePoolAlreadyExists(t *testing.T) {
 
 func TestGetUpdateDeletePoolNotFound(t *testing.T) {
 	ctx := context.Background()
-	st := openTestStore(t)
+	st := openPoolAdminTestStore(t)
 	s := api.NewPoolAdminServer(st, nil)
 
 	ref := &poolmgrv1alpha1.PoolRef{Name: "missing", Namespace: "default"}
@@ -162,7 +163,7 @@ func TestGetUpdateDeletePoolNotFound(t *testing.T) {
 
 func TestUpdatePool(t *testing.T) {
 	ctx := context.Background()
-	st := openTestStore(t)
+	st := openPoolAdminTestStore(t)
 	s := api.NewPoolAdminServer(st, nil)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
@@ -192,7 +193,7 @@ func TestUpdatePool(t *testing.T) {
 
 func TestListPoolsNamespaceFilter(t *testing.T) {
 	ctx := context.Background()
-	st := openTestStore(t)
+	st := openPoolAdminTestStore(t)
 	s := api.NewPoolAdminServer(st, nil)
 
 	a := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
@@ -226,7 +227,7 @@ func TestListPoolsNamespaceFilter(t *testing.T) {
 
 func TestDeletePool(t *testing.T) {
 	ctx := context.Background()
-	st := openTestStore(t)
+	st := openPoolAdminTestStore(t)
 	s := api.NewPoolAdminServer(st, nil)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
@@ -256,7 +257,7 @@ func TestDeletePoolBlockedWithVMs(t *testing.T) {
 	for _, phase := range phases {
 		t.Run(phase.String(), func(t *testing.T) {
 			ctx := context.Background()
-			st := openTestStore(t)
+			st := openPoolAdminTestStore(t)
 			s := api.NewPoolAdminServer(st, nil)
 
 			spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
@@ -278,7 +279,7 @@ func TestDeletePoolBlockedWithVMs(t *testing.T) {
 
 func TestGetPoolStatusCounts(t *testing.T) {
 	ctx := context.Background()
-	st := openTestStore(t)
+	st := openPoolAdminTestStore(t)
 	s := api.NewPoolAdminServer(st, nil)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
@@ -319,7 +320,7 @@ func withPhase(vm *poolmgrv1alpha1.VMRecord, phase poolmgrv1alpha1.VMPhase) *poo
 
 func TestCreatePool_StartsReconciler(t *testing.T) {
 	ctx := context.Background()
-	st := openTestStore(t)
+	st := openPoolAdminTestStore(t)
 	lifecycle := &fakePoolLifecycle{}
 	s := api.NewPoolAdminServer(st, lifecycle)
 
@@ -337,7 +338,7 @@ func TestCreatePool_StartsReconciler(t *testing.T) {
 
 func TestCreatePool_ValidationFailure_DoesNotStartReconciler(t *testing.T) {
 	ctx := context.Background()
-	st := openTestStore(t)
+	st := openPoolAdminTestStore(t)
 	lifecycle := &fakePoolLifecycle{}
 	s := api.NewPoolAdminServer(st, lifecycle)
 
@@ -355,7 +356,7 @@ func TestCreatePool_ValidationFailure_DoesNotStartReconciler(t *testing.T) {
 
 func TestDeletePool_StopsReconciler(t *testing.T) {
 	ctx := context.Background()
-	st := openTestStore(t)
+	st := openPoolAdminTestStore(t)
 	lifecycle := &fakePoolLifecycle{}
 	s := api.NewPoolAdminServer(st, lifecycle)
 
@@ -377,7 +378,7 @@ func TestDeletePool_StopsReconciler(t *testing.T) {
 
 func TestUpdatePool_RestartsReconciler(t *testing.T) {
 	ctx := context.Background()
-	st := openTestStore(t)
+	st := openPoolAdminTestStore(t)
 	lifecycle := &fakePoolLifecycle{}
 	s := api.NewPoolAdminServer(st, lifecycle)
 
@@ -437,7 +438,7 @@ func (p *pausingStore) UpdatePool(ctx context.Context, spec *poolmgrv1alpha1.Poo
 // agree once both finish.
 func TestUpdatePool_ConcurrentUpdates_Serialized(t *testing.T) {
 	ctx := context.Background()
-	st := openTestStore(t)
+	st := openPoolAdminTestStore(t)
 	lifecycle := &fakePoolLifecycle{}
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
@@ -504,7 +505,7 @@ func TestUpdatePool_ConcurrentUpdates_Serialized(t *testing.T) {
 
 func TestCreatePool_StartReconcilerFails_StillReturnsSuccess(t *testing.T) {
 	ctx := context.Background()
-	st := openTestStore(t)
+	st := openPoolAdminTestStore(t)
 	lifecycle := &fakePoolLifecycle{startErr: errors.New("boom")}
 	s := api.NewPoolAdminServer(st, lifecycle)
 
@@ -520,7 +521,7 @@ func TestCreatePool_StartReconcilerFails_StillReturnsSuccess(t *testing.T) {
 
 func TestDeletePool_VMsStillPresent_DoesNotStopReconciler(t *testing.T) {
 	ctx := context.Background()
-	st := openTestStore(t)
+	st := openPoolAdminTestStore(t)
 	lifecycle := &fakePoolLifecycle{}
 	s := api.NewPoolAdminServer(st, lifecycle)
 
@@ -540,5 +541,76 @@ func TestDeletePool_VMsStillPresent_DoesNotStopReconciler(t *testing.T) {
 	defer lifecycle.mu.Unlock()
 	if len(lifecycle.stopped) != 0 {
 		t.Fatalf("stopped = %v, want none", lifecycle.stopped)
+	}
+}
+
+func TestCreatePool_UnknownFlintlockHosts(t *testing.T) {
+	ctx := context.Background()
+	st := openPoolAdminTestStore(t)
+	lifecycle := &fakePoolLifecycle{}
+	s := api.NewPoolAdminServer(st, lifecycle)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	spec.FlintlockHosts = []string{"host-a", "host-x", "host-y", "host-x"}
+	_, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("CreatePool() error = %v, want InvalidArgument", err)
+	}
+	msg := status.Convert(err).Message()
+	if !strings.Contains(msg, "host-x, host-y") || strings.Contains(msg, "host-a") {
+		t.Errorf("CreatePool() message = %q, want it to list host-x and host-y once each, and not host-a", msg)
+	}
+
+	if _, err := st.GetPool(ctx, "pool-a", "default"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("GetPool() error = %v, want ErrNotFound", err)
+	}
+	if len(lifecycle.started) != 0 {
+		t.Errorf("StartReconciler called %v, want no calls", lifecycle.started)
+	}
+}
+
+func TestUpdatePool_UnknownFlintlockHosts(t *testing.T) {
+	ctx := context.Background()
+	st := openPoolAdminTestStore(t)
+	s := api.NewPoolAdminServer(st, nil)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+
+	update := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	update.FlintlockHosts = []string{"host-a", "host-x"}
+	_, err := s.UpdatePool(ctx, &poolmgrv1alpha1.UpdatePoolRequest{Spec: update})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("UpdatePool() error = %v, want InvalidArgument", err)
+	}
+	if msg := status.Convert(err).Message(); !strings.Contains(msg, "host-x") {
+		t.Errorf("UpdatePool() message = %q, want it to name host-x", msg)
+	}
+
+	got, err := st.GetPool(ctx, "pool-a", "default")
+	if err != nil {
+		t.Fatalf("GetPool() error = %v", err)
+	}
+	if len(got.GetFlintlockHosts()) != 1 {
+		t.Errorf("stored flintlock_hosts = %v, want [host-a] unchanged", got.GetFlintlockHosts())
+	}
+}
+
+// TestCreatePool_AfterRemoveHost: the referential checks hold in both
+// directions - once RemoveHost succeeds, no pool can name the host again.
+func TestCreatePool_AfterRemoveHost(t *testing.T) {
+	ctx := context.Background()
+	st := openPoolAdminTestStore(t)
+	hosts := newHostAdmin(t, st)
+	pools := api.NewPoolAdminServer(st, nil)
+
+	if _, err := hosts.RemoveHost(ctx, &poolmgrv1alpha1.RemoveHostRequest{Name: "host-a"}); err != nil {
+		t.Fatalf("RemoveHost() error = %v", err)
+	}
+	_, err := pools.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("CreatePool() error = %v, want InvalidArgument", err)
 	}
 }
