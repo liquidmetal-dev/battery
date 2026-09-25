@@ -102,7 +102,7 @@ Key grounding facts confirmed directly from the flintlock and guest-agent source
 
 ### Components
 
-- **API Server** — gRPC server implementing three services (below). TLS mode (mTLS or
+- **API Server** — gRPC server implementing four services: `PoolAdmin`, `Lease`, `Events`, and `HostAdmin`. TLS mode (mTLS or
   insecure) is a startup config choice, matching flintlock's own `--tls-insecure` pattern.
 - **Reconciler** — one control loop per pool (goroutine), driven by a ticker plus event
   triggers (VM claimed, VM deleted). Responsible for: comparing desired vs actual pool state,
