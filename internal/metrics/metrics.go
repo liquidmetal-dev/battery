@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -26,8 +27,8 @@ func newMetricSet(reg *prometheus.Registry) *metricSet {
 	m := &metricSet{
 		vmClaimsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "poolmgr_vm_claims_total",
-			Help: "Total number of VMs successfully claimed via ClaimVM, labeled by pool_name/pool_namespace.",
-		}, []string{"pool_name", "pool_namespace"}),
+			Help: "Total number of successful ClaimVM calls, labeled by pool_name/pool_namespace and replayed (true when a repeated request_id returned an existing lease instead of claiming a VM).",
+		}, []string{"pool_name", "pool_namespace", "replayed"}),
 		vmReleasesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "poolmgr_vm_releases_total",
 			Help: "Total number of VMs released, labeled by pool_name/pool_namespace and reason (api|expiry).",
@@ -67,9 +68,11 @@ func newMetricSet(reg *prometheus.Registry) *metricSet {
 	return m
 }
 
-// RecordVMClaim increments poolmgr_vm_claims_total for poolName/poolNamespace.
-func (r *Registry) RecordVMClaim(poolName, poolNamespace string) {
-	r.metrics.vmClaimsTotal.WithLabelValues(poolName, poolNamespace).Inc()
+// RecordVMClaim increments poolmgr_vm_claims_total for
+// poolName/poolNamespace. replayed is true when ClaimVM returned an existing
+// lease for a repeated request_id instead of claiming a VM.
+func (r *Registry) RecordVMClaim(poolName, poolNamespace string, replayed bool) {
+	r.metrics.vmClaimsTotal.WithLabelValues(poolName, poolNamespace, strconv.FormatBool(replayed)).Inc()
 }
 
 // RecordVMRelease increments poolmgr_vm_releases_total for

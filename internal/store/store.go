@@ -23,6 +23,10 @@ var ErrNoAvailableVM = errors.New("store: no available vm in pool")
 // expiry was extended (by a Heartbeat) since the caller last observed it.
 var ErrLeaseNotExpired = errors.New("store: lease not expired")
 
+// ErrDuplicateRequestID is returned by CreateLease when another lease
+// already carries the same non-empty request ID.
+var ErrDuplicateRequestID = errors.New("store: duplicate lease request id")
+
 // ErrHostCordoned is returned by ReservePlacement when the host was cordoned
 // at the moment the reservation was attempted.
 var ErrHostCordoned = errors.New("store: host is cordoned")
@@ -45,8 +49,14 @@ type Store interface {
 	// Returns ErrNoAvailableVM if no VM in the pool is currently AVAILABLE.
 	ClaimAvailableVM(ctx context.Context, poolName, poolNamespace string) (*poolmgrv1alpha1.VMRecord, error)
 
+	// CreateLease stores l. An empty l.RequestId is stored as no request ID.
+	// Returns ErrDuplicateRequestID if another lease already has l's non-empty
+	// RequestId.
 	CreateLease(ctx context.Context, l *poolmgrv1alpha1.LeaseRecord) error
 	GetLease(ctx context.Context, leaseID string) (*poolmgrv1alpha1.LeaseRecord, error)
+	// GetLeaseByRequestID returns the lease created with requestID. Returns
+	// ErrNotFound if there is none, including when requestID is empty.
+	GetLeaseByRequestID(ctx context.Context, requestID string) (*poolmgrv1alpha1.LeaseRecord, error)
 	// UpdateLeaseHeartbeat records a heartbeat at `at` and extends the lease's expiry to
 	// expiresAt (computed by the caller from the lease's pool's heartbeat_expiry_threshold).
 	UpdateLeaseHeartbeat(ctx context.Context, leaseID string, at time.Time, expiresAt time.Time) error

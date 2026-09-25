@@ -166,13 +166,14 @@ func printLeasesJSON(w io.Writer, leases []*poolmgrv1alpha1.LeaseRecord) error {
 
 func printLeasesTable(w io.Writer, leases []*poolmgrv1alpha1.LeaseRecord) error {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "LEASE_ID\tPOOL\tNAMESPACE\tVM_UID\tCLAIMED_AT\tEXPIRES_AT"); err != nil {
+	if _, err := fmt.Fprintln(tw, "LEASE_ID\tPOOL\tNAMESPACE\tVM_UID\tCLAIMED_AT\tEXPIRES_AT\tREQUEST_ID"); err != nil {
 		return err
 	}
 	for _, lease := range leases {
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			lease.GetLeaseId(), lease.GetPoolName(), lease.GetPoolNamespace(), lease.GetVmUid(),
-			formatTimestamp(lease.GetClaimedAt()), formatTimestamp(lease.GetExpiresAt())); err != nil {
+			formatTimestamp(lease.GetClaimedAt()), formatTimestamp(lease.GetExpiresAt()),
+			lease.GetRequestId()); err != nil {
 			return err
 		}
 	}

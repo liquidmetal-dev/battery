@@ -1,3 +1,7 @@
+-- schema.sql is the version-0 baseline schema, applied on every Open with
+-- CREATE ... IF NOT EXISTS. Do not change it to alter an existing table:
+-- add a numbered migration to the migrations list in sqlite.go instead.
+
 CREATE TABLE IF NOT EXISTS pools (
     name                          TEXT NOT NULL,
     namespace                     TEXT NOT NULL,

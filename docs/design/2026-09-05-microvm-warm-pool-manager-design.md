@@ -194,6 +194,10 @@ service Events {
 `MicroVMStatus.network_interfaces`) plus the `lease_id`. `ClaimVM` fails with a distinct status
 (e.g. `RESOURCE_EXHAUSTED`) when no VM is `AVAILABLE`.
 
+`ClaimVMRequest.request_id` makes `ClaimVM` safe to retry: while the lease it created exists, a
+repeat request with the same `request_id` returns that lease rather than claiming another VM.
+See the [idempotent claims ADR](../adr/2026-09-24-idempotent-claims.md).
+
 ## Lease Lifecycle
 
 1. Consumer calls `ClaimVM(pool_name)`. Manager atomically picks an `AVAILABLE` VM, runs the
@@ -236,7 +240,7 @@ pool's `hook_failure_policy`.
 Per-pool gauges/counters (labeled by `pool_name`):
 - `poolmgr_pool_size` (target), `poolmgr_pool_available`, `poolmgr_pool_leased`,
   `poolmgr_pool_provisioning`, `poolmgr_pool_quarantined`
-- `poolmgr_vm_claims_total`, `poolmgr_vm_releases_total{reason="api|expiry"}`
+- `poolmgr_vm_claims_total{replayed="true|false"}`, `poolmgr_vm_releases_total{reason="api|expiry"}`
 - `poolmgr_vm_provision_duration_seconds` (histogram), `poolmgr_hook_duration_seconds{hook="create|pre_lease"}`
 - `poolmgr_hook_failures_total{hook,pool_name}`
 - `poolmgr_lease_duration_seconds` (histogram)

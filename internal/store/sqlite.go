@@ -6,12 +6,14 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
+	"modernc.org/sqlite" // also registers the "sqlite" database/sql driver
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 //go:embed schema.sql
@@ -22,7 +24,7 @@ type sqliteStore struct {
 }
 
 // Open opens (creating if necessary) a SQLite database at path and applies
-// the pool manager schema.
+// the pool manager schema and any pending migrations.
 func Open(path string) (Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -46,8 +48,66 @@ func Open(path string) (Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("store: apply schema: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 
 	return &sqliteStore{db: db}, nil
+}
+
+// migrations are the schema changes applied on top of schema.sql, which is
+// the version-0 baseline. migrations[i] takes a database from
+// PRAGMA user_version i to i+1. Append new migrations to the end; never edit,
+// remove, or reorder one that has shipped.
+var migrations = []string{
+	// 1: request_id on leases, for idempotent ClaimVM. The index is partial
+	// so that the many leases claimed without a request ID (stored as NULL)
+	// never conflict with each other.
+	`ALTER TABLE leases ADD COLUMN request_id TEXT;
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_leases_request_id
+		ON leases (request_id) WHERE request_id IS NOT NULL;`,
+}
+
+// migrate brings db from its current PRAGMA user_version up to
+// len(migrations), applying each pending migration in its own transaction
+// together with the user_version bump, so a failed migration leaves the
+// database at the last version that fully applied.
+func migrate(db *sql.DB) error {
+	var version int
+	if err := db.QueryRow(`PRAGMA user_version;`).Scan(&version); err != nil {
+		return fmt.Errorf("store: read schema version: %w", err)
+	}
+	if version > len(migrations) {
+		return fmt.Errorf("store: database schema version %d is newer than this binary supports (%d)", version, len(migrations))
+	}
+
+	for v := version; v < len(migrations); v++ {
+		if err := applyMigration(db, v+1, migrations[v]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyMigration(db *sql.DB, version int, stmts string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: begin migration %d: %w", version, err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if _, err := tx.Exec(stmts); err != nil {
+		return fmt.Errorf("store: apply migration %d: %w", version, err)
+	}
+	// PRAGMA does not accept bound parameters; version is an int we control.
+	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d;`, version)); err != nil {
+		return fmt.Errorf("store: set schema version %d: %w", version, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit migration %d: %w", version, err)
+	}
+	return nil
 }
 
 func (s *sqliteStore) Close() error {
@@ -331,28 +391,60 @@ func (s *sqliteStore) CreateLease(ctx context.Context, l *poolmgrv1alpha1.LeaseR
 	}
 
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO leases (lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		row.leaseID, row.vmUID, row.poolName, row.poolNamespace, row.claimedAt, row.lastHeartbeatAt, row.expiresAt,
+		INSERT INTO leases (lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at, request_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		row.leaseID, row.vmUID, row.poolName, row.poolNamespace, row.claimedAt, row.lastHeartbeatAt, row.expiresAt, row.requestID,
 	)
+	if isRequestIDConflict(err) {
+		return ErrDuplicateRequestID
+	}
 	if err != nil {
 		return fmt.Errorf("store: insert lease: %w", err)
 	}
 	return nil
 }
 
+// isRequestIDConflict reports whether err is idx_leases_request_id rejecting
+// an INSERT, as opposed to any other constraint (such as a duplicate
+// lease_id) that SQLite also reports as a UNIQUE violation.
+func isRequestIDConflict(err error) bool {
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) || sqliteErr.Code() != sqlite3.SQLITE_CONSTRAINT_UNIQUE {
+		return false
+	}
+	return strings.Contains(sqliteErr.Error(), "leases.request_id")
+}
+
 func (s *sqliteStore) GetLease(ctx context.Context, leaseID string) (*poolmgrv1alpha1.LeaseRecord, error) {
 	r := s.db.QueryRowContext(ctx, `
-		SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at
+		SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at, request_id
 		FROM leases WHERE lease_id = ?`, leaseID)
 
 	var row leaseRow
-	err := r.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt)
+	err := r.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt, &row.requestID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: query lease: %w", err)
+	}
+	return rowToLease(row), nil
+}
+
+func (s *sqliteStore) GetLeaseByRequestID(ctx context.Context, requestID string) (*poolmgrv1alpha1.LeaseRecord, error) {
+	// An empty request ID is stored as NULL, which never matches, so this
+	// returns ErrNotFound for "" without a special case.
+	r := s.db.QueryRowContext(ctx, `
+		SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at, request_id
+		FROM leases WHERE request_id = ?`, requestID)
+
+	var row leaseRow
+	err := r.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt, &row.requestID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: query lease by request id: %w", err)
 	}
 	return rowToLease(row), nil
 }
@@ -378,7 +470,7 @@ func (s *sqliteStore) DeleteLease(ctx context.Context, leaseID string) error {
 
 func (s *sqliteStore) ListExpiredLeases(ctx context.Context, now time.Time) ([]*poolmgrv1alpha1.LeaseRecord, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at
+		SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at, request_id
 		FROM leases WHERE expires_at <= ? ORDER BY expires_at`, now.UnixNano())
 	if err != nil {
 		return nil, fmt.Errorf("store: query expired leases: %w", err)
@@ -388,7 +480,7 @@ func (s *sqliteStore) ListExpiredLeases(ctx context.Context, now time.Time) ([]*
 	var leases []*poolmgrv1alpha1.LeaseRecord
 	for rows.Next() {
 		var row leaseRow
-		if err := rows.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt); err != nil {
+		if err := rows.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt, &row.requestID); err != nil {
 			return nil, fmt.Errorf("store: scan lease: %w", err)
 		}
 		leases = append(leases, rowToLease(row))
@@ -400,7 +492,7 @@ func (s *sqliteStore) ListExpiredLeases(ctx context.Context, now time.Time) ([]*
 }
 
 func (s *sqliteStore) ListLeases(ctx context.Context, poolRef *poolmgrv1alpha1.PoolRef) ([]*poolmgrv1alpha1.LeaseRecord, error) {
-	query := `SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at FROM leases`
+	query := `SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at, request_id FROM leases`
 	var args []any
 	if poolRef != nil {
 		query += ` WHERE pool_name = ? AND pool_namespace = ?`
@@ -417,7 +509,7 @@ func (s *sqliteStore) ListLeases(ctx context.Context, poolRef *poolmgrv1alpha1.P
 	var leases []*poolmgrv1alpha1.LeaseRecord
 	for rows.Next() {
 		var row leaseRow
-		if err := rows.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt); err != nil {
+		if err := rows.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt, &row.requestID); err != nil {
 			return nil, fmt.Errorf("store: scan lease: %w", err)
 		}
 		leases = append(leases, rowToLease(row))
@@ -437,9 +529,9 @@ func (s *sqliteStore) DeleteLeaseIfExpired(ctx context.Context, leaseID string, 
 
 	var row leaseRow
 	err = tx.QueryRowContext(ctx, `
-		SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at
+		SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at, request_id
 		FROM leases WHERE lease_id = ?`, leaseID,
-	).Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt)
+	).Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt, &row.requestID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

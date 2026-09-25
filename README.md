@@ -67,6 +67,10 @@ poolmgrctl lease claim --pool web --namespace default --addr 127.0.0.1:9090 --in
 poolmgrctl events tail --pool web --namespace default --addr 127.0.0.1:9090 --insecure
 ```
 
+A claim can time out while the manager still commits the lease. To retry a claim safely, pass
+the same `--request-id` (e.g. a UUID) on every attempt: while the lease exists, a repeat claim
+with that ID returns the same lease instead of claiming another VM.
+
 ### Build and test
 
 ```sh
