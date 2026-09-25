@@ -1,6 +1,7 @@
 package poolmgrctl
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
@@ -245,9 +246,9 @@ func printClaimTable(w io.Writer, resp *poolmgrv1alpha1.ClaimVMResponse) error {
 	return nil
 }
 
-// printHost renders a single Host to w in the given format. Used for
-// CordonHost/UncordonHost responses, which carry no VM count - unlike
-// printHostStatuses, its table has no VMS column, so it never
+// printHost renders a single Host to w in the given format. Used for the
+// Cordon/Uncordon/Add/UpdateHost responses, which carry no VM count -
+// unlike printHostStatuses, its table has no VMS column, so it never
 // fabricates a count that wasn't returned by the RPC.
 func printHost(w io.Writer, host *poolmgrv1alpha1.Host, format OutputFormat) error {
 	switch format {
@@ -322,17 +323,73 @@ func printHostStatusesJSON(w io.Writer, hosts []*poolmgrv1alpha1.HostStatus) err
 
 func printHostStatusesTable(w io.Writer, hosts []*poolmgrv1alpha1.HostStatus) error {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "NAME\tADDRESS\tTLS\tCORDONED\tVMS"); err != nil {
+	if _, err := fmt.Fprintln(tw, "NAME\tADDRESS\tTLS\tCORDONED\tVMS\tVERSION"); err != nil {
 		return err
 	}
 	for _, hs := range hosts {
 		host := hs.GetHost()
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%t\t%d\n",
-			host.GetName(), host.GetAddress(), hostTLSMode(host.GetTls()), host.GetCordoned(), hs.GetVmCount()); err != nil {
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%t\t%d\t%s\n",
+			host.GetName(), host.GetAddress(), hostTLSMode(host.GetTls()), host.GetCordoned(), hs.GetVmCount(),
+			hostVersion(hs.GetFlintlockVersion())); err != nil {
 			return err
 		}
 	}
 	return tw.Flush()
+}
+
+// printHostStatus renders a single HostStatus (a GetHost response) to w:
+// the same one-row table as printHostStatuses, or the bare object (not a
+// one-element array) as JSON.
+func printHostStatus(w io.Writer, hs *poolmgrv1alpha1.HostStatus, format OutputFormat) error {
+	switch format {
+	case OutputJSON:
+		marshalOpts := protojson.MarshalOptions{Multiline: true}
+		b, err := marshalOpts.Marshal(hs)
+		if err != nil {
+			return fmt.Errorf("marshal host: %w", err)
+		}
+		if _, err := w.Write(b); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(w)
+		return err
+	case OutputTable, "":
+		return printHostStatusesTable(w, []*poolmgrv1alpha1.HostStatus{hs})
+	default:
+		return fmt.Errorf("invalid output format %q", format)
+	}
+}
+
+// printHostRemoved reports a successful RemoveHost, whose response carries
+// nothing: a sentence as table output, or {"name": ..., "removed": true} as
+// JSON.
+func printHostRemoved(w io.Writer, name string, format OutputFormat) error {
+	switch format {
+	case OutputJSON:
+		b, err := json.Marshal(struct {
+			Name    string `json:"name"`
+			Removed bool   `json:"removed"`
+		}{Name: name, Removed: true})
+		if err != nil {
+			return fmt.Errorf("marshal host: %w", err)
+		}
+		_, err = fmt.Fprintln(w, string(b))
+		return err
+	case OutputTable, "":
+		_, err := fmt.Fprintf(w, "host %s removed\n", name)
+		return err
+	default:
+		return fmt.Errorf("invalid output format %q", format)
+	}
+}
+
+// hostVersion renders a host's flintlock version for the VERSION column:
+// "-" until the manager has checked the host.
+func hostVersion(v string) string {
+	if v == "" {
+		return "-"
+	}
+	return v
 }
 
 // hostTLSMode summarizes how the manager connects to a host, for the TLS

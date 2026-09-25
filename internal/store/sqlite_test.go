@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -1214,6 +1215,73 @@ func TestDeleteHost(t *testing.T) {
 	}
 	if err := s.DeleteHost(ctx, "host-a"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("DeleteHost() second call error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestDeleteHostRefusesHostInUse(t *testing.T) {
+	tests := []struct {
+		name      string
+		setup     func(ctx context.Context, t *testing.T, s Store)
+		wantPools []string
+		wantVMs   int32
+	}{
+		{
+			name: "named by pools",
+			setup: func(ctx context.Context, t *testing.T, s Store) {
+				other := samplePoolSpec("pool-b")
+				other.Namespace = "team-x"
+				unrelated := samplePoolSpec("pool-c")
+				unrelated.FlintlockHosts = []string{"host-b"}
+				for _, p := range []*poolmgrv1alpha1.PoolSpec{samplePoolSpec("pool-a"), other, unrelated} {
+					if err := s.CreatePool(ctx, p); err != nil {
+						t.Fatalf("CreatePool(%s) error = %v", p.GetName(), err)
+					}
+				}
+			},
+			wantPools: []string{"default/pool-a", "team-x/pool-b"},
+		},
+		{
+			name: "vm record",
+			setup: func(ctx context.Context, t *testing.T, s Store) {
+				if err := s.CreateVM(ctx, sampleVMRecord("vm-1", "pool-a", "default", poolmgrv1alpha1.VMPhase_DELETING)); err != nil {
+					t.Fatalf("CreateVM() error = %v", err)
+				}
+			},
+			wantVMs: 1,
+		},
+		{
+			name: "placement reservation",
+			setup: func(ctx context.Context, t *testing.T, s Store) {
+				if err := s.ReservePlacement(ctx, "placement-1", "host-a", "pool-a", "default"); err != nil {
+					t.Fatalf("ReservePlacement() error = %v", err)
+				}
+			},
+			wantVMs: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := openTestStore(t)
+			ctx := context.Background()
+
+			if err := s.CreateHost(ctx, sampleHost("host-a")); err != nil {
+				t.Fatalf("CreateHost() error = %v", err)
+			}
+			tt.setup(ctx, t, s)
+
+			err := s.DeleteHost(ctx, "host-a")
+			var inUse *HostInUseError
+			if !errors.As(err, &inUse) {
+				t.Fatalf("DeleteHost() error = %v, want *HostInUseError", err)
+			}
+			if !slices.Equal(inUse.Pools, tt.wantPools) || inUse.VMCount != tt.wantVMs {
+				t.Errorf("DeleteHost() error = %+v, want pools %v and %d vms", inUse, tt.wantPools, tt.wantVMs)
+			}
+			if _, err := s.GetHost(ctx, "host-a"); err != nil {
+				t.Errorf("GetHost() after refused delete error = %v, want the host kept", err)
+			}
+		})
 	}
 }
 

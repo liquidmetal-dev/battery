@@ -95,10 +95,12 @@ func main() {
 	if err != nil {
 		fatal("poolmgrd: list hosts", err)
 	}
-	flint, err := flintlockclient.New(hosts)
-	if err != nil {
-		fatal("poolmgrd: flintlock client pool", err)
-	}
+	flint := buildFlintlockPool(ctx, hosts)
+	defer func() {
+		if err := flint.Close(); err != nil {
+			slog.Error("poolmgrd: close flintlock client pool", "error", err)
+		}
+	}()
 
 	reg := metrics.NewRegistry()
 	reg.RegisterPoolCollector(st)
@@ -206,6 +208,33 @@ func seedHosts(ctx context.Context, st store.Store, cfg *config.Config) error {
 	return nil
 }
 
+// buildFlintlockPool dials each stored host and returns a Pool of those that
+// dialled. A host whose stored spec fails flintlockclient.Dial (a bad TLS
+// setting, or TLS files that have gone missing) is logged and left out
+// rather than failing startup: it stays in the store, where ListHosts still
+// shows it and HostAdmin.UpdateHost can fix it and add it to the pool. Its
+// pools see ErrUnknownHost for it until then. An empty hosts is fine.
+func buildFlintlockPool(ctx context.Context, hosts []*poolmgrv1alpha1.Host) *flintlockclient.Pool {
+	// New(nil) dials nothing, so it can't fail.
+	flint, _ := flintlockclient.New(nil)
+	for _, h := range hosts {
+		c, err := flintlockclient.Dial(h)
+		if err == nil {
+			err = flint.Add(c)
+			if err != nil {
+				_ = c.Close()
+			}
+		}
+		if err != nil {
+			slog.WarnContext(ctx, "poolmgrd: skipping flintlock host, fix it with poolmgrctl host update", "host", h.GetName(), "error", err)
+		}
+	}
+	if len(hosts) == 0 {
+		slog.WarnContext(ctx, "poolmgrd: no flintlock hosts registered, pools cannot provision until one is added")
+	}
+	return flint
+}
+
 // clearStalePlacements drops every placement reservation in st. poolmgrd is
 // a single process and no reconciler has started yet, so nothing can be in
 // flight: any row still present was left by a previous process that died
@@ -231,7 +260,7 @@ func buildGRPCServer(cfg config.APIServerConfig, st store.Store, flint *flintloc
 	poolmgrv1alpha1.RegisterPoolAdminServer(srv, api.NewPoolAdminServer(st, poolMgr))
 	poolmgrv1alpha1.RegisterLeaseServer(srv, api.NewLeaseServer(st, flint, api.HookExecConfig{}, poolMgr, reg))
 	poolmgrv1alpha1.RegisterEventsServer(srv, api.NewEventsServer(st, 0, 0))
-	poolmgrv1alpha1.RegisterHostAdminServer(srv, api.NewHostAdminServer(st))
+	poolmgrv1alpha1.RegisterHostAdminServer(srv, api.NewHostAdminServer(st, flint))
 
 	healthSrv := health.NewServer()
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)

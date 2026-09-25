@@ -11,6 +11,7 @@ import (
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
 	status "google.golang.org/grpc/status"
+	emptypb "google.golang.org/protobuf/types/known/emptypb"
 )
 
 // This is a compile-time assertion to ensure that this generated file
@@ -22,19 +23,32 @@ const (
 	HostAdmin_CordonHost_FullMethodName   = "/poolmgr.v1alpha1.HostAdmin/CordonHost"
 	HostAdmin_UncordonHost_FullMethodName = "/poolmgr.v1alpha1.HostAdmin/UncordonHost"
 	HostAdmin_ListHosts_FullMethodName    = "/poolmgr.v1alpha1.HostAdmin/ListHosts"
+	HostAdmin_AddHost_FullMethodName      = "/poolmgr.v1alpha1.HostAdmin/AddHost"
+	HostAdmin_UpdateHost_FullMethodName   = "/poolmgr.v1alpha1.HostAdmin/UpdateHost"
+	HostAdmin_RemoveHost_FullMethodName   = "/poolmgr.v1alpha1.HostAdmin/RemoveHost"
+	HostAdmin_GetHost_FullMethodName      = "/poolmgr.v1alpha1.HostAdmin/GetHost"
 )
 
 // HostAdminClient is the client API for HostAdmin service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// HostAdmin manages the cordon state of registered flintlock hosts. Cordoning a host stops
-// the reconciler from placing new VMs there; existing VMs are unaffected and wind down
-// through normal lease expiry or release.
+// HostAdmin manages the registry of flintlock hosts and their cordon state. Cordoning a
+// host stops the reconciler from placing new VMs there; existing VMs are unaffected and
+// wind down through normal lease expiry or release.
 type HostAdminClient interface {
 	CordonHost(ctx context.Context, in *CordonHostRequest, opts ...grpc.CallOption) (*Host, error)
 	UncordonHost(ctx context.Context, in *UncordonHostRequest, opts ...grpc.CallOption) (*Host, error)
 	ListHosts(ctx context.Context, in *ListHostsRequest, opts ...grpc.CallOption) (*ListHostsResponse, error)
+	// AddHost registers a new host. Unless skip_validation is set, the manager first dials
+	// it and checks its flintlock version, and stores nothing if either fails.
+	AddHost(ctx context.Context, in *AddHostRequest, opts ...grpc.CallOption) (*Host, error)
+	// UpdateHost replaces an existing host's address and TLS settings and redials it.
+	UpdateHost(ctx context.Context, in *UpdateHostRequest, opts ...grpc.CallOption) (*Host, error)
+	// RemoveHost unregisters a host. It fails while any pool spec names the host in
+	// flintlock_hosts, or while any VM or in-flight placement is still counted against it.
+	RemoveHost(ctx context.Context, in *RemoveHostRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	GetHost(ctx context.Context, in *GetHostRequest, opts ...grpc.CallOption) (*HostStatus, error)
 }
 
 type hostAdminClient struct {
@@ -75,17 +89,66 @@ func (c *hostAdminClient) ListHosts(ctx context.Context, in *ListHostsRequest, o
 	return out, nil
 }
 
+func (c *hostAdminClient) AddHost(ctx context.Context, in *AddHostRequest, opts ...grpc.CallOption) (*Host, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Host)
+	err := c.cc.Invoke(ctx, HostAdmin_AddHost_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostAdminClient) UpdateHost(ctx context.Context, in *UpdateHostRequest, opts ...grpc.CallOption) (*Host, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Host)
+	err := c.cc.Invoke(ctx, HostAdmin_UpdateHost_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostAdminClient) RemoveHost(ctx context.Context, in *RemoveHostRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, HostAdmin_RemoveHost_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostAdminClient) GetHost(ctx context.Context, in *GetHostRequest, opts ...grpc.CallOption) (*HostStatus, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HostStatus)
+	err := c.cc.Invoke(ctx, HostAdmin_GetHost_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // HostAdminServer is the server API for HostAdmin service.
 // All implementations should embed UnimplementedHostAdminServer
 // for forward compatibility.
 //
-// HostAdmin manages the cordon state of registered flintlock hosts. Cordoning a host stops
-// the reconciler from placing new VMs there; existing VMs are unaffected and wind down
-// through normal lease expiry or release.
+// HostAdmin manages the registry of flintlock hosts and their cordon state. Cordoning a
+// host stops the reconciler from placing new VMs there; existing VMs are unaffected and
+// wind down through normal lease expiry or release.
 type HostAdminServer interface {
 	CordonHost(context.Context, *CordonHostRequest) (*Host, error)
 	UncordonHost(context.Context, *UncordonHostRequest) (*Host, error)
 	ListHosts(context.Context, *ListHostsRequest) (*ListHostsResponse, error)
+	// AddHost registers a new host. Unless skip_validation is set, the manager first dials
+	// it and checks its flintlock version, and stores nothing if either fails.
+	AddHost(context.Context, *AddHostRequest) (*Host, error)
+	// UpdateHost replaces an existing host's address and TLS settings and redials it.
+	UpdateHost(context.Context, *UpdateHostRequest) (*Host, error)
+	// RemoveHost unregisters a host. It fails while any pool spec names the host in
+	// flintlock_hosts, or while any VM or in-flight placement is still counted against it.
+	RemoveHost(context.Context, *RemoveHostRequest) (*emptypb.Empty, error)
+	GetHost(context.Context, *GetHostRequest) (*HostStatus, error)
 }
 
 // UnimplementedHostAdminServer should be embedded to have
@@ -103,6 +166,18 @@ func (UnimplementedHostAdminServer) UncordonHost(context.Context, *UncordonHostR
 }
 func (UnimplementedHostAdminServer) ListHosts(context.Context, *ListHostsRequest) (*ListHostsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListHosts not implemented")
+}
+func (UnimplementedHostAdminServer) AddHost(context.Context, *AddHostRequest) (*Host, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method AddHost not implemented")
+}
+func (UnimplementedHostAdminServer) UpdateHost(context.Context, *UpdateHostRequest) (*Host, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateHost not implemented")
+}
+func (UnimplementedHostAdminServer) RemoveHost(context.Context, *RemoveHostRequest) (*emptypb.Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RemoveHost not implemented")
+}
+func (UnimplementedHostAdminServer) GetHost(context.Context, *GetHostRequest) (*HostStatus, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetHost not implemented")
 }
 func (UnimplementedHostAdminServer) testEmbeddedByValue() {}
 
@@ -178,6 +253,78 @@ func _HostAdmin_ListHosts_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _HostAdmin_AddHost_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddHostRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostAdminServer).AddHost(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostAdmin_AddHost_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostAdminServer).AddHost(ctx, req.(*AddHostRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostAdmin_UpdateHost_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateHostRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostAdminServer).UpdateHost(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostAdmin_UpdateHost_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostAdminServer).UpdateHost(ctx, req.(*UpdateHostRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostAdmin_RemoveHost_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveHostRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostAdminServer).RemoveHost(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostAdmin_RemoveHost_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostAdminServer).RemoveHost(ctx, req.(*RemoveHostRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostAdmin_GetHost_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetHostRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostAdminServer).GetHost(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostAdmin_GetHost_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostAdminServer).GetHost(ctx, req.(*GetHostRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // HostAdmin_ServiceDesc is the grpc.ServiceDesc for HostAdmin service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -196,6 +343,22 @@ var HostAdmin_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListHosts",
 			Handler:    _HostAdmin_ListHosts_Handler,
+		},
+		{
+			MethodName: "AddHost",
+			Handler:    _HostAdmin_AddHost_Handler,
+		},
+		{
+			MethodName: "UpdateHost",
+			Handler:    _HostAdmin_UpdateHost_Handler,
+		},
+		{
+			MethodName: "RemoveHost",
+			Handler:    _HostAdmin_RemoveHost_Handler,
+		},
+		{
+			MethodName: "GetHost",
+			Handler:    _HostAdmin_GetHost_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

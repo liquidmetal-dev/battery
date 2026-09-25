@@ -57,6 +57,15 @@ func openTestStore(t *testing.T) store.Store {
 	return s
 }
 
+// openPoolAdminTestStore returns openTestStore with host-a registered, so
+// samplePool specs pass CreatePool's and UpdatePool's flintlock_hosts check.
+func openPoolAdminTestStore(t *testing.T) store.Store {
+	t.Helper()
+	st := openTestStore(t)
+	seedTestHost(context.Background(), t, st, "host-a")
+	return st
+}
+
 // samplePool returns a minimal, valid PoolSpec on host-a with the given
 // hook-failure policy and pre_lease_commands.
 func samplePool(name string, hookFailurePolicy poolmgrv1alpha1.HookFailurePolicy, preLeaseCommands []string) *poolmgrv1alpha1.PoolSpec {
