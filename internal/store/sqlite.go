@@ -554,10 +554,10 @@ func (s *sqliteStore) UpsertHostIfMissing(ctx context.Context, host *poolmgrv1al
 	}
 
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO hosts (name, address, drained, drained_reason, drained_at, updated_at)
+		INSERT INTO hosts (name, address, cordoned, cordoned_reason, cordoned_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT (name) DO UPDATE SET address = excluded.address`,
-		row.name, row.address, row.drained, row.drainedReason, row.drainedAt, row.updatedAt,
+		row.name, row.address, row.cordoned, row.cordonedReason, row.cordonedAt, row.updatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("store: upsert host: %w", err)
@@ -567,11 +567,11 @@ func (s *sqliteStore) UpsertHostIfMissing(ctx context.Context, host *poolmgrv1al
 
 func (s *sqliteStore) GetHost(ctx context.Context, name string) (*poolmgrv1alpha1.Host, error) {
 	r := s.db.QueryRowContext(ctx, `
-		SELECT name, address, drained, drained_reason, drained_at, updated_at
+		SELECT name, address, cordoned, cordoned_reason, cordoned_at, updated_at
 		FROM hosts WHERE name = ?`, name)
 
 	var row hostRow
-	err := r.Scan(&row.name, &row.address, &row.drained, &row.drainedReason, &row.drainedAt, &row.updatedAt)
+	err := r.Scan(&row.name, &row.address, &row.cordoned, &row.cordonedReason, &row.cordonedAt, &row.updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -583,7 +583,7 @@ func (s *sqliteStore) GetHost(ctx context.Context, name string) (*poolmgrv1alpha
 
 func (s *sqliteStore) ListHosts(ctx context.Context) ([]*poolmgrv1alpha1.Host, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, address, drained, drained_reason, drained_at, updated_at
+		SELECT name, address, cordoned, cordoned_reason, cordoned_at, updated_at
 		FROM hosts ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("store: query hosts: %w", err)
@@ -593,7 +593,7 @@ func (s *sqliteStore) ListHosts(ctx context.Context) ([]*poolmgrv1alpha1.Host, e
 	var hosts []*poolmgrv1alpha1.Host
 	for rows.Next() {
 		var row hostRow
-		if err := rows.Scan(&row.name, &row.address, &row.drained, &row.drainedReason, &row.drainedAt, &row.updatedAt); err != nil {
+		if err := rows.Scan(&row.name, &row.address, &row.cordoned, &row.cordonedReason, &row.cordonedAt, &row.updatedAt); err != nil {
 			return nil, fmt.Errorf("store: scan host: %w", err)
 		}
 		hosts = append(hosts, rowToHost(row))
@@ -604,25 +604,25 @@ func (s *sqliteStore) ListHosts(ctx context.Context) ([]*poolmgrv1alpha1.Host, e
 	return hosts, nil
 }
 
-func (s *sqliteStore) SetHostDrained(ctx context.Context, name string, drained bool, reason string) (*poolmgrv1alpha1.Host, error) {
+func (s *sqliteStore) SetHostCordoned(ctx context.Context, name string, cordoned bool, reason string) (*poolmgrv1alpha1.Host, error) {
 	now := time.Now()
 
-	var drainedReason sql.NullString
-	var drainedAt sql.NullInt64
-	if drained {
+	var cordonedReason sql.NullString
+	var cordonedAt sql.NullInt64
+	if cordoned {
 		if reason != "" {
-			drainedReason = sql.NullString{String: reason, Valid: true}
+			cordonedReason = sql.NullString{String: reason, Valid: true}
 		}
-		drainedAt = sql.NullInt64{Int64: now.UnixNano(), Valid: true}
+		cordonedAt = sql.NullInt64{Int64: now.UnixNano(), Valid: true}
 	}
 
 	res, err := s.db.ExecContext(ctx, `
-		UPDATE hosts SET drained = ?, drained_reason = ?, drained_at = ?, updated_at = ?
+		UPDATE hosts SET cordoned = ?, cordoned_reason = ?, cordoned_at = ?, updated_at = ?
 		WHERE name = ?`,
-		drained, drainedReason, drainedAt, now.UnixNano(), name,
+		cordoned, cordonedReason, cordonedAt, now.UnixNano(), name,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("store: set host drained: %w", err)
+		return nil, fmt.Errorf("store: set host cordoned: %w", err)
 	}
 	if err := checkRowsAffected(res); err != nil {
 		return nil, err
@@ -631,25 +631,25 @@ func (s *sqliteStore) SetHostDrained(ctx context.Context, name string, drained b
 	return s.GetHost(ctx, name)
 }
 
-func (s *sqliteStore) ListDrainedHostNames(ctx context.Context) (map[string]bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT name FROM hosts WHERE drained = 1`)
+func (s *sqliteStore) ListCordonedHostNames(ctx context.Context) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM hosts WHERE cordoned = 1`)
 	if err != nil {
-		return nil, fmt.Errorf("store: query drained hosts: %w", err)
+		return nil, fmt.Errorf("store: query cordoned hosts: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	drained := make(map[string]bool)
+	cordoned := make(map[string]bool)
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			return nil, fmt.Errorf("store: scan drained host: %w", err)
+			return nil, fmt.Errorf("store: scan cordoned host: %w", err)
 		}
-		drained[name] = true
+		cordoned[name] = true
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: iterate drained hosts: %w", err)
+		return nil, fmt.Errorf("store: iterate cordoned hosts: %w", err)
 	}
-	return drained, nil
+	return cordoned, nil
 }
 
 func (s *sqliteStore) ReservePlacement(ctx context.Context, id, host, poolName, poolNamespace string) error {
@@ -659,19 +659,19 @@ func (s *sqliteStore) ReservePlacement(ctx context.Context, id, host, poolName, 
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	// The drain check and the insert share one transaction on the store's
-	// single connection (see Open), so SetHostDrained's UPDATE can't land
+	// The cordon check and the insert share one transaction on the store's
+	// single connection (see Open), so SetHostCordoned's UPDATE can't land
 	// between them: either it committed first and this returns
-	// ErrHostDrained, or it waits and then sees the reservation counted.
-	var drained bool
-	err = tx.QueryRowContext(ctx, `SELECT drained FROM hosts WHERE name = ?`, host).Scan(&drained)
+	// ErrHostCordoned, or it waits and then sees the reservation counted.
+	var cordoned bool
+	err = tx.QueryRowContext(ctx, `SELECT cordoned FROM hosts WHERE name = ?`, host).Scan(&cordoned)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		// Unregistered host: can't be drained, so nothing to refuse.
+		// Unregistered host: can't be cordoned, so nothing to refuse.
 	case err != nil:
-		return fmt.Errorf("store: select host drained: %w", err)
-	case drained:
-		return ErrHostDrained
+		return fmt.Errorf("store: select host cordoned: %w", err)
+	case cordoned:
+		return ErrHostCordoned
 	}
 
 	if _, err := tx.ExecContext(ctx, `

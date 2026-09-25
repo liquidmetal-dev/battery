@@ -120,12 +120,12 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 
 	log := slog.Default().With("pool", pool.GetName(), "namespace", pool.GetNamespace())
 
-	drained, err := p.store.ListDrainedHostNames(ctx)
+	cordoned, err := p.store.ListCordonedHostNames(ctx)
 	if err != nil {
 		return fmt.Errorf("reconciler: provision: %w", err)
 	}
 
-	host, err := PickHost(ctx, p.store, pool, drained)
+	host, err := PickHost(ctx, p.store, pool, cordoned)
 	if err != nil {
 		return err
 	}
@@ -145,16 +145,16 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 	id := fmt.Sprintf("%s-%s", pool.GetName(), uuid.NewString()[:8])
 
 	// Reserve the placement before anything else touches the host. The
-	// drained set above is a snapshot: DrainHost can land any time after
+	// cordoned set above is a snapshot: CordonHost can land any time after
 	// it, and without this the VM would still be created on a host the
 	// operator has just been told is safe to take down. ReservePlacement
-	// checks the drain flag and records the placement atomically, and the
+	// checks the cordon flag and records the placement atomically, and the
 	// reservation counts toward the host's VM total until the vms row
 	// replaces it, so ListHosts never shows 0 while a create is underway.
 	if err := p.store.ReservePlacement(ctx, id, host, pool.GetName(), pool.GetNamespace()); err != nil {
-		if errors.Is(err, store.ErrHostDrained) {
-			log.DebugContext(ctx, "reconciler: host drained after being picked, skipping placement")
-			return fmt.Errorf("%w: host %q drained before placement: %w", ErrNoEligibleHost, host, err)
+		if errors.Is(err, store.ErrHostCordoned) {
+			log.DebugContext(ctx, "reconciler: host cordoned after being picked, skipping placement")
+			return fmt.Errorf("%w: host %q cordoned before placement: %w", ErrNoEligibleHost, host, err)
 		}
 		return fmt.Errorf("reconciler: provision: reserve placement: %w", err)
 	}

@@ -73,12 +73,12 @@ func seedHost(t *testing.T, st store.Store, name string) {
 	}
 }
 
-func TestHostDrain_Bufconn(t *testing.T) {
+func TestHostCordon_Bufconn(t *testing.T) {
 	conn, st := bufconnHostAdmin(t)
 	ctx := withTestHostAdminClient(conn)
 	seedHost(t, st, "host-a")
 
-	cmd := newHostDrainCmd()
+	cmd := newHostCordonCmd()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetContext(ctx)
@@ -88,23 +88,23 @@ func TestHostDrain_Bufconn(t *testing.T) {
 		t.Fatalf("Execute() error = %v", err)
 	}
 	if !strings.Contains(out.String(), "host-a") || !strings.Contains(out.String(), "true") {
-		t.Errorf("output = %q, want it to show host-a drained=true", out.String())
+		t.Errorf("output = %q, want it to show host-a cordoned=true", out.String())
 	}
 
 	got, err := st.GetHost(context.Background(), "host-a")
 	if err != nil {
 		t.Fatalf("GetHost() error = %v", err)
 	}
-	if !got.GetDrained() {
-		t.Errorf("GetHost() drained = false, want true")
+	if !got.GetCordoned() {
+		t.Errorf("GetHost() cordoned = false, want true")
 	}
 }
 
-func TestHostDrain_UnknownHost(t *testing.T) {
+func TestHostCordon_UnknownHost(t *testing.T) {
 	conn, _ := bufconnHostAdmin(t)
 	ctx := withTestHostAdminClient(conn)
 
-	cmd := newHostDrainCmd()
+	cmd := newHostCordonCmd()
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetContext(ctx)
 	cmd.SetArgs([]string{"missing"})
@@ -118,15 +118,15 @@ func TestHostDrain_UnknownHost(t *testing.T) {
 	}
 }
 
-func TestHostUndrain_Bufconn(t *testing.T) {
+func TestHostUncordon_Bufconn(t *testing.T) {
 	conn, st := bufconnHostAdmin(t)
 	ctx := withTestHostAdminClient(conn)
 	seedHost(t, st, "host-a")
-	if _, err := st.SetHostDrained(context.Background(), "host-a", true, ""); err != nil {
-		t.Fatalf("SetHostDrained() error = %v", err)
+	if _, err := st.SetHostCordoned(context.Background(), "host-a", true, ""); err != nil {
+		t.Fatalf("SetHostCordoned() error = %v", err)
 	}
 
-	cmd := newHostUndrainCmd()
+	cmd := newHostUncordonCmd()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetContext(ctx)
@@ -140,8 +140,8 @@ func TestHostUndrain_Bufconn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetHost() error = %v", err)
 	}
-	if got.GetDrained() {
-		t.Errorf("GetHost() drained = true, want false")
+	if got.GetCordoned() {
+		t.Errorf("GetHost() cordoned = true, want false")
 	}
 }
 
@@ -150,8 +150,8 @@ func TestHostList_Bufconn(t *testing.T) {
 	ctx := withTestHostAdminClient(conn)
 	seedHost(t, st, "host-a")
 	seedHost(t, st, "host-b")
-	if _, err := st.SetHostDrained(context.Background(), "host-b", true, ""); err != nil {
-		t.Fatalf("SetHostDrained() error = %v", err)
+	if _, err := st.SetHostCordoned(context.Background(), "host-b", true, ""); err != nil {
+		t.Fatalf("SetHostCordoned() error = %v", err)
 	}
 
 	cmd := newHostListCmd()

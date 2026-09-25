@@ -15,20 +15,20 @@ var errInjected = errors.New("injected store failure")
 // failingStore wraps a real Store and lets tests inject a failure into
 // CreateVM, or into UpdateVM when the incoming record's phase matches
 // failUpdateVMPhase, to exercise the provisioning pipeline's failure paths
-// without a special-purpose fake for each one. drainHostBeforeReserve, if
-// set, drains that host immediately before delegating ReservePlacement:
-// the narrowest reproduction of DrainHost landing after PickHost chose it.
+// without a special-purpose fake for each one. cordonHostBeforeReserve, if
+// set, cordons that host immediately before delegating ReservePlacement:
+// the narrowest reproduction of CordonHost landing after PickHost chose it.
 type failingStore struct {
 	store.Store
 
-	failCreateVM           bool
-	failUpdateVMPhase      *poolmgrv1alpha1.VMPhase
-	drainHostBeforeReserve string
+	failCreateVM            bool
+	failUpdateVMPhase       *poolmgrv1alpha1.VMPhase
+	cordonHostBeforeReserve string
 }
 
 func (f *failingStore) ReservePlacement(ctx context.Context, id, host, poolName, poolNamespace string) error {
-	if f.drainHostBeforeReserve != "" {
-		if _, err := f.SetHostDrained(ctx, f.drainHostBeforeReserve, true, "drained mid-provision"); err != nil {
+	if f.cordonHostBeforeReserve != "" {
+		if _, err := f.SetHostCordoned(ctx, f.cordonHostBeforeReserve, true, "cordoned mid-provision"); err != nil {
 			return err
 		}
 	}

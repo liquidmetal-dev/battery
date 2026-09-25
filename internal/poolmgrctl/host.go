@@ -6,26 +6,26 @@ import (
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 )
 
-// newHostCmd returns the "host" parent command, with drain/undrain/list
+// newHostCmd returns the "host" parent command, with cordon/uncordon/list
 // wired up as subcommands.
 func newHostCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "host",
-		Short: "Manage flintlock host drain state",
+		Short: "Manage flintlock host cordon state",
 	}
 
-	cmd.AddCommand(newHostDrainCmd())
-	cmd.AddCommand(newHostUndrainCmd())
+	cmd.AddCommand(newHostCordonCmd())
+	cmd.AddCommand(newHostUncordonCmd())
 	cmd.AddCommand(newHostListCmd())
 
 	return cmd
 }
 
-func newHostDrainCmd() *cobra.Command {
+func newHostCordonCmd() *cobra.Command {
 	var reason, output string
 
 	cmd := &cobra.Command{
-		Use:   "drain <name>",
+		Use:   "cordon <name>",
 		Short: "Stop new VM placement on a host, letting existing leases finish naturally",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -36,7 +36,7 @@ func newHostDrainCmd() *cobra.Command {
 
 			hostAdmin := clientsFromContext(cmd.Context()).hostAdmin
 
-			host, err := hostAdmin.DrainHost(cmd.Context(), &poolmgrv1alpha1.DrainHostRequest{
+			host, err := hostAdmin.CordonHost(cmd.Context(), &poolmgrv1alpha1.CordonHostRequest{
 				Name:   args[0],
 				Reason: reason,
 			})
@@ -48,17 +48,17 @@ func newHostDrainCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&reason, "reason", "", "optional free-text reason recorded alongside the drain")
+	cmd.Flags().StringVar(&reason, "reason", "", "optional free-text reason recorded alongside the cordon")
 	cmd.Flags().StringVarP(&output, "output", "o", string(OutputTable), "output format: table|json")
 
 	return cmd
 }
 
-func newHostUndrainCmd() *cobra.Command {
+func newHostUncordonCmd() *cobra.Command {
 	var output string
 
 	cmd := &cobra.Command{
-		Use:   "undrain <name>",
+		Use:   "uncordon <name>",
 		Short: "Resume new VM placement on a host",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -69,7 +69,7 @@ func newHostUndrainCmd() *cobra.Command {
 
 			hostAdmin := clientsFromContext(cmd.Context()).hostAdmin
 
-			host, err := hostAdmin.UndrainHost(cmd.Context(), &poolmgrv1alpha1.UndrainHostRequest{Name: args[0]})
+			host, err := hostAdmin.UncordonHost(cmd.Context(), &poolmgrv1alpha1.UncordonHostRequest{Name: args[0]})
 			if err != nil {
 				return wrapGRPCErr(err)
 			}
@@ -88,7 +88,7 @@ func newHostListCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List registered hosts, their drain state, and how many VMs are still counted against each",
+		Short: "List registered hosts, their cordon state, and how many VMs are still counted against each",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			format, err := parseOutputFormat(output)
 			if err != nil {

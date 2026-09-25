@@ -60,7 +60,7 @@ func TestPickHost_LeastLoaded(t *testing.T) {
 	}
 }
 
-func TestPickHost_ExcludesDrainedHost(t *testing.T) {
+func TestPickHost_ExcludesCordonedHost(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 5, []string{"host-a", "host-b"})
@@ -68,7 +68,7 @@ func TestPickHost_ExcludesDrainedHost(t *testing.T) {
 		t.Fatalf("CreatePool: %v", err)
 	}
 
-	// host-a has no VMs and would normally win on load, but it's drained.
+	// host-a has no VMs and would normally win on load, but it's cordoned.
 	if err := st.CreateVM(ctx, sampleVM("vm-1", "pool-a", "host-b", poolmgrv1alpha1.VMPhase_LEASED)); err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
@@ -78,11 +78,11 @@ func TestPickHost_ExcludesDrainedHost(t *testing.T) {
 		t.Fatalf("PickHost: %v", err)
 	}
 	if got != "host-b" {
-		t.Fatalf("PickHost() = %q, want %q (host-a is drained)", got, "host-b")
+		t.Fatalf("PickHost() = %q, want %q (host-a is cordoned)", got, "host-b")
 	}
 }
 
-func TestPickHost_AllHostsDrained(t *testing.T) {
+func TestPickHost_AllHostsCordoned(t *testing.T) {
 	st := openTestStore(t)
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-a", "host-b"})
 

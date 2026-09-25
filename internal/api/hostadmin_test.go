@@ -21,73 +21,73 @@ func seedTestHost(ctx context.Context, t *testing.T, st store.Store, name string
 	}
 }
 
-func TestDrainAndUndrainHost(t *testing.T) {
+func TestCordonAndUncordonHost(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
 	seedTestHost(ctx, t, st, "host-a")
 	s := api.NewHostAdminServer(st)
 
-	drained, err := s.DrainHost(ctx, &poolmgrv1alpha1.DrainHostRequest{Name: "host-a", Reason: "kernel upgrade"})
+	cordoned, err := s.CordonHost(ctx, &poolmgrv1alpha1.CordonHostRequest{Name: "host-a", Reason: "kernel upgrade"})
 	if err != nil {
-		t.Fatalf("DrainHost() error = %v", err)
+		t.Fatalf("CordonHost() error = %v", err)
 	}
-	if !drained.GetDrained() || drained.GetDrainedReason() != "kernel upgrade" {
-		t.Errorf("DrainHost() = %+v, want drained=true reason=%q", drained, "kernel upgrade")
+	if !cordoned.GetCordoned() || cordoned.GetCordonedReason() != "kernel upgrade" {
+		t.Errorf("CordonHost() = %+v, want cordoned=true reason=%q", cordoned, "kernel upgrade")
 	}
 
-	undrained, err := s.UndrainHost(ctx, &poolmgrv1alpha1.UndrainHostRequest{Name: "host-a"})
+	uncordoned, err := s.UncordonHost(ctx, &poolmgrv1alpha1.UncordonHostRequest{Name: "host-a"})
 	if err != nil {
-		t.Fatalf("UndrainHost() error = %v", err)
+		t.Fatalf("UncordonHost() error = %v", err)
 	}
-	if undrained.GetDrained() {
-		t.Errorf("UndrainHost() drained = true, want false")
+	if uncordoned.GetCordoned() {
+		t.Errorf("UncordonHost() cordoned = true, want false")
 	}
 }
 
-func TestDrainHostIdempotent(t *testing.T) {
+func TestCordonHostIdempotent(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
 	seedTestHost(ctx, t, st, "host-a")
 	s := api.NewHostAdminServer(st)
 
-	if _, err := s.DrainHost(ctx, &poolmgrv1alpha1.DrainHostRequest{Name: "host-a"}); err != nil {
-		t.Fatalf("DrainHost() error = %v", err)
+	if _, err := s.CordonHost(ctx, &poolmgrv1alpha1.CordonHostRequest{Name: "host-a"}); err != nil {
+		t.Fatalf("CordonHost() error = %v", err)
 	}
-	if _, err := s.DrainHost(ctx, &poolmgrv1alpha1.DrainHostRequest{Name: "host-a"}); err != nil {
-		t.Fatalf("DrainHost() second call error = %v", err)
+	if _, err := s.CordonHost(ctx, &poolmgrv1alpha1.CordonHostRequest{Name: "host-a"}); err != nil {
+		t.Fatalf("CordonHost() second call error = %v", err)
 	}
 }
 
-func TestDrainHostUnknownHost(t *testing.T) {
+func TestCordonHostUnknownHost(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
 	s := api.NewHostAdminServer(st)
 
-	_, err := s.DrainHost(ctx, &poolmgrv1alpha1.DrainHostRequest{Name: "missing"})
+	_, err := s.CordonHost(ctx, &poolmgrv1alpha1.CordonHostRequest{Name: "missing"})
 	if status.Code(err) != codes.FailedPrecondition {
-		t.Errorf("DrainHost() error = %v, want FailedPrecondition", err)
+		t.Errorf("CordonHost() error = %v, want FailedPrecondition", err)
 	}
 }
 
-func TestUndrainHostUnknownHost(t *testing.T) {
+func TestUncordonHostUnknownHost(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
 	s := api.NewHostAdminServer(st)
 
-	_, err := s.UndrainHost(ctx, &poolmgrv1alpha1.UndrainHostRequest{Name: "missing"})
+	_, err := s.UncordonHost(ctx, &poolmgrv1alpha1.UncordonHostRequest{Name: "missing"})
 	if status.Code(err) != codes.FailedPrecondition {
-		t.Errorf("UndrainHost() error = %v, want FailedPrecondition", err)
+		t.Errorf("UncordonHost() error = %v, want FailedPrecondition", err)
 	}
 }
 
-func TestDrainHostRequiresName(t *testing.T) {
+func TestCordonHostRequiresName(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
 	s := api.NewHostAdminServer(st)
 
-	_, err := s.DrainHost(ctx, &poolmgrv1alpha1.DrainHostRequest{})
+	_, err := s.CordonHost(ctx, &poolmgrv1alpha1.CordonHostRequest{})
 	if status.Code(err) != codes.InvalidArgument {
-		t.Errorf("DrainHost() error = %v, want InvalidArgument", err)
+		t.Errorf("CordonHost() error = %v, want InvalidArgument", err)
 	}
 }
 
@@ -98,8 +98,8 @@ func TestListHosts(t *testing.T) {
 	seedTestHost(ctx, t, st, "host-b")
 	s := api.NewHostAdminServer(st)
 
-	if _, err := s.DrainHost(ctx, &poolmgrv1alpha1.DrainHostRequest{Name: "host-b"}); err != nil {
-		t.Fatalf("DrainHost() error = %v", err)
+	if _, err := s.CordonHost(ctx, &poolmgrv1alpha1.CordonHostRequest{Name: "host-b"}); err != nil {
+		t.Fatalf("CordonHost() error = %v", err)
 	}
 
 	resp, err := s.ListHosts(ctx, &poolmgrv1alpha1.ListHostsRequest{})
@@ -112,13 +112,13 @@ func TestListHosts(t *testing.T) {
 	if resp.GetHosts()[0].GetHost().GetName() != "host-a" || resp.GetHosts()[0].GetVmCount() != 0 {
 		t.Errorf("ListHosts()[0] = %+v, want host-a with 0 VMs", resp.GetHosts()[0])
 	}
-	if !resp.GetHosts()[1].GetHost().GetDrained() {
-		t.Errorf("ListHosts()[1] = %+v, want host-b drained", resp.GetHosts()[1])
+	if !resp.GetHosts()[1].GetHost().GetCordoned() {
+		t.Errorf("ListHosts()[1] = %+v, want host-b cordoned", resp.GetHosts()[1])
 	}
 }
 
 // TestListHosts_VmCountIncludesDeletingAndReservations: vm_count is what an
-// operator reads to decide when a drained host is empty, so it must include
+// operator reads to decide when a cordoned host is empty, so it must include
 // VMs whose deletion is still pending or that are quarantined (both still
 // exist on the host) and placements that are reserved but not yet recorded.
 func TestListHosts_VmCountIncludesDeletingAndReservations(t *testing.T) {

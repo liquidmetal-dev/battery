@@ -308,12 +308,12 @@ func TestPrintClaimJSON_RoundTrip(t *testing.T) {
 }
 
 // TestPrintHostTable_NoFabricatedVMsColumn locks in the fix for a
-// reported issue: printHost (used for DrainHost/UndrainHost responses,
+// reported issue: printHost (used for CordonHost/UncordonHost responses,
 // which carry no VM count) must not render a VMS column, since any
 // value there would be a fabricated zero rather than the host's real
 // workload.
 func TestPrintHostTable_NoFabricatedVMsColumn(t *testing.T) {
-	host := &poolmgrv1alpha1.Host{Name: "host-a", Address: "host-a.example.com:8443", Drained: true}
+	host := &poolmgrv1alpha1.Host{Name: "host-a", Address: "host-a.example.com:8443", Cordoned: true}
 
 	var buf bytes.Buffer
 	if err := printHost(&buf, host, OutputTable); err != nil {
@@ -327,7 +327,7 @@ func TestPrintHostTable_NoFabricatedVMsColumn(t *testing.T) {
 		}
 	}
 	if strings.Contains(out, "VMS") {
-		t.Errorf("printHost() table output contains a VMS column, want none (no count is available from Drain/UndrainHost), got:\n%s", out)
+		t.Errorf("printHost() table output contains a VMS column, want none (no count is available from Cordon/UncordonHost), got:\n%s", out)
 	}
 }
 
@@ -336,7 +336,7 @@ func TestPrintHostTable_NoFabricatedVMsColumn(t *testing.T) {
 // any phase) plus in-flight placements, not just "active" ones.
 func TestPrintHostStatusesTable_VMSColumn(t *testing.T) {
 	hosts := []*poolmgrv1alpha1.HostStatus{{
-		Host:    &poolmgrv1alpha1.Host{Name: "host-a", Address: "host-a.example.com:8443", Drained: true},
+		Host:    &poolmgrv1alpha1.Host{Name: "host-a", Address: "host-a.example.com:8443", Cordoned: true},
 		VmCount: 3,
 	}}
 
@@ -346,7 +346,7 @@ func TestPrintHostStatusesTable_VMSColumn(t *testing.T) {
 	}
 
 	out := buf.String()
-	for _, want := range []string{"NAME", "ADDRESS", "DRAINED", "VMS", "host-a", "true", "3"} {
+	for _, want := range []string{"NAME", "ADDRESS", "CORDONED", "VMS", "host-a", "true", "3"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printHostStatuses() table output missing %q, got:\n%s", want, out)
 		}
@@ -357,7 +357,7 @@ func TestPrintHostStatusesTable_VMSColumn(t *testing.T) {
 }
 
 func TestPrintHostJSON_RoundTrip(t *testing.T) {
-	host := &poolmgrv1alpha1.Host{Name: "host-a", Address: "host-a.example.com:8443", Drained: true, DrainedReason: "maintenance"}
+	host := &poolmgrv1alpha1.Host{Name: "host-a", Address: "host-a.example.com:8443", Cordoned: true, CordonedReason: "maintenance"}
 
 	var buf bytes.Buffer
 	if err := printHost(&buf, host, OutputJSON); err != nil {

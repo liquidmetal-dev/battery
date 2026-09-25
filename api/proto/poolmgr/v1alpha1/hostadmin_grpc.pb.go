@@ -19,21 +19,21 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	HostAdmin_DrainHost_FullMethodName   = "/poolmgr.v1alpha1.HostAdmin/DrainHost"
-	HostAdmin_UndrainHost_FullMethodName = "/poolmgr.v1alpha1.HostAdmin/UndrainHost"
-	HostAdmin_ListHosts_FullMethodName   = "/poolmgr.v1alpha1.HostAdmin/ListHosts"
+	HostAdmin_CordonHost_FullMethodName   = "/poolmgr.v1alpha1.HostAdmin/CordonHost"
+	HostAdmin_UncordonHost_FullMethodName = "/poolmgr.v1alpha1.HostAdmin/UncordonHost"
+	HostAdmin_ListHosts_FullMethodName    = "/poolmgr.v1alpha1.HostAdmin/ListHosts"
 )
 
 // HostAdminClient is the client API for HostAdmin service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// HostAdmin manages the drain state of registered flintlock hosts. Draining a host stops
+// HostAdmin manages the cordon state of registered flintlock hosts. Cordoning a host stops
 // the reconciler from placing new VMs there; existing VMs are unaffected and wind down
 // through normal lease expiry or release.
 type HostAdminClient interface {
-	DrainHost(ctx context.Context, in *DrainHostRequest, opts ...grpc.CallOption) (*Host, error)
-	UndrainHost(ctx context.Context, in *UndrainHostRequest, opts ...grpc.CallOption) (*Host, error)
+	CordonHost(ctx context.Context, in *CordonHostRequest, opts ...grpc.CallOption) (*Host, error)
+	UncordonHost(ctx context.Context, in *UncordonHostRequest, opts ...grpc.CallOption) (*Host, error)
 	ListHosts(ctx context.Context, in *ListHostsRequest, opts ...grpc.CallOption) (*ListHostsResponse, error)
 }
 
@@ -45,20 +45,20 @@ func NewHostAdminClient(cc grpc.ClientConnInterface) HostAdminClient {
 	return &hostAdminClient{cc}
 }
 
-func (c *hostAdminClient) DrainHost(ctx context.Context, in *DrainHostRequest, opts ...grpc.CallOption) (*Host, error) {
+func (c *hostAdminClient) CordonHost(ctx context.Context, in *CordonHostRequest, opts ...grpc.CallOption) (*Host, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Host)
-	err := c.cc.Invoke(ctx, HostAdmin_DrainHost_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, HostAdmin_CordonHost_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *hostAdminClient) UndrainHost(ctx context.Context, in *UndrainHostRequest, opts ...grpc.CallOption) (*Host, error) {
+func (c *hostAdminClient) UncordonHost(ctx context.Context, in *UncordonHostRequest, opts ...grpc.CallOption) (*Host, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Host)
-	err := c.cc.Invoke(ctx, HostAdmin_UndrainHost_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, HostAdmin_UncordonHost_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -79,12 +79,12 @@ func (c *hostAdminClient) ListHosts(ctx context.Context, in *ListHostsRequest, o
 // All implementations should embed UnimplementedHostAdminServer
 // for forward compatibility.
 //
-// HostAdmin manages the drain state of registered flintlock hosts. Draining a host stops
+// HostAdmin manages the cordon state of registered flintlock hosts. Cordoning a host stops
 // the reconciler from placing new VMs there; existing VMs are unaffected and wind down
 // through normal lease expiry or release.
 type HostAdminServer interface {
-	DrainHost(context.Context, *DrainHostRequest) (*Host, error)
-	UndrainHost(context.Context, *UndrainHostRequest) (*Host, error)
+	CordonHost(context.Context, *CordonHostRequest) (*Host, error)
+	UncordonHost(context.Context, *UncordonHostRequest) (*Host, error)
 	ListHosts(context.Context, *ListHostsRequest) (*ListHostsResponse, error)
 }
 
@@ -95,11 +95,11 @@ type HostAdminServer interface {
 // pointer dereference when methods are called.
 type UnimplementedHostAdminServer struct{}
 
-func (UnimplementedHostAdminServer) DrainHost(context.Context, *DrainHostRequest) (*Host, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method DrainHost not implemented")
+func (UnimplementedHostAdminServer) CordonHost(context.Context, *CordonHostRequest) (*Host, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CordonHost not implemented")
 }
-func (UnimplementedHostAdminServer) UndrainHost(context.Context, *UndrainHostRequest) (*Host, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method UndrainHost not implemented")
+func (UnimplementedHostAdminServer) UncordonHost(context.Context, *UncordonHostRequest) (*Host, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UncordonHost not implemented")
 }
 func (UnimplementedHostAdminServer) ListHosts(context.Context, *ListHostsRequest) (*ListHostsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListHosts not implemented")
@@ -124,38 +124,38 @@ func RegisterHostAdminServer(s grpc.ServiceRegistrar, srv HostAdminServer) {
 	s.RegisterService(&HostAdmin_ServiceDesc, srv)
 }
 
-func _HostAdmin_DrainHost_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(DrainHostRequest)
+func _HostAdmin_CordonHost_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CordonHostRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(HostAdminServer).DrainHost(ctx, in)
+		return srv.(HostAdminServer).CordonHost(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: HostAdmin_DrainHost_FullMethodName,
+		FullMethod: HostAdmin_CordonHost_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(HostAdminServer).DrainHost(ctx, req.(*DrainHostRequest))
+		return srv.(HostAdminServer).CordonHost(ctx, req.(*CordonHostRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _HostAdmin_UndrainHost_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(UndrainHostRequest)
+func _HostAdmin_UncordonHost_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UncordonHostRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(HostAdminServer).UndrainHost(ctx, in)
+		return srv.(HostAdminServer).UncordonHost(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: HostAdmin_UndrainHost_FullMethodName,
+		FullMethod: HostAdmin_UncordonHost_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(HostAdminServer).UndrainHost(ctx, req.(*UndrainHostRequest))
+		return srv.(HostAdminServer).UncordonHost(ctx, req.(*UncordonHostRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -186,12 +186,12 @@ var HostAdmin_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*HostAdminServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "DrainHost",
-			Handler:    _HostAdmin_DrainHost_Handler,
+			MethodName: "CordonHost",
+			Handler:    _HostAdmin_CordonHost_Handler,
 		},
 		{
-			MethodName: "UndrainHost",
-			Handler:    _HostAdmin_UndrainHost_Handler,
+			MethodName: "UncordonHost",
+			Handler:    _HostAdmin_UncordonHost_Handler,
 		},
 		{
 			MethodName: "ListHosts",

@@ -398,15 +398,15 @@ func countVMsOnHost(t *testing.T, st store.Store, host string) int32 {
 	return got
 }
 
-// TestProvision_HostDrainedAfterPick_DoesNotCreateMicroVM is the race from
-// the drain review: DrainHost lands after PickHost chose the host but before
+// TestProvision_HostCordonedAfterPick_DoesNotCreateMicroVM is the race from
+// the review of PR #83: CordonHost lands after PickHost chose the host but before
 // the microvm exists. The placement reservation is checked atomically with
-// the drain flag, so the provision must back off without touching flintlock
+// the cordon flag, so the provision must back off without touching flintlock
 // and report it as ErrNoEligibleHost (the quiet path in provisionN).
-func TestProvision_HostDrainedAfterPick_DoesNotCreateMicroVM(t *testing.T) {
+func TestProvision_HostCordonedAfterPick_DoesNotCreateMicroVM(t *testing.T) {
 	vm := &fakeMicroVM{}
 	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
-	st := &failingStore{Store: openTestStore(t), drainHostBeforeReserve: "host-a"}
+	st := &failingStore{Store: openTestStore(t), cordonHostBeforeReserve: "host-a"}
 	seedHost(t, st, "host-a")
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 1, []string{"host-a"})
@@ -416,11 +416,11 @@ func TestProvision_HostDrainedAfterPick_DoesNotCreateMicroVM(t *testing.T) {
 	if !errors.Is(err, reconciler.ErrNoEligibleHost) {
 		t.Fatalf("Provision() error = %v, want ErrNoEligibleHost", err)
 	}
-	if !errors.Is(err, store.ErrHostDrained) {
-		t.Fatalf("Provision() error = %v, want it to also wrap store.ErrHostDrained", err)
+	if !errors.Is(err, store.ErrHostCordoned) {
+		t.Fatalf("Provision() error = %v, want it to also wrap store.ErrHostCordoned", err)
 	}
 	if got := len(vm.createdSpecs()); got != 0 {
-		t.Fatalf("expected no CreateMicroVM calls on a host drained mid-provision, got %d", got)
+		t.Fatalf("expected no CreateMicroVM calls on a host cordoned mid-provision, got %d", got)
 	}
 	if vms := onlyVMsInPool(t, st, "pool-a"); len(vms) != 0 {
 		t.Fatalf("expected no VM records, got %d", len(vms))

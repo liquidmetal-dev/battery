@@ -223,15 +223,15 @@ func TestSeedHosts(t *testing.T) {
 	}
 }
 
-func TestSeedHosts_PreservesExistingDrainState(t *testing.T) {
+func TestSeedHosts_PreservesExistingCordonState(t *testing.T) {
 	st := openTestStore(t)
 	cfg := &config.Config{Hosts: []config.HostConfig{{Name: "host-a", Address: "10.0.0.1:8443"}}}
 
 	if err := seedHosts(context.Background(), st, cfg); err != nil {
 		t.Fatalf("seedHosts: %v", err)
 	}
-	if _, err := st.SetHostDrained(context.Background(), "host-a", true, "maintenance"); err != nil {
-		t.Fatalf("SetHostDrained: %v", err)
+	if _, err := st.SetHostCordoned(context.Background(), "host-a", true, "maintenance"); err != nil {
+		t.Fatalf("SetHostCordoned: %v", err)
 	}
 
 	// Simulates a poolmgrd restart: seedHosts runs again against the same
@@ -244,8 +244,8 @@ func TestSeedHosts_PreservesExistingDrainState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetHost: %v", err)
 	}
-	if !host.GetDrained() {
-		t.Errorf("GetHost() drained = false after re-seed, want true (drain state preserved)")
+	if !host.GetCordoned() {
+		t.Errorf("GetHost() cordoned = false after re-seed, want true (cordon state preserved)")
 	}
 }
 

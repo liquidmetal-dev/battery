@@ -64,7 +64,7 @@ func sampleVM(uid, poolName, host string, phase poolmgrv1alpha1.VMPhase) *poolmg
 	}
 }
 
-// seedHost registers name in st's host registry so it can be drained.
+// seedHost registers name in st's host registry so it can be cordoned.
 func seedHost(t *testing.T, st store.Store, name string) {
 	t.Helper()
 	host := &poolmgrv1alpha1.Host{Name: name, Address: name + ":8443", UpdatedAt: timestamppb.Now()}

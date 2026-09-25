@@ -245,12 +245,12 @@ func rowToLease(row leaseRow) *poolmgrv1alpha1.LeaseRecord {
 
 // hostRow is the flat column representation of a hosts table row.
 type hostRow struct {
-	name          string
-	address       string
-	drained       bool
-	drainedReason sql.NullString
-	drainedAt     sql.NullInt64
-	updatedAt     int64
+	name           string
+	address        string
+	cordoned       bool
+	cordonedReason sql.NullString
+	cordonedAt     sql.NullInt64
+	updatedAt      int64
 }
 
 func hostToRow(h *poolmgrv1alpha1.Host) (hostRow, error) {
@@ -262,14 +262,14 @@ func hostToRow(h *poolmgrv1alpha1.Host) (hostRow, error) {
 	row := hostRow{
 		name:      h.GetName(),
 		address:   h.GetAddress(),
-		drained:   h.GetDrained(),
+		cordoned:  h.GetCordoned(),
 		updatedAt: updatedAt.UnixNano(),
 	}
-	if h.GetDrainedReason() != "" {
-		row.drainedReason = sql.NullString{String: h.GetDrainedReason(), Valid: true}
+	if h.GetCordonedReason() != "" {
+		row.cordonedReason = sql.NullString{String: h.GetCordonedReason(), Valid: true}
 	}
-	if h.GetDrainedAt() != nil {
-		row.drainedAt = sql.NullInt64{Int64: h.GetDrainedAt().AsTime().UnixNano(), Valid: true}
+	if h.GetCordonedAt() != nil {
+		row.cordonedAt = sql.NullInt64{Int64: h.GetCordonedAt().AsTime().UnixNano(), Valid: true}
 	}
 	return row, nil
 }
@@ -278,14 +278,14 @@ func rowToHost(row hostRow) *poolmgrv1alpha1.Host {
 	h := &poolmgrv1alpha1.Host{
 		Name:      row.name,
 		Address:   row.address,
-		Drained:   row.drained,
+		Cordoned:  row.cordoned,
 		UpdatedAt: timestamppb.New(time.Unix(0, row.updatedAt)),
 	}
-	if row.drainedReason.Valid {
-		h.DrainedReason = row.drainedReason.String
+	if row.cordonedReason.Valid {
+		h.CordonedReason = row.cordonedReason.String
 	}
-	if row.drainedAt.Valid {
-		h.DrainedAt = timestamppb.New(time.Unix(0, row.drainedAt.Int64))
+	if row.cordonedAt.Valid {
+		h.CordonedAt = timestamppb.New(time.Unix(0, row.cordonedAt.Int64))
 	}
 	return h
 }

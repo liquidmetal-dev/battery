@@ -54,15 +54,15 @@ CREATE INDEX IF NOT EXISTS idx_events_pool_id ON events (pool_namespace, pool_na
 CREATE TABLE IF NOT EXISTS hosts (
     name           TEXT PRIMARY KEY,
     address        TEXT NOT NULL,
-    drained        INTEGER NOT NULL DEFAULT 0,
-    drained_reason TEXT,
-    drained_at     INTEGER,
+    cordoned        INTEGER NOT NULL DEFAULT 0,
+    cordoned_reason TEXT,
+    cordoned_at     INTEGER,
     updated_at     INTEGER NOT NULL
 );
 
 -- placements are in-flight VM placement reservations. Provision inserts one
 -- for the host it picked, in the same transaction as a check that the host is
--- not drained, before it asks flintlock to create the microvm; the row is
+-- not cordoned, before it asks flintlock to create the microvm; the row is
 -- deleted once the vms row exists (or the attempt fails). Rows still present
 -- at poolmgrd startup are stale (nothing can be in flight then) and are
 -- removed by ClearPlacements.

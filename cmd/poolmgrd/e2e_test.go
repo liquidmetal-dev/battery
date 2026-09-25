@@ -84,7 +84,7 @@ func startE2EPoolmgrd(t *testing.T, flint *flintlockclient.Pool) e2ePoolmgrd {
 	t.Cleanup(func() { _ = st.Close() })
 
 	// Seed the host registry the same way main()'s seedHosts does, so
-	// HostAdmin.DrainHost/UndrainHost have a known host to act on. The fake
+	// HostAdmin.CordonHost/UncordonHost have a known host to act on. The fake
 	// flintlock started by e2etest.StartFakeFlintlock is always named
 	// "host-a" (see e2etest.StartFakeFlintlock); its real address isn't
 	// needed here since nothing in this suite dials HostAdmin's reported
@@ -155,7 +155,7 @@ func waitForAvailable(ctx context.Context, t *testing.T, admin poolmgrv1alpha1.P
 }
 
 // e2eEventRecorder collects every Event a Subscribe stream delivers, safe
-// for concurrent reads while the stream is still being drained.
+// for concurrent reads while the stream is still being cordoned.
 type e2eEventRecorder struct {
 	mu   sync.Mutex
 	seen []poolmgrv1alpha1.EventType
@@ -197,7 +197,7 @@ func waitForEvent(ctx context.Context, t *testing.T, recorder *e2eEventRecorder,
 	}
 }
 
-// subscribeEvents opens an Events.Subscribe stream for ref and drains it
+// subscribeEvents opens an Events.Subscribe stream for ref and cordons it
 // into an e2eEventRecorder in the background until ctx is done. Subscribe
 // replays the outbox's existing events on connect, so it's safe to call this
 // either before or after the activity being observed.
@@ -280,7 +280,7 @@ func TestE2E_PoolLifecycle(t *testing.T) {
 	// pool replenishes back to available=1 without waiting on another tick.
 	waitForAvailable(ctx, t, pm.PoolAdmin, ref, 1)
 
-	// No VM-level drain/force-delete API exists yet (see DeletePool's own
+	// No VM-level cordon/force-delete API exists yet (see DeletePool's own
 	// doc comment) - deleting a pool that still owns a VM must fail rather
 	// than orphan it.
 	_, err = pm.PoolAdmin.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: ref})
@@ -348,7 +348,7 @@ func assertAvailableStaysZero(ctx context.Context, t *testing.T, admin poolmgrv1
 			t.Fatalf("GetPool: %v", err)
 		}
 		if got := pool.GetStatus().GetAvailableCount(); got != 0 {
-			t.Fatalf("pool %s/%s available count = %d, want 0 while its only host is drained", ref.GetNamespace(), ref.GetName(), got)
+			t.Fatalf("pool %s/%s available count = %d, want 0 while its only host is cordoned", ref.GetNamespace(), ref.GetName(), got)
 		}
 
 		select {
@@ -361,35 +361,35 @@ func assertAvailableStaysZero(ctx context.Context, t *testing.T, admin poolmgrv1
 	}
 }
 
-// TestE2E_HostDrain drives a pool whose only host is drained via
-// HostAdmin.DrainHost: it must not provision despite wanting to (its
+// TestE2E_HostCordon drives a pool whose only host is cordoned via
+// HostAdmin.CordonHost: it must not provision despite wanting to (its
 // MIN_SIZE_THRESHOLD strategy would otherwise top it up immediately), and
-// must resume provisioning once HostAdmin.UndrainHost is called. This is the
+// must resume provisioning once HostAdmin.UncordonHost is called. This is the
 // graceful host maintenance mode flow from issue #66.
-func TestE2E_HostDrain(t *testing.T) {
+func TestE2E_HostCordon(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), e2eTestTimeout)
 	defer cancel()
 
 	flint := e2etest.StartFakeFlintlock(t)
 	pm := startE2EPoolmgrd(t, flint)
 
-	if _, err := pm.HostAdmin.DrainHost(ctx, &poolmgrv1alpha1.DrainHostRequest{Name: "host-a", Reason: "e2e test"}); err != nil {
-		t.Fatalf("DrainHost: %v", err)
+	if _, err := pm.HostAdmin.CordonHost(ctx, &poolmgrv1alpha1.CordonHostRequest{Name: "host-a", Reason: "e2e test"}); err != nil {
+		t.Fatalf("CordonHost: %v", err)
 	}
 
-	spec := e2etest.MinSizeThresholdPoolSpec("e2e-drain-pool", 1, 1)
+	spec := e2etest.MinSizeThresholdPoolSpec("e2e-cordon-pool", 1, 1)
 	ref := &poolmgrv1alpha1.PoolRef{Name: spec.GetName(), Namespace: spec.GetNamespace()}
 	if _, err := pm.PoolAdmin.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
 		t.Fatalf("CreatePool: %v", err)
 	}
 
 	// Wait comfortably past one reconciler tick (reconciler.DefaultTickInterval
-	// is 10s) with the pool's only host drained: it must still be at
+	// is 10s) with the pool's only host cordoned: it must still be at
 	// available=0.
 	assertAvailableStaysZero(ctx, t, pm.PoolAdmin, ref, 12*time.Second)
 
-	if _, err := pm.HostAdmin.UndrainHost(ctx, &poolmgrv1alpha1.UndrainHostRequest{Name: "host-a"}); err != nil {
-		t.Fatalf("UndrainHost: %v", err)
+	if _, err := pm.HostAdmin.UncordonHost(ctx, &poolmgrv1alpha1.UncordonHostRequest{Name: "host-a"}); err != nil {
+		t.Fatalf("UncordonHost: %v", err)
 	}
 
 	waitForAvailable(ctx, t, pm.PoolAdmin, ref, 1)
@@ -404,8 +404,8 @@ func TestE2E_HostDrain(t *testing.T) {
 			continue
 		}
 		found = true
-		if hs.GetHost().GetDrained() {
-			t.Errorf("ListHosts: host-a still reported drained after UndrainHost")
+		if hs.GetHost().GetCordoned() {
+			t.Errorf("ListHosts: host-a still reported cordoned after UncordonHost")
 		}
 		if hs.GetVmCount() != 1 {
 			t.Errorf("ListHosts: host-a vm_count = %d, want 1", hs.GetVmCount())

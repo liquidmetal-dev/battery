@@ -1092,19 +1092,19 @@ func TestUpsertHostIfMissing(t *testing.T) {
 	}
 }
 
-func TestUpsertHostIfMissingPreservesDrainState(t *testing.T) {
+func TestUpsertHostIfMissingPreservesCordonState(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
 	if err := s.UpsertHostIfMissing(ctx, sampleHost("host-a")); err != nil {
 		t.Fatalf("UpsertHostIfMissing() error = %v", err)
 	}
-	if _, err := s.SetHostDrained(ctx, "host-a", true, "maintenance"); err != nil {
-		t.Fatalf("SetHostDrained() error = %v", err)
+	if _, err := s.SetHostCordoned(ctx, "host-a", true, "maintenance"); err != nil {
+		t.Fatalf("SetHostCordoned() error = %v", err)
 	}
 
 	// A second seed attempt (e.g. on process restart) must not clobber the
-	// drain state set above.
+	// cordon state set above.
 	if err := s.UpsertHostIfMissing(ctx, sampleHost("host-a")); err != nil {
 		t.Fatalf("UpsertHostIfMissing() second call error = %v", err)
 	}
@@ -1113,15 +1113,15 @@ func TestUpsertHostIfMissingPreservesDrainState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetHost() error = %v", err)
 	}
-	if !got.GetDrained() {
-		t.Errorf("GetHost() drained = false after re-seed, want true (drain state preserved)")
+	if !got.GetCordoned() {
+		t.Errorf("GetHost() cordoned = false after re-seed, want true (cordon state preserved)")
 	}
 }
 
 // TestUpsertHostIfMissingRefreshesAddress reproduces a reported issue: if a
 // host's address changes in static config between poolmgrd restarts, a
 // reseed must pick up the new address (matching what flintlockclient.New
-// actually dials) while still leaving drain state exactly as it found it.
+// actually dials) while still leaving cordon state exactly as it found it.
 func TestUpsertHostIfMissingRefreshesAddress(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -1131,8 +1131,8 @@ func TestUpsertHostIfMissingRefreshesAddress(t *testing.T) {
 	if err := s.UpsertHostIfMissing(ctx, host); err != nil {
 		t.Fatalf("UpsertHostIfMissing() error = %v", err)
 	}
-	if _, err := s.SetHostDrained(ctx, "host-a", true, "maintenance"); err != nil {
-		t.Fatalf("SetHostDrained() error = %v", err)
+	if _, err := s.SetHostCordoned(ctx, "host-a", true, "maintenance"); err != nil {
+		t.Fatalf("SetHostCordoned() error = %v", err)
 	}
 
 	reseed := sampleHost("host-a")
@@ -1148,8 +1148,8 @@ func TestUpsertHostIfMissingRefreshesAddress(t *testing.T) {
 	if got.GetAddress() != "new:8443" {
 		t.Errorf("GetHost() address = %q after reseed, want %q", got.GetAddress(), "new:8443")
 	}
-	if !got.GetDrained() {
-		t.Errorf("GetHost() drained = false after reseed, want true (drain state preserved)")
+	if !got.GetCordoned() {
+		t.Errorf("GetHost() cordoned = false after reseed, want true (cordon state preserved)")
 	}
 }
 
@@ -1184,7 +1184,7 @@ func TestListHosts(t *testing.T) {
 	}
 }
 
-func TestSetHostDrained(t *testing.T) {
+func TestSetHostCordoned(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
@@ -1192,33 +1192,33 @@ func TestSetHostDrained(t *testing.T) {
 		t.Fatalf("UpsertHostIfMissing() error = %v", err)
 	}
 
-	drained, err := s.SetHostDrained(ctx, "host-a", true, "kernel upgrade")
+	cordoned, err := s.SetHostCordoned(ctx, "host-a", true, "kernel upgrade")
 	if err != nil {
-		t.Fatalf("SetHostDrained(true) error = %v", err)
+		t.Fatalf("SetHostCordoned(true) error = %v", err)
 	}
-	if !drained.GetDrained() || drained.GetDrainedReason() != "kernel upgrade" || drained.GetDrainedAt() == nil {
-		t.Errorf("SetHostDrained(true) = %+v, want drained=true reason=%q drained_at set", drained, "kernel upgrade")
+	if !cordoned.GetCordoned() || cordoned.GetCordonedReason() != "kernel upgrade" || cordoned.GetCordonedAt() == nil {
+		t.Errorf("SetHostCordoned(true) = %+v, want cordoned=true reason=%q cordoned_at set", cordoned, "kernel upgrade")
 	}
 
-	undrained, err := s.SetHostDrained(ctx, "host-a", false, "")
+	uncordoned, err := s.SetHostCordoned(ctx, "host-a", false, "")
 	if err != nil {
-		t.Fatalf("SetHostDrained(false) error = %v", err)
+		t.Fatalf("SetHostCordoned(false) error = %v", err)
 	}
-	if undrained.GetDrained() || undrained.GetDrainedReason() != "" || undrained.GetDrainedAt() != nil {
-		t.Errorf("SetHostDrained(false) = %+v, want drained=false, reason and drained_at cleared", undrained)
+	if uncordoned.GetCordoned() || uncordoned.GetCordonedReason() != "" || uncordoned.GetCordonedAt() != nil {
+		t.Errorf("SetHostCordoned(false) = %+v, want cordoned=false, reason and cordoned_at cleared", uncordoned)
 	}
 }
 
-func TestSetHostDrainedNotFound(t *testing.T) {
+func TestSetHostCordonedNotFound(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
-	if _, err := s.SetHostDrained(ctx, "missing", true, ""); err != ErrNotFound {
-		t.Errorf("SetHostDrained() error = %v, want ErrNotFound", err)
+	if _, err := s.SetHostCordoned(ctx, "missing", true, ""); err != ErrNotFound {
+		t.Errorf("SetHostCordoned() error = %v, want ErrNotFound", err)
 	}
 }
 
-func TestListDrainedHostNames(t *testing.T) {
+func TestListCordonedHostNames(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
@@ -1230,16 +1230,16 @@ func TestListDrainedHostNames(t *testing.T) {
 	}
 	must(s.UpsertHostIfMissing(ctx, sampleHost("host-a")))
 	must(s.UpsertHostIfMissing(ctx, sampleHost("host-b")))
-	if _, err := s.SetHostDrained(ctx, "host-a", true, ""); err != nil {
-		t.Fatalf("SetHostDrained() error = %v", err)
+	if _, err := s.SetHostCordoned(ctx, "host-a", true, ""); err != nil {
+		t.Fatalf("SetHostCordoned() error = %v", err)
 	}
 
-	got, err := s.ListDrainedHostNames(ctx)
+	got, err := s.ListCordonedHostNames(ctx)
 	if err != nil {
-		t.Fatalf("ListDrainedHostNames() error = %v", err)
+		t.Fatalf("ListCordonedHostNames() error = %v", err)
 	}
 	if len(got) != 1 || !got["host-a"] {
-		t.Fatalf("ListDrainedHostNames() = %v, want {host-a: true}", got)
+		t.Fatalf("ListCordonedHostNames() = %v, want {host-a: true}", got)
 	}
 }
 
@@ -1284,20 +1284,20 @@ func TestCountVMsByHost(t *testing.T) {
 	}
 }
 
-func TestReservePlacement_DrainedHostFails(t *testing.T) {
+func TestReservePlacement_CordonedHostFails(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
 	if err := s.UpsertHostIfMissing(ctx, sampleHost("host-a")); err != nil {
 		t.Fatalf("setup error = %v", err)
 	}
-	if _, err := s.SetHostDrained(ctx, "host-a", true, "maintenance"); err != nil {
-		t.Fatalf("SetHostDrained() error = %v", err)
+	if _, err := s.SetHostCordoned(ctx, "host-a", true, "maintenance"); err != nil {
+		t.Fatalf("SetHostCordoned() error = %v", err)
 	}
 
 	err := s.ReservePlacement(ctx, "placement-1", "host-a", "pool-a", "default")
-	if !errors.Is(err, ErrHostDrained) {
-		t.Fatalf("ReservePlacement() on drained host error = %v, want ErrHostDrained", err)
+	if !errors.Is(err, ErrHostCordoned) {
+		t.Fatalf("ReservePlacement() on cordoned host error = %v, want ErrHostCordoned", err)
 	}
 	got, err := s.CountVMsByHost(ctx, "host-a")
 	if err != nil {
@@ -1312,8 +1312,8 @@ func TestReservePlacement_UnregisteredHostAllowed(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
-	// DrainHost refuses unregistered hosts, so a host with no registry row
-	// can never be drained and must not block placement.
+	// CordonHost refuses unregistered hosts, so a host with no registry row
+	// can never be cordoned and must not block placement.
 	if err := s.ReservePlacement(ctx, "placement-1", "host-unregistered", "pool-a", "default"); err != nil {
 		t.Fatalf("ReservePlacement() on unregistered host error = %v, want nil", err)
 	}
