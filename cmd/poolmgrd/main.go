@@ -18,7 +18,6 @@ import (
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	"github.com/liquidmetal-dev/battery/internal/api"
@@ -82,17 +81,22 @@ func main() {
 		}
 	}()
 
-	if err := seedHosts(ctx, st, cfg); err != nil {
-		fatal("poolmgrd: seed hosts", err)
-	}
 	if err := clearStalePlacements(ctx, st); err != nil {
 		fatal("poolmgrd: clear stale placements", err)
 	}
 
-	flint, err := flintlockclient.New(cfg)
+	// The store is the only source of hosts: HostAdmin.AddHost writes them
+	// there, with their TLS settings, and the pool is built from it.
+	hosts, err := st.ListHosts(ctx)
 	if err != nil {
-		fatal("poolmgrd: flintlock client pool", err)
+		fatal("poolmgrd: list hosts", err)
 	}
+	flint := buildFlintlockPool(ctx, hosts)
+	defer func() {
+		if err := flint.Close(); err != nil {
+			slog.Error("poolmgrd: close flintlock client pool", "error", err)
+		}
+	}()
 
 	reg := metrics.NewRegistry()
 	reg.RegisterPoolCollector(st)
@@ -115,7 +119,7 @@ func main() {
 	sweeper := reconciler.NewSweeper(st, flint, sweepInterval, warningWindow, poolMgr, reg)
 
 	errCh := make(chan error, 4)
-	pending := 3
+	pending := 4
 
 	go func() {
 		errCh <- serveMetrics(runCtx, cfg.MetricsAddr, reg)
@@ -127,24 +131,21 @@ func main() {
 		errCh <- sweeper.Run(runCtx)
 	}()
 
-	if cfg.APIServer != nil {
-		grpcSrv, err := buildGRPCServer(*cfg.APIServer, st, flint, reg, poolMgr)
-		if err != nil {
-			fatal("poolmgrd: build grpc server", err)
-		}
-
-		lis, err := net.Listen("tcp", cfg.APIServer.Addr)
-		if err != nil {
-			fatal(fmt.Sprintf("poolmgrd: listen on %s", cfg.APIServer.Addr), err)
-		}
-
-		pending++
-		go func() {
-			errCh <- serveGRPC(runCtx, grpcSrv, lis)
-		}()
-	} else {
-		slog.Warn("poolmgrd: no api_server configured, gRPC API is disabled")
+	// cfg.Validate (via config.Load) guarantees APIServer is set: without
+	// it the manager could never be told about a host.
+	grpcSrv, err := buildGRPCServer(*cfg.APIServer, st, flint, reg, poolMgr)
+	if err != nil {
+		fatal("poolmgrd: build grpc server", err)
 	}
+
+	lis, err := net.Listen("tcp", cfg.APIServer.Addr)
+	if err != nil {
+		fatal(fmt.Sprintf("poolmgrd: listen on %s", cfg.APIServer.Addr), err)
+	}
+
+	go func() {
+		errCh <- serveGRPC(runCtx, grpcSrv, lis)
+	}()
 
 	var firstErr error
 	for i := 0; i < pending; i++ {
@@ -174,19 +175,31 @@ func parseLogLevel(s string) (slog.Level, error) {
 	}
 }
 
-// seedHosts upserts a hosts registry row for every host in cfg, so the
-// HostAdmin API has a known-host set to validate Cordon/UncordonHost calls
-// against. An existing row has its address refreshed to match cfg, but its
-// cordon state is left untouched - see store.Store.UpsertHostIfMissing.
-func seedHosts(ctx context.Context, st store.Store, cfg *config.Config) error {
-	now := timestamppb.Now()
-	for _, h := range cfg.Hosts {
-		host := &poolmgrv1alpha1.Host{Name: h.Name, Address: h.Address, UpdatedAt: now}
-		if err := st.UpsertHostIfMissing(ctx, host); err != nil {
-			return fmt.Errorf("seed host %q: %w", h.Name, err)
+// buildFlintlockPool dials each stored host and returns a Pool of those that
+// dialled. A host whose stored spec fails flintlockclient.Dial (a bad TLS
+// setting, or TLS files that have gone missing) is logged and left out
+// rather than failing startup: it stays in the store, where ListHosts still
+// shows it and HostAdmin.UpdateHost can fix it and add it to the pool. Its
+// pools see ErrUnknownHost for it until then. An empty hosts is fine.
+func buildFlintlockPool(ctx context.Context, hosts []*poolmgrv1alpha1.Host) *flintlockclient.Pool {
+	// New(nil) dials nothing, so it can't fail.
+	flint, _ := flintlockclient.New(nil)
+	for _, h := range hosts {
+		c, err := flintlockclient.Dial(h)
+		if err == nil {
+			err = flint.Add(c)
+			if err != nil {
+				_ = c.Close()
+			}
+		}
+		if err != nil {
+			slog.WarnContext(ctx, "poolmgrd: skipping flintlock host, fix it with poolmgrctl host update", "host", h.GetName(), "error", err)
 		}
 	}
-	return nil
+	if len(hosts) == 0 {
+		slog.WarnContext(ctx, "poolmgrd: no flintlock hosts registered, pools cannot provision until one is added")
+	}
+	return flint
 }
 
 // clearStalePlacements drops every placement reservation in st. poolmgrd is
@@ -214,7 +227,7 @@ func buildGRPCServer(cfg config.APIServerConfig, st store.Store, flint *flintloc
 	poolmgrv1alpha1.RegisterPoolAdminServer(srv, api.NewPoolAdminServer(st, poolMgr))
 	poolmgrv1alpha1.RegisterLeaseServer(srv, api.NewLeaseServer(st, flint, api.HookExecConfig{}, poolMgr, reg))
 	poolmgrv1alpha1.RegisterEventsServer(srv, api.NewEventsServer(st, 0, 0))
-	poolmgrv1alpha1.RegisterHostAdminServer(srv, api.NewHostAdminServer(st))
+	poolmgrv1alpha1.RegisterHostAdminServer(srv, api.NewHostAdminServer(st, flint))
 
 	healthSrv := health.NewServer()
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)

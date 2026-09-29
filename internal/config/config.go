@@ -1,6 +1,7 @@
 // Package config loads the static process configuration for the pool
-// manager's flintlock client pool: the list of flintlock hosts it may talk
-// to, each with its address and TLS materials.
+// manager: its API server, its /metrics address, and the lease sweeper's
+// timings. Flintlock hosts are not configured here; they live in the store
+// and are managed through the HostAdmin API (poolmgrctl host add).
 package config
 
 import (
@@ -15,14 +16,16 @@ import (
 // listener binds to when Config.MetricsAddr is empty.
 const DefaultMetricsAddr = ":9090"
 
-// Config is the top-level configuration: the set of flintlock hosts the pool
-// manager can dial, the pool manager's own API server config, and the
-// address its /metrics HTTP endpoint listens on. APIServer is a pointer so
-// that a config file predating its introduction (or one that simply omits
-// it) parses as "not configured" rather than as an explicit, invalid
-// all-zero value.
+// errHostsKey is returned by Load for a config file that still carries the
+// "hosts" list older releases read flintlock hosts from.
+var errHostsKey = errors.New(`config: "hosts" is no longer supported: register each flintlock host with "poolmgrctl host add" instead`)
+
+// Config is the top-level configuration: the pool manager's own API server
+// config, and the address its /metrics HTTP endpoint listens on. APIServer
+// is a pointer so that a config file that omits it parses as "not
+// configured", which Validate then rejects, rather than as an all-zero
+// value with a less helpful error.
 type Config struct {
-	Hosts     []HostConfig     `json:"hosts"`
 	APIServer *APIServerConfig `json:"api_server,omitempty"`
 	// MetricsAddr is the address (host:port, or :port) the /metrics HTTP
 	// endpoint listens on. Empty uses DefaultMetricsAddr.
@@ -37,30 +40,22 @@ type Config struct {
 	WarningWindow string `json:"warning_window,omitempty"`
 }
 
-// HostConfig describes one flintlock host: an address plus per-host TLS
-// materials. Name is the identifier referenced by PoolSpec.FlintlockHosts.
-type HostConfig struct {
-	Name    string    `json:"name"`
-	Address string    `json:"address"`
-	TLS     TLSConfig `json:"tls"`
-}
-
-// TLSConfig controls how the pool manager connects to a flintlock host:
-// either an explicit insecure (no-TLS) mode, or TLS verifying the server via
-// CAFile, optionally presenting a client certificate (mTLS) via
-// CertFile/KeyFile.
-type TLSConfig struct {
-	Insecure bool   `json:"insecure,omitempty"`
-	CertFile string `json:"cert_file,omitempty"`
-	KeyFile  string `json:"key_file,omitempty"`
-	CAFile   string `json:"ca_file,omitempty"`
-}
-
 // Load reads and parses the JSON config file at path, then validates it.
+// A file with a "hosts" key fails with an error naming poolmgrctl host add:
+// hosts moved to the store, and silently ignoring the list would leave an
+// upgraded manager with no hosts and no hint why.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("config: read %s: %w", path, err)
+	}
+
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(data, &keys); err != nil {
+		return nil, fmt.Errorf("config: parse %s: %w", path, err)
+	}
+	if _, ok := keys["hosts"]; ok {
+		return nil, fmt.Errorf("%s: %w", path, errHostsKey)
 	}
 
 	var cfg Config
@@ -78,36 +73,15 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// Validate checks that the config describes a usable set of flintlock
-// hosts: at least one host, unique non-empty names, non-empty addresses,
-// and a consistent per-host TLS configuration.
+// Validate checks that the config has a valid API server, without which
+// the manager could never be told about a flintlock host, and that the
+// sweeper durations, if set, are positive.
 func (c *Config) Validate() error {
-	if len(c.Hosts) == 0 {
-		return errors.New("config: at least one host is required")
+	if c.APIServer == nil {
+		return errors.New("config: api_server is required")
 	}
-
-	seen := make(map[string]struct{}, len(c.Hosts))
-	for _, h := range c.Hosts {
-		if h.Name == "" {
-			return errors.New("config: host name is required")
-		}
-		if h.Address == "" {
-			return fmt.Errorf("config: host %q: address is required", h.Name)
-		}
-		if _, dup := seen[h.Name]; dup {
-			return fmt.Errorf("config: duplicate host name %q", h.Name)
-		}
-		seen[h.Name] = struct{}{}
-
-		if err := h.TLS.Validate(); err != nil {
-			return fmt.Errorf("config: host %q: %w", h.Name, err)
-		}
-	}
-
-	if c.APIServer != nil {
-		if err := c.APIServer.Validate(); err != nil {
-			return fmt.Errorf("config: api_server: %w", err)
-		}
+	if err := c.APIServer.Validate(); err != nil {
+		return fmt.Errorf("config: api_server: %w", err)
 	}
 
 	if err := validatePositiveDuration("sweep_interval", c.SweepInterval); err != nil {
@@ -133,28 +107,6 @@ func validatePositiveDuration(field, s string) error {
 	if d <= 0 {
 		return fmt.Errorf("config: %s: must be positive", field)
 	}
-	return nil
-}
-
-// Validate checks that the TLS config is internally consistent: an insecure
-// config carries no other TLS fields, and a non-insecure config has a
-// CAFile plus a matched cert/key pair (or neither).
-func (t TLSConfig) Validate() error {
-	if t.Insecure {
-		if t.CertFile != "" || t.KeyFile != "" || t.CAFile != "" {
-			return errors.New("tls: insecure hosts must not set cert_file/key_file/ca_file")
-		}
-		return nil
-	}
-
-	if t.CAFile == "" {
-		return errors.New("tls: ca_file is required unless insecure is set")
-	}
-
-	if (t.CertFile == "") != (t.KeyFile == "") {
-		return errors.New("tls: cert_file and key_file must be set together")
-	}
-
 	return nil
 }
 
@@ -184,7 +136,7 @@ func (a APIServerConfig) Validate() error {
 // itself: either an explicit insecure (no-TLS) mode, or TLS presenting a
 // server certificate (CertFile/KeyFile, always required when not insecure),
 // optionally validating client certificates (mTLS) via ValidateClient plus
-// ClientCAFile. Unlike the client-dialing TLSConfig, ValidateClient is a
+// ClientCAFile. Unlike a flintlock host's ca_file, ValidateClient is a
 // separate, explicit opt-in from ClientCAFile's presence: setting a CA file
 // alone does not turn on client-certificate verification.
 type ServerTLSConfig struct {

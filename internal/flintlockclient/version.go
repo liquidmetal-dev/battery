@@ -21,53 +21,82 @@ import (
 // socket path by uid alone.
 const MinFlintlockVersion = "v0.15.2"
 
-// ErrUnsupportedVersion is returned by Pool.CheckVersion when a host's
+// ErrUnsupportedVersion is returned by CheckVersion when a host's
 // flintlockd is older than MinFlintlockVersion, or its version can't be
 // determined.
 var ErrUnsupportedVersion = errors.New("flintlockclient: unsupported flintlock version")
 
 // CheckVersion reports whether the named host runs a flintlockd at least as
-// new as MinFlintlockVersion, returning an ErrUnsupportedVersion-wrapping
-// error if not. Any other RPC failure (e.g. the host being unreachable) is
+// new as MinFlintlockVersion; see Conn.CheckVersion. It returns
+// ErrUnknownHost if no such host is in the pool.
+func (p *Pool) CheckVersion(ctx context.Context, hostName string) error {
+	c, err := p.conn(hostName)
+	if err != nil {
+		return err
+	}
+	return c.CheckVersion(ctx)
+}
+
+// FlintlockVersion returns the flintlock version the named host last
+// reported to CheckVersion, and false if the host isn't in the pool or
+// hasn't reported one since it was added or last updated. A version too old
+// to pass the check is still returned.
+func (p *Pool) FlintlockVersion(hostName string) (string, bool) {
+	c, err := p.conn(hostName)
+	if err != nil {
+		return "", false
+	}
+	return c.FlintlockVersion()
+}
+
+// CheckVersion reports whether c's host runs a flintlockd at least as new
+// as MinFlintlockVersion, returning an ErrUnsupportedVersion-wrapping error
+// if not. Any other RPC failure (e.g. the host being unreachable) is
 // returned as-is. A host that passes is remembered and not asked again; one
 // that fails is asked again next time, so upgrading it takes effect without
-// restarting the pool manager.
-func (p *Pool) CheckVersion(ctx context.Context, hostName string) error {
-	p.versionMu.Lock()
-	ok := p.versionOK[hostName]
-	p.versionMu.Unlock()
+// restarting the pool manager. Either way the reported version is kept for
+// FlintlockVersion.
+func (c *Conn) CheckVersion(ctx context.Context) error {
+	c.versionMu.Lock()
+	ok := c.versionOK
+	c.versionMu.Unlock()
 	if ok {
 		return nil
 	}
 
-	client, err := p.Client(hostName)
-	if err != nil {
-		return err
-	}
-
-	resp, err := client.ServerInfo(ctx, &emptypb.Empty{})
+	resp, err := c.microVM.ServerInfo(ctx, &emptypb.Empty{})
 	if status.Code(err) == codes.Unimplemented {
 		// ServerInfo was added in v0.15.0.
-		return fmt.Errorf("%w: host %q is older than v0.15.0, need %s or newer", ErrUnsupportedVersion, hostName, MinFlintlockVersion)
+		return fmt.Errorf("%w: host %q is older than v0.15.0, need %s or newer", ErrUnsupportedVersion, c.name, MinFlintlockVersion)
 	}
 	if err != nil {
-		return fmt.Errorf("flintlockclient: host %q: ServerInfo: %w", hostName, err)
+		return fmt.Errorf("flintlockclient: host %q: ServerInfo: %w", c.name, err)
 	}
 
 	version := resp.GetVersion().GetVersion()
 	core, valid := versionCore(version)
+	ok = valid && semver.Compare(core, MinFlintlockVersion) >= 0
+
+	c.versionMu.Lock()
+	c.version, c.versionOK = version, ok
+	c.versionMu.Unlock()
+
 	if !valid {
 		return fmt.Errorf("%w: host %q reports version %q, which can't be compared with the minimum %s (is flintlockd built without version information?)",
-			ErrUnsupportedVersion, hostName, version, MinFlintlockVersion)
+			ErrUnsupportedVersion, c.name, version, MinFlintlockVersion)
 	}
-	if semver.Compare(core, MinFlintlockVersion) < 0 {
-		return fmt.Errorf("%w: host %q runs flintlock %s, need %s or newer", ErrUnsupportedVersion, hostName, version, MinFlintlockVersion)
+	if !ok {
+		return fmt.Errorf("%w: host %q runs flintlock %s, need %s or newer", ErrUnsupportedVersion, c.name, version, MinFlintlockVersion)
 	}
-
-	p.versionMu.Lock()
-	p.versionOK[hostName] = true
-	p.versionMu.Unlock()
 	return nil
+}
+
+// FlintlockVersion returns the flintlock version c's host last reported to
+// CheckVersion, and false if it hasn't reported one.
+func (c *Conn) FlintlockVersion() (string, bool) {
+	c.versionMu.Lock()
+	defer c.versionMu.Unlock()
+	return c.version, c.version != ""
 }
 
 // versionCore reduces a flintlock version string to its vMAJOR.MINOR.PATCH

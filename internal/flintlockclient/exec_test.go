@@ -13,7 +13,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/liquidmetal-dev/battery/internal/config"
+	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	"github.com/liquidmetal-dev/battery/internal/flintlockclient"
 )
 
@@ -88,9 +88,9 @@ func startFakeExecServer(t *testing.T, fake *fakeMicroVMExecServer) string {
 func dialExecClient(t *testing.T, addr string) microvmexecv1alpha1.MicroVMExecClient {
 	t.Helper()
 
-	pool, err := flintlockclient.New(&config.Config{Hosts: []config.HostConfig{
-		{Name: "host-a", Address: addr, TLS: config.TLSConfig{Insecure: true}},
-	}})
+	pool, err := flintlockclient.New([]*poolmgrv1alpha1.Host{
+		{Name: "host-a", Address: addr, Tls: &poolmgrv1alpha1.HostTLS{Insecure: true}},
+	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -254,9 +254,9 @@ func TestPool_ExecClientUnknownHost(t *testing.T) {
 		},
 	})
 
-	pool, err := flintlockclient.New(&config.Config{Hosts: []config.HostConfig{
-		{Name: "host-a", Address: addr, TLS: config.TLSConfig{Insecure: true}},
-	}})
+	pool, err := flintlockclient.New([]*poolmgrv1alpha1.Host{
+		{Name: "host-a", Address: addr, Tls: &poolmgrv1alpha1.HostTLS{Insecure: true}},
+	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

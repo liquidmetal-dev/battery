@@ -128,6 +128,7 @@ func bufconnPoolAdmin(t *testing.T) *grpc.ClientConn {
 		t.Fatalf("store.Open() error = %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
+	seedHost(t, st, "host-a")
 
 	lis := bufconn.Listen(1024 * 1024)
 	t.Cleanup(func() { _ = lis.Close() })

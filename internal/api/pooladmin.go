@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
+	"strings"
 	"sync"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
@@ -116,8 +118,36 @@ func validatePoolSpec(spec *poolmgrv1alpha1.PoolSpec) error {
 	return nil
 }
 
-// CreatePool validates spec, rejects a name/namespace that already exists,
-// and persists the new pool. The returned Pool has zero-valued status: a
+// checkFlintlockHosts returns an InvalidArgument status naming every entry
+// in spec.flintlock_hosts that isn't a registered host. Callers hold
+// hostRefsMu for reading from this check through their store write, so
+// RemoveHost can't delete a host in between.
+func (s *PoolAdminServer) checkFlintlockHosts(ctx context.Context, spec *poolmgrv1alpha1.PoolSpec) error {
+	hosts, err := s.store.ListHosts(ctx)
+	if err != nil {
+		return status.Errorf(codes.Internal, "list hosts: %v", err)
+	}
+	known := make(map[string]bool, len(hosts))
+	for _, h := range hosts {
+		known[h.GetName()] = true
+	}
+
+	var unknown []string
+	for _, name := range spec.GetFlintlockHosts() {
+		if !known[name] && !slices.Contains(unknown, name) {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) > 0 {
+		return status.Errorf(codes.InvalidArgument, "spec.flintlock_hosts: unknown hosts %s; add them with HostAdmin.AddHost first",
+			strings.Join(unknown, ", "))
+	}
+	return nil
+}
+
+// CreatePool validates spec, rejects a name/namespace that already exists
+// or a flintlock_hosts entry that names no registered host, and persists
+// the new pool. The returned Pool has zero-valued status: a
 // freshly created pool has no VMs yet.
 func (s *PoolAdminServer) CreatePool(ctx context.Context, req *poolmgrv1alpha1.CreatePoolRequest) (*poolmgrv1alpha1.Pool, error) {
 	spec := req.GetSpec()
@@ -130,6 +160,14 @@ func (s *PoolAdminServer) CreatePool(ctx context.Context, req *poolmgrv1alpha1.C
 
 	unlock := s.lockPool(spec.GetName(), spec.GetNamespace())
 	defer unlock()
+
+	hostRefsMu.RLock()
+	defer hostRefsMu.RUnlock()
+
+	if err := s.checkFlintlockHosts(ctx, spec); err != nil {
+		log.WarnContext(ctx, "pooladmin: CreatePool failed", "error", err)
+		return nil, err
+	}
 
 	_, err := s.store.GetPool(ctx, spec.GetName(), spec.GetNamespace())
 	if err == nil {
@@ -197,8 +235,9 @@ func (s *PoolAdminServer) ListPools(ctx context.Context, req *poolmgrv1alpha1.Li
 	return resp, nil
 }
 
-// UpdatePool validates the new spec, confirms the pool it identifies already
-// exists, and persists the update.
+// UpdatePool validates the new spec, rejects a flintlock_hosts entry that
+// names no registered host, confirms the pool it identifies already exists,
+// and persists the update.
 func (s *PoolAdminServer) UpdatePool(ctx context.Context, req *poolmgrv1alpha1.UpdatePoolRequest) (*poolmgrv1alpha1.Pool, error) {
 	spec := req.GetSpec()
 	if err := validatePoolSpec(spec); err != nil {
@@ -210,6 +249,14 @@ func (s *PoolAdminServer) UpdatePool(ctx context.Context, req *poolmgrv1alpha1.U
 
 	unlock := s.lockPool(spec.GetName(), spec.GetNamespace())
 	defer unlock()
+
+	hostRefsMu.RLock()
+	defer hostRefsMu.RUnlock()
+
+	if err := s.checkFlintlockHosts(ctx, spec); err != nil {
+		log.WarnContext(ctx, "pooladmin: UpdatePool failed", "error", err)
+		return nil, err
+	}
 
 	if _, err := s.store.GetPool(ctx, spec.GetName(), spec.GetNamespace()); err != nil {
 		if errors.Is(err, store.ErrNotFound) {

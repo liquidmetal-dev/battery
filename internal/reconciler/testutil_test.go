@@ -64,11 +64,20 @@ func sampleVM(uid, poolName, host string, phase poolmgrv1alpha1.VMPhase) *poolmg
 	}
 }
 
-// seedHost registers name in st's host registry so it can be cordoned.
+// seedHost registers name in st's host registry, as poolmgrctl host add
+// would, so VMs can be placed on it and it can be cordoned.
 func seedHost(t *testing.T, st store.Store, name string) {
 	t.Helper()
 	host := &poolmgrv1alpha1.Host{Name: name, Address: name + ":8443", UpdatedAt: timestamppb.Now()}
-	if err := st.UpsertHostIfMissing(context.Background(), host); err != nil {
-		t.Fatalf("UpsertHostIfMissing(%q): %v", name, err)
+	if err := st.CreateHost(context.Background(), host); err != nil {
+		t.Fatalf("CreateHost(%q): %v", name, err)
 	}
+}
+
+// openTestStoreWithHost returns openTestStore with name already registered.
+func openTestStoreWithHost(t *testing.T, name string) store.Store {
+	t.Helper()
+	st := openTestStore(t)
+	seedHost(t, st, name)
+	return st
 }

@@ -24,6 +24,7 @@ battery is made up of three binaries:
   - `PoolAdmin` — create, update, delete, and list pool definitions.
   - `Lease` — claim a VM from a pool, heartbeat it, and release it back.
   - `Events` — a server-streaming subscription for pool/VM/lease lifecycle events.
+  - `HostAdmin` — add, update, cordon, remove, and list the flintlock hosts VMs are placed on.
 
   It's designed to reconcile a fleet of flintlock hosts against each pool's desired state, replenishing
   VMs using a per-pool strategy, and, once implemented, persist state (e.g., in an embedded SQLite database).
@@ -34,7 +35,7 @@ battery is made up of three binaries:
   exposed via the `Hostagent` gRPC service.
 
 - **`poolmgrctl`** (`cmd/poolmgrctl`) — a CLI client for the pool manager's gRPC API. It connects
-  to `poolmgrd` to manage pool definitions (CRUD), claim and release leases, list leases, and
+  to `poolmgrd` to manage flintlock hosts and pool definitions (CRUD), claim and release leases, list leases, and
   subscribe to pool/VM/lease lifecycle events. It holds no server-side state of its own.
 
 See [`docs/design/2026-09-05-microvm-warm-pool-manager-design.md`](docs/design/2026-09-05-microvm-warm-pool-manager-design.md)
@@ -53,6 +54,41 @@ manual end-to-end verification runbook against a real flintlockd + Firecracker V
 - [mise](https://mise.jdx.dev/) (recommended) to install pinned tool versions from
   `mise.toml` — [buf](https://buf.build/), golangci-lint, `protoc-gen-go`, and
   `protoc-gen-go-grpc`.
+
+### Running poolmgrd
+
+`poolmgrd` takes a JSON config file (`-config`) and a SQLite database path (`-db`). The config
+holds only the manager's own settings; `api_server` is required:
+
+```json
+{
+  "api_server": {"addr": ":8443", "tls": {"insecure": true}},
+  "metrics_addr": ":9090"
+}
+```
+
+Flintlock hosts are not part of the config. They live in the database and are managed at
+runtime through the `HostAdmin` API, so a fresh manager has none until you add one. Until then
+it logs a warning and no pool can provision:
+
+```sh
+poolmgrctl host add host-a --address flintlock-a.example.com:9090 --flintlock-insecure \
+  --addr 127.0.0.1:8443 --insecure
+```
+
+For TLS to the host, pass `--flintlock-ca-file` (and `--flintlock-cert-file`/`--flintlock-key-file`
+for mTLS) instead of `--flintlock-insecure`. These are paths on the machine running `poolmgrd`,
+not on the machine running `poolmgrctl`. `host add` dials the host and checks its flintlock
+version before storing it; `--skip-validation` registers a host that isn't reachable yet. Use
+`host update`, `host cordon`, `host remove`, `host get`, and `host list` to manage hosts after that.
+A pool spec can only name hosts that have been added.
+
+A config file that still has a `hosts` list (from releases before the `HostAdmin` API) fails to
+load, with an error pointing at `poolmgrctl host add`. Remove the list, then move each host
+across. A database from an earlier release already has a row for each host it was configured
+with, but no TLS settings for it: `poolmgrd` logs a warning and skips such a host at startup
+until you run `poolmgrctl host update <name> --address ...` with its TLS flags. Hosts it has
+never seen take `poolmgrctl host add`.
 
 ### Using poolmgrctl
 

@@ -8,3 +8,13 @@ Port-forward the gRPC API:
 
 Port-forward metrics:
   kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "poolmgrd.fullname" . }} {{ include "poolmgrd.portFromAddr" .Values.config.metrics_addr }}:{{ include "poolmgrd.portFromAddr" .Values.config.metrics_addr }}
+
+poolmgrd starts with no flintlock hosts, and no pool can provision until
+one is registered. With the gRPC API port-forwarded as above, add each host
+with poolmgrctl (released as a CLI binary; there is no poolmgrctl image, so
+this is a manual step rather than a Job):
+  poolmgrctl host add <name> --address <flintlock-host:port> --flintlock-insecure \
+    --addr 127.0.0.1:{{ include "poolmgrd.portFromAddr" .Values.config.api_server.addr }}{{ if .Values.config.api_server.tls.insecure }} --insecure{{ end }}
+For TLS to the host, replace --flintlock-insecure with --flintlock-ca-file
+(plus --flintlock-cert-file/--flintlock-key-file for mTLS), each a path under
+/etc/poolmgrd/tls inside the poolmgrd pod (see values.yaml tls).
