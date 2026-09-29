@@ -183,12 +183,15 @@ func (s *HostAdminServer) AddHost(ctx context.Context, req *poolmgrv1alpha1.AddH
 	unlock := s.lockHost(host.GetName())
 	defer unlock()
 
-	_, err := s.store.GetHost(ctx, host.GetName())
-	if err == nil {
+	// Reject a duplicate name before dialing, which can be slow. CreateHost
+	// still returns ErrHostExists below, so this check is only a shortcut.
+	switch _, err := s.store.GetHost(ctx, host.GetName()); {
+	case errors.Is(err, store.ErrNotFound):
+		// The name is free.
+	case err == nil:
 		log.WarnContext(ctx, "hostadmin: AddHost failed: host already exists")
 		return nil, status.Errorf(codes.AlreadyExists, "host %q already exists", host.GetName())
-	}
-	if !errors.Is(err, store.ErrNotFound) {
+	default:
 		log.ErrorContext(ctx, "hostadmin: AddHost: get host failed", "error", err)
 		return nil, status.Errorf(codes.Internal, "get host: %v", err)
 	}
