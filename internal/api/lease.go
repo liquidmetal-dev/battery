@@ -199,6 +199,12 @@ func (s *LeaseServer) replayClaim(ctx context.Context, lease *poolmgrv1alpha1.Le
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "get vm: %v", err)
 	}
+	if vm.GetPhase() == poolmgrv1alpha1.VMPhase_DELETING {
+		// EnsureVMDeleted marks the VM DELETING before it calls flintlock,
+		// and a failed delete leaves both rows in place. Treat it like the
+		// missing-row case above: the lease is ending, so don't replay it.
+		return nil, status.Errorf(codes.Aborted, "lease %s for request_id %q is being released, retry", lease.GetLeaseId(), lease.GetRequestId())
+	}
 
 	s.metrics.RecordVMClaim(poolName, poolNS, true)
 	return s.claimResponse(ctx, lease.GetLeaseId(), vm), nil

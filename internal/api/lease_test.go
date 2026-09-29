@@ -534,6 +534,35 @@ func TestClaimVM_ReplayVMGone(t *testing.T) {
 	assertVMPhase(t, st, "vm-1", poolmgrv1alpha1.VMPhase_AVAILABLE)
 }
 
+func TestClaimVM_ReplayVMDeleting(t *testing.T) {
+	flint := startFakeFlintlock(t, &fakeMicroVM{}, &fakeMicroVMExec{})
+	st := openTestStore(t)
+	ctx := context.Background()
+	setupPoolWithVMs(t, st, samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil), "vm-1", "vm-2")
+
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil, nil)
+	first, err := s.ClaimVM(ctx, claimRequest("pool-a", "req-1"))
+	if err != nil {
+		t.Fatalf("first ClaimVM: %v", err)
+	}
+
+	// A release that marked the VM DELETING but failed to delete it
+	// leaves both the VM and lease rows behind.
+	vm, err := st.GetVM(ctx, first.GetVmUid())
+	if err != nil {
+		t.Fatalf("GetVM: %v", err)
+	}
+	vm.Phase = poolmgrv1alpha1.VMPhase_DELETING
+	if err := st.UpdateVM(ctx, vm); err != nil {
+		t.Fatalf("UpdateVM: %v", err)
+	}
+
+	_, err = s.ClaimVM(ctx, claimRequest("pool-a", "req-1"))
+	if status.Code(err) != codes.Aborted {
+		t.Fatalf("expected Aborted, got %v", err)
+	}
+}
+
 // racingCreateLeaseStore wraps a store.Store and, on the first CreateLease
 // with a request_id, first claims another VM and commits a lease for it
 // with the same request_id. This reproduces two ClaimVMs with one
