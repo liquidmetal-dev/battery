@@ -23,6 +23,14 @@ service Lease {
 
 message ClaimVMRequest {
   PoolRef pool = 1;
+  // RequestId lets a client retry ClaimVM safely. The manager stores it on
+  // the lease it creates. A later ClaimVM with the same request_id returns
+  // that lease again, for as long as it exists, rather than a new one.
+  //
+  // Clients that retry ClaimVM must set it. A UUID is a good choice. Empty
+  // means the request is not retriable, which is the behaviour before this
+  // field existed. At most 255 bytes.
+  string request_id = 2;
 }
 
 message ClaimVMResponse {

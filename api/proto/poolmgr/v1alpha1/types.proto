@@ -127,6 +127,9 @@ message LeaseRecord {
   // PoolNamespace is the namespace of the pool identified by pool_name (together they form
   // the pool's PoolRef identity).
   string pool_namespace = 7;
+  // RequestId is the ClaimVMRequest.request_id that created this lease.
+  // Empty if the client did not set one.
+  string request_id = 8;
 }
 
 // EventType names the kind of change an Event describes.

@@ -344,3 +344,47 @@ func TestLeaseList_NamespaceWithoutPool_ValidationError(t *testing.T) {
 		t.Errorf("error = %q, want it to mention --pool/--namespace must be given together", err.Error())
 	}
 }
+
+// recordingLeaseClient is a LeaseClient that records the last ClaimVM
+// request and returns a canned response. Its other methods are left nil
+// and panic if called.
+type recordingLeaseClient struct {
+	poolmgrv1alpha1.LeaseClient
+
+	claimReq *poolmgrv1alpha1.ClaimVMRequest
+}
+
+func (c *recordingLeaseClient) ClaimVM(_ context.Context, req *poolmgrv1alpha1.ClaimVMRequest, _ ...grpc.CallOption) (*poolmgrv1alpha1.ClaimVMResponse, error) {
+	c.claimReq = req
+	return &poolmgrv1alpha1.ClaimVMResponse{LeaseId: "lease-1", VmUid: "vm-1"}, nil
+}
+
+func TestLeaseClaim_RequestID(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"set", []string{"--request-id", "req-1"}, "req-1"},
+		{"unset", nil, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &recordingLeaseClient{}
+			ctx := context.WithValue(context.Background(), clientsKey{}, &apiClients{lease: client})
+
+			cmd := newLeaseClaimCmd()
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetContext(ctx)
+			cmd.SetArgs(append([]string{"--pool", "pool-a", "--namespace", "default"}, tt.args...))
+
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if got := client.claimReq.GetRequestId(); got != tt.want {
+				t.Errorf("ClaimVMRequest.RequestId = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

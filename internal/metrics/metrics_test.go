@@ -9,24 +9,25 @@ import (
 
 func TestRecordVMClaim(t *testing.T) {
 	reg := metrics.NewRegistry()
-	reg.RecordVMClaim("pool-a", "default")
-	reg.RecordVMClaim("pool-a", "default")
-	reg.RecordVMClaim("pool-b", "default")
+	reg.RecordVMClaim("pool-a", "default", false)
+	reg.RecordVMClaim("pool-a", "default", true)
+	reg.RecordVMClaim("pool-b", "default", false)
 
 	body := scrape(t, reg)
-	assertContains(t, body, `poolmgr_vm_claims_total{pool_name="pool-a",pool_namespace="default"} 2`)
-	assertContains(t, body, `poolmgr_vm_claims_total{pool_name="pool-b",pool_namespace="default"} 1`)
+	assertContains(t, body, `poolmgr_vm_claims_total{pool_name="pool-a",pool_namespace="default",replayed="false"} 1`)
+	assertContains(t, body, `poolmgr_vm_claims_total{pool_name="pool-a",pool_namespace="default",replayed="true"} 1`)
+	assertContains(t, body, `poolmgr_vm_claims_total{pool_name="pool-b",pool_namespace="default",replayed="false"} 1`)
 }
 
 func TestRecordVMClaim_SameNameDifferentNamespace(t *testing.T) {
 	reg := metrics.NewRegistry()
-	reg.RecordVMClaim("workers", "team-a")
-	reg.RecordVMClaim("workers", "team-b")
-	reg.RecordVMClaim("workers", "team-b")
+	reg.RecordVMClaim("workers", "team-a", false)
+	reg.RecordVMClaim("workers", "team-b", false)
+	reg.RecordVMClaim("workers", "team-b", false)
 
 	body := scrape(t, reg)
-	assertContains(t, body, `poolmgr_vm_claims_total{pool_name="workers",pool_namespace="team-a"} 1`)
-	assertContains(t, body, `poolmgr_vm_claims_total{pool_name="workers",pool_namespace="team-b"} 2`)
+	assertContains(t, body, `poolmgr_vm_claims_total{pool_name="workers",pool_namespace="team-a",replayed="false"} 1`)
+	assertContains(t, body, `poolmgr_vm_claims_total{pool_name="workers",pool_namespace="team-b",replayed="false"} 2`)
 }
 
 func TestRecordVMRelease(t *testing.T) {
@@ -83,7 +84,7 @@ func TestRegistriesAreIsolated(t *testing.T) {
 	regA := metrics.NewRegistry()
 	regB := metrics.NewRegistry()
 
-	regA.RecordVMClaim("pool-a", "default")
+	regA.RecordVMClaim("pool-a", "default", false)
 
 	assertNotContains(t, scrape(t, regB), "poolmgr_vm_claims_total")
 }

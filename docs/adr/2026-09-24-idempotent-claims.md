@@ -2,7 +2,7 @@
 
 Related: [issue #98](https://github.com/liquidmetal-dev/battery/issues/98).
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-24
 
 ## Context

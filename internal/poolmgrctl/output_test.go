@@ -164,6 +164,7 @@ func TestPrintLeasesTable(t *testing.T) {
 		sampleLeaseForOutput("lease-1", "pool-a", "default", "vm-1"),
 		sampleLeaseForOutput("lease-2", "pool-b", "other", "vm-2"),
 	}
+	leases[0].RequestId = "req-1"
 
 	var buf bytes.Buffer
 	if err := printLeases(&buf, leases, OutputTable); err != nil {
@@ -172,8 +173,8 @@ func TestPrintLeasesTable(t *testing.T) {
 
 	out := buf.String()
 	for _, want := range []string{
-		"LEASE_ID", "POOL", "NAMESPACE", "VM_UID", "CLAIMED_AT", "EXPIRES_AT",
-		"lease-1", "pool-a", "default", "vm-1", "2026-09-12T10:00:00Z", "2026-09-12T11:00:00Z",
+		"LEASE_ID", "POOL", "NAMESPACE", "VM_UID", "CLAIMED_AT", "EXPIRES_AT", "REQUEST_ID",
+		"lease-1", "pool-a", "default", "vm-1", "2026-09-12T10:00:00Z", "2026-09-12T11:00:00Z", "req-1",
 		"lease-2", "pool-b", "other", "vm-2",
 	} {
 		if !strings.Contains(out, want) {
@@ -203,6 +204,7 @@ func TestPrintLeasesJSON_RoundTrip(t *testing.T) {
 		sampleLeaseForOutput("lease-1", "pool-a", "default", "vm-1"),
 		sampleLeaseForOutput("lease-2", "pool-b", "other", "vm-2"),
 	}
+	leases[0].RequestId = "req-1"
 
 	var buf bytes.Buffer
 	if err := printLeases(&buf, leases, OutputJSON); err != nil {
