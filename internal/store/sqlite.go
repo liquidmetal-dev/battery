@@ -384,6 +384,46 @@ func (s *sqliteStore) ClaimAvailableVM(ctx context.Context, poolName, poolNamesp
 	return rowToVM(row), nil
 }
 
+// leaseColumns lists the leases columns in the order scanLease reads them.
+// Every lease query selects this list, so a new column is added in one
+// place and can't be missed on some read paths.
+const leaseColumns = `lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at, request_id`
+
+// rowScanner is the Scan method shared by *sql.Row and *sql.Rows.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+// scanLease reads one row selected with leaseColumns.
+func scanLease(r rowScanner) (leaseRow, error) {
+	var row leaseRow
+	err := r.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt, &row.requestID)
+	return row, err
+}
+
+// queryLeases runs query, which must select leaseColumns, and returns
+// every row it yields.
+func (s *sqliteStore) queryLeases(ctx context.Context, query string, args ...any) ([]*poolmgrv1alpha1.LeaseRecord, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: query leases: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var leases []*poolmgrv1alpha1.LeaseRecord
+	for rows.Next() {
+		row, err := scanLease(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan lease: %w", err)
+		}
+		leases = append(leases, rowToLease(row))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate leases: %w", err)
+	}
+	return leases, nil
+}
+
 func (s *sqliteStore) CreateLease(ctx context.Context, l *poolmgrv1alpha1.LeaseRecord) error {
 	row, err := leaseToRow(l)
 	if err != nil {
@@ -391,7 +431,7 @@ func (s *sqliteStore) CreateLease(ctx context.Context, l *poolmgrv1alpha1.LeaseR
 	}
 
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO leases (lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at, request_id)
+		INSERT INTO leases (`+leaseColumns+`)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.leaseID, row.vmUID, row.poolName, row.poolNamespace, row.claimedAt, row.lastHeartbeatAt, row.expiresAt, row.requestID,
 	)
@@ -416,12 +456,9 @@ func isRequestIDConflict(err error) bool {
 }
 
 func (s *sqliteStore) GetLease(ctx context.Context, leaseID string) (*poolmgrv1alpha1.LeaseRecord, error) {
-	r := s.db.QueryRowContext(ctx, `
-		SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at, request_id
-		FROM leases WHERE lease_id = ?`, leaseID)
-
-	var row leaseRow
-	err := r.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt, &row.requestID)
+	row, err := scanLease(s.db.QueryRowContext(ctx, `
+		SELECT `+leaseColumns+`
+		FROM leases WHERE lease_id = ?`, leaseID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -434,12 +471,9 @@ func (s *sqliteStore) GetLease(ctx context.Context, leaseID string) (*poolmgrv1a
 func (s *sqliteStore) GetLeaseByRequestID(ctx context.Context, requestID string) (*poolmgrv1alpha1.LeaseRecord, error) {
 	// An empty request ID is stored as NULL, which never matches, so this
 	// returns ErrNotFound for "" without a special case.
-	r := s.db.QueryRowContext(ctx, `
-		SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at, request_id
-		FROM leases WHERE request_id = ?`, requestID)
-
-	var row leaseRow
-	err := r.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt, &row.requestID)
+	row, err := scanLease(s.db.QueryRowContext(ctx, `
+		SELECT `+leaseColumns+`
+		FROM leases WHERE request_id = ?`, requestID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -469,30 +503,13 @@ func (s *sqliteStore) DeleteLease(ctx context.Context, leaseID string) error {
 }
 
 func (s *sqliteStore) ListExpiredLeases(ctx context.Context, now time.Time) ([]*poolmgrv1alpha1.LeaseRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at, request_id
+	return s.queryLeases(ctx, `
+		SELECT `+leaseColumns+`
 		FROM leases WHERE expires_at <= ? ORDER BY expires_at`, now.UnixNano())
-	if err != nil {
-		return nil, fmt.Errorf("store: query expired leases: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var leases []*poolmgrv1alpha1.LeaseRecord
-	for rows.Next() {
-		var row leaseRow
-		if err := rows.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt, &row.requestID); err != nil {
-			return nil, fmt.Errorf("store: scan lease: %w", err)
-		}
-		leases = append(leases, rowToLease(row))
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: iterate leases: %w", err)
-	}
-	return leases, nil
 }
 
 func (s *sqliteStore) ListLeases(ctx context.Context, poolRef *poolmgrv1alpha1.PoolRef) ([]*poolmgrv1alpha1.LeaseRecord, error) {
-	query := `SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at, request_id FROM leases`
+	query := `SELECT ` + leaseColumns + ` FROM leases`
 	var args []any
 	if poolRef != nil {
 		query += ` WHERE pool_name = ? AND pool_namespace = ?`
@@ -500,24 +517,7 @@ func (s *sqliteStore) ListLeases(ctx context.Context, poolRef *poolmgrv1alpha1.P
 	}
 	query += ` ORDER BY lease_id`
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("store: query leases: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var leases []*poolmgrv1alpha1.LeaseRecord
-	for rows.Next() {
-		var row leaseRow
-		if err := rows.Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt, &row.requestID); err != nil {
-			return nil, fmt.Errorf("store: scan lease: %w", err)
-		}
-		leases = append(leases, rowToLease(row))
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: iterate leases: %w", err)
-	}
-	return leases, nil
+	return s.queryLeases(ctx, query, args...)
 }
 
 func (s *sqliteStore) DeleteLeaseIfExpired(ctx context.Context, leaseID string, now time.Time) (*poolmgrv1alpha1.LeaseRecord, error) {
@@ -527,11 +527,9 @@ func (s *sqliteStore) DeleteLeaseIfExpired(ctx context.Context, leaseID string, 
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	var row leaseRow
-	err = tx.QueryRowContext(ctx, `
-		SELECT lease_id, vm_uid, pool_name, pool_namespace, claimed_at, last_heartbeat_at, expires_at, request_id
-		FROM leases WHERE lease_id = ?`, leaseID,
-	).Scan(&row.leaseID, &row.vmUID, &row.poolName, &row.poolNamespace, &row.claimedAt, &row.lastHeartbeatAt, &row.expiresAt, &row.requestID)
+	row, err := scanLease(tx.QueryRowContext(ctx, `
+		SELECT `+leaseColumns+`
+		FROM leases WHERE lease_id = ?`, leaseID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
