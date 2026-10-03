@@ -395,7 +395,10 @@ func (s *PoolAdminServer) deletePoolVMs(ctx context.Context, log *slog.Logger, s
 			defer wg.Done()
 			deleteCtx, cancel := context.WithTimeout(ctx, poolDeleteCleanupTimeout)
 			defer cancel()
-			if err := reconciler.EnsureVMDeleted(deleteCtx, s.store, s.flint, vm); err != nil {
+			err := reconciler.EnsureVMDeleted(deleteCtx, s.store, s.flint, vm)
+			// A missing row means the Sweeper's own retry got to this
+			// DELETING VM first: it is deleted, which is all that was wanted.
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				log.WarnContext(ctx, "pooladmin: DeletePool: microvm delete failed, leaving it for the sweeper", "microvm_uid", vm.GetUid(), "error", err)
 			}
 		}()

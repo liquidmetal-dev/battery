@@ -1,9 +1,12 @@
 package api_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -947,5 +950,42 @@ func TestDeletePool_CancelledDuringTombstone_ReportsCancelled(t *testing.T) {
 	defer lifecycle.mu.Unlock()
 	if len(lifecycle.started) != 2 {
 		t.Errorf("started = %v, want 2 entries (create, restart after the cancelled delete)", lifecycle.started)
+	}
+}
+
+// TestDeletePool_VMRowAlreadyGone_NoFailureLogged: the Sweeper retries
+// DELETING VMs on its own schedule, so it can finish one between the
+// tombstone and DeletePool's inline delete. That VM is deleted, which is the
+// outcome DeletePool wanted, so it must not be logged as a failed delete.
+func TestDeletePool_VMRowAlreadyGone_NoFailureLogged(t *testing.T) {
+	var logs bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	ctx := context.Background()
+	st := openTestStore(t)
+	fakeVM := &fakeMicroVM{}
+	hooked := &tombstoneHookStore{Store: st, after: func() {
+		if err := st.DeleteVM(ctx, "vm-1"); err != nil {
+			t.Errorf("DeleteVM() error = %v", err)
+		}
+	}}
+	s := api.NewPoolAdminServer(hooked, startFakeFlintlock(t, fakeVM, &fakeMicroVMExec{}), nil)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+	if err := st.CreateVM(ctx, sampleAvailableVM("vm-1", "pool-a")); err != nil {
+		t.Fatalf("CreateVM() error = %v", err)
+	}
+
+	if _, err := s.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: poolARef}); err != nil {
+		t.Fatalf("DeletePool() error = %v", err)
+	}
+
+	if strings.Contains(logs.String(), "microvm delete failed") {
+		t.Errorf("DeletePool logged a failed delete for a VM that was already gone:\n%s", logs.String())
 	}
 }
