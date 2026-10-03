@@ -15,9 +15,9 @@ the `poolmgr-hostagent`/vsock-connect path (see [#29](https://github.com/liquidm
 - **Runnable today**: flintlockd's `MicroVMExec`/`MicroVMSSHProxy` (steps 2–4), `poolmgrd`'s
   `/metrics` startup check and `PoolAdmin` CRUD (steps 5–6), an `Events.Subscribe` connectivity
   check (step 7), the claim/heartbeat/release/replenishment flow (step 8), and lease expiry
-  (step 9) — now that
+  (step 9). Since
   [#40](https://github.com/liquidmetal-dev/battery/issues/40) ("Dynamic per-pool Reconciler
-  lifecycle") has landed, `CreatePool` provisions VMs and `ClaimVM` succeeds once one is
+  lifecycle") landed, `CreatePool` provisions VMs and `ClaimVM` succeeds once one is
   `AVAILABLE`.
 - **Automated, in software**: `cmd/poolmgrd/e2e_test.go` (`go test -tags e2e ./... -run TestE2E
   -v`, or the `E2E` GitHub Actions workflow) now covers this runbook's steps 5–8 end-to-end against
@@ -26,9 +26,11 @@ the `poolmgr-hostagent`/vsock-connect path (see [#29](https://github.com/liquidm
   role is verifying against a **real** `flintlockd`/Firecracker host: steps 1–4 (`MicroVMExec`/
   `MicroVMSSHProxy` against a real guest OS) can't be faked, and steps 5–8 are worth re-running
   manually whenever real-host behavior specifically is in question.
-- **Manual only**: lease expiry (step 9). `poolmgrd` runs `reconciler.Sweeper`, so a lease left
-  without heartbeats expires and its VM is deleted, but the automated suite does not exercise
-  `VM_DELETED_DUE_TO_EXPIRY` yet.
+- **Not in the e2e suite yet**: `cmd/poolmgrd/e2e_test.go` does not exercise lease expiry
+  (`VM_DELETED_DUE_TO_EXPIRY`). The sweeper's unit tests in `internal/reconciler` cover it, and
+  so does the external acceptance suite in
+  [liquidmetal-dev/acceptance-tests](https://github.com/liquidmetal-dev/acceptance-tests), but
+  step 9 is this repository's only end-to-end check of expiry against a real host.
 
 ## Prerequisites
 
@@ -362,8 +364,8 @@ While the `Events.Subscribe` stream from step 7 is open, confirm the expected se
 
 `poolmgrd` runs a lease sweeper (`reconciler.Sweeper`) alongside the per-pool reconcilers. Every
 `sweep_interval` (default `10s`) it deletes the VM of any lease that has gone past its pool's
-`heartbeat_expiry_threshold` without a heartbeat. The automated suite only exercises explicit
-`ReleaseVM`, so this step is the only check of expiry.
+`heartbeat_expiry_threshold` without a heartbeat. The automated e2e suite only exercises
+explicit `ReleaseVM`, so this step is this repository's only end-to-end check of expiry.
 
 With the `Events.Subscribe` stream from step 7 still open, claim a VM from `e2e-pool` and then
 leave it alone:
@@ -371,6 +373,11 @@ leave it alone:
 ```sh
 grpcurl -d '{"pool": {"name": "e2e-pool", "namespace": "e2e"}}' \
   -plaintext localhost:9091 poolmgr.v1alpha1.Lease/ClaimVM
+
+# Expect the new lease in the list. With the CLI:
+#   poolmgrctl --addr localhost:9091 --insecure lease list --pool e2e-pool --namespace e2e
+grpcurl -d '{"pool_ref": {"name": "e2e-pool", "namespace": "e2e"}}' \
+  -plaintext localhost:9091 poolmgr.v1alpha1.Lease/ListLeases
 ```
 
 `e2e-pool` was created with a `heartbeat_expiry_threshold` of `90s`, so expect, on the stream:
@@ -379,9 +386,14 @@ grpcurl -d '{"pool": {"name": "e2e-pool", "namespace": "e2e"}}' \
   deadline).
 - `VM_DELETED_DUE_TO_EXPIRY` shortly after the 90 seconds are up, within one `sweep_interval`.
 
-Then confirm the lease is gone and the pool has replenished:
+Wait past `heartbeat_expiry_threshold` plus one `sweep_interval` (about 100 seconds here) after
+the claim, then confirm the lease is gone and the pool has replenished:
 
 ```sh
+# Expect the lease to be absent from the list.
+grpcurl -d '{"pool_ref": {"name": "e2e-pool", "namespace": "e2e"}}' \
+  -plaintext localhost:9091 poolmgr.v1alpha1.Lease/ListLeases
+
 # Expect NOT_FOUND.
 grpcurl -d '{"lease_id": "<lease_id>"}' \
   -plaintext localhost:9091 poolmgr.v1alpha1.Lease/Heartbeat
