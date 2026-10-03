@@ -141,6 +141,16 @@ without changing the external API.
 - `name`, `namespace`
 - `microvm_template`: a `flintlock.types.MicroVMSpec` template (vcpu, memory, kernel, volumes,
   interfaces, labels, metadata) — `allow_guest_agent` is always forced `true` server-side.
+  The rest of the template is sent to flintlock unchanged for every VM, so an interface's
+  `guest_mac` or static `address` would be shared by all of them. `CreatePool`/`UpdatePool`
+  reject a template that sets either with `InvalidArgument`, unless the pool never holds two
+  VMs at once: `size` at most 1 and a strategy other than `IMMEDIATE_ON_LEASE` (which
+  provisions on every claim without counting leased VMs). Any other pool must leave both
+  unset, so flintlock generates the MAC and the guest uses DHCP. Not enforced:
+  - a size-1 pool with `hook_failure_policy: QUARANTINE` can hold a quarantined VM alongside
+    its replacement, both with the template's address;
+  - a pool stored before this rule existed keeps running until its next `UpdatePool`;
+  - addresses configured through the template's cloud-init `metadata` are not inspected.
 - `size`: target pool size
 - `flintlock_hosts`: list of eligible host identifiers
 - `replenishment_strategy`: enum `IMMEDIATE_ON_LEASE | MIN_SIZE_THRESHOLD | REPLACE_ON_DELETE`

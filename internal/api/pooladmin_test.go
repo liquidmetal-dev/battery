@@ -12,6 +12,7 @@ import (
 	"time"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
+	flintlocktypes "github.com/liquidmetal-dev/flintlock/api/types"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -164,6 +165,120 @@ func TestGetUpdateDeletePoolNotFound(t *testing.T) {
 	}
 	if _, err := s.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: ref}); status.Code(err) != codes.NotFound {
 		t.Errorf("DeletePool() error = %v, want NotFound", err)
+	}
+}
+
+// TestCreatePoolTemplateNetworkValidation covers the rule that a template's
+// static address or guest_mac, which Provision copies to every VM, is only
+// accepted for a pool that never holds two VMs at once: size <= 1 with a
+// strategy that counts leased VMs toward that size.
+func TestCreatePoolTemplateNetworkValidation(t *testing.T) {
+	staticAddress := func(s *poolmgrv1alpha1.PoolSpec) {
+		s.MicrovmTemplate.Interfaces = []*flintlocktypes.NetworkInterface{{
+			DeviceId: "eth1",
+			Address:  &flintlocktypes.StaticAddress{Address: "192.168.100.31/32"},
+		}}
+	}
+	guestMAC := func(s *poolmgrv1alpha1.PoolSpec) {
+		s.MicrovmTemplate.Interfaces = []*flintlocktypes.NetworkInterface{{
+			DeviceId: "eth1",
+			GuestMac: proto.String("AA:FF:00:00:00:01"),
+		}}
+	}
+	dhcp := func(s *poolmgrv1alpha1.PoolSpec) {
+		s.MicrovmTemplate.Interfaces = []*flintlocktypes.NetworkInterface{{DeviceId: "eth1"}}
+	}
+	strategy := func(st poolmgrv1alpha1.ReplenishmentStrategyType) func(*poolmgrv1alpha1.PoolSpec) {
+		return func(s *poolmgrv1alpha1.PoolSpec) {
+			s.ReplenishmentStrategy = &poolmgrv1alpha1.ReplenishmentStrategy{Type: st}
+		}
+	}
+	size := func(n int32) func(*poolmgrv1alpha1.PoolSpec) {
+		return func(s *poolmgrv1alpha1.PoolSpec) { s.Size = n }
+	}
+
+	tests := []struct {
+		name    string
+		mutate  []func(*poolmgrv1alpha1.PoolSpec)
+		wantErr codes.Code
+		wantMsg string
+	}{
+		{"static address at size 2", []func(*poolmgrv1alpha1.PoolSpec){staticAddress, size(2)},
+			codes.InvalidArgument, "spec.microvm_template.interfaces[0].address"},
+		{"guest_mac at size 2", []func(*poolmgrv1alpha1.PoolSpec){guestMAC, size(2)},
+			codes.InvalidArgument, "spec.microvm_template.interfaces[0].guest_mac"},
+		{"static address at size 1 with immediate_on_lease", []func(*poolmgrv1alpha1.PoolSpec){
+			staticAddress, strategy(poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE),
+		}, codes.InvalidArgument, "spec.microvm_template.interfaces[0].address"},
+		{"guest_mac at size 1 with immediate_on_lease", []func(*poolmgrv1alpha1.PoolSpec){
+			guestMAC, strategy(poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE),
+		}, codes.InvalidArgument, "spec.microvm_template.interfaces[0].guest_mac"},
+		{"static address at size 1 with min_size_threshold", []func(*poolmgrv1alpha1.PoolSpec){staticAddress}, codes.OK, ""},
+		{"guest_mac at size 1 with min_size_threshold", []func(*poolmgrv1alpha1.PoolSpec){guestMAC}, codes.OK, ""},
+		{"static address at size 1 with replace_on_delete", []func(*poolmgrv1alpha1.PoolSpec){
+			staticAddress, strategy(poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE),
+		}, codes.OK, ""},
+		{"static address at size 0", []func(*poolmgrv1alpha1.PoolSpec){staticAddress, size(0)}, codes.OK, ""},
+		{"no static config at size 3", []func(*poolmgrv1alpha1.PoolSpec){dhcp, size(3)}, codes.OK, ""},
+		{"no static config with immediate_on_lease", []func(*poolmgrv1alpha1.PoolSpec){
+			dhcp, strategy(poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE),
+		}, codes.OK, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := openTestStore(t)
+			s := api.NewPoolAdminServer(st, nil, nil)
+
+			spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+			for _, m := range tt.mutate {
+				m(spec)
+			}
+
+			_, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec})
+			if status.Code(err) != tt.wantErr {
+				t.Fatalf("CreatePool() error = %v, want code %v", err, tt.wantErr)
+			}
+			if tt.wantMsg != "" && !strings.Contains(status.Convert(err).Message(), tt.wantMsg) {
+				t.Errorf("CreatePool() message = %q, want it to name %q", status.Convert(err).Message(), tt.wantMsg)
+			}
+		})
+	}
+}
+
+// TestUpdatePoolRejectsGrowingStaticAddressPool confirms the template
+// network rule also guards UpdatePool: a static-address pool that was valid
+// at size 1 can't be grown, and the stored spec is left as it was.
+func TestUpdatePoolRejectsGrowingStaticAddressPool(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	s := api.NewPoolAdminServer(st, nil, nil)
+
+	newSpec := func() *poolmgrv1alpha1.PoolSpec {
+		spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+		spec.MicrovmTemplate.Interfaces = []*flintlocktypes.NetworkInterface{{
+			DeviceId: "eth1",
+			Address:  &flintlocktypes.StaticAddress{Address: "192.168.100.31/32"},
+		}}
+		return spec
+	}
+	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: newSpec()}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+
+	update := newSpec()
+	update.Size = 2
+	if _, err := s.UpdatePool(ctx, &poolmgrv1alpha1.UpdatePoolRequest{Spec: update}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("UpdatePool() error = %v, want InvalidArgument", err)
+	}
+
+	got, err := s.GetPool(ctx, &poolmgrv1alpha1.GetPoolRequest{Ref: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}})
+	if err != nil {
+		t.Fatalf("GetPool() error = %v", err)
+	}
+	if got.GetSpec().GetSize() != 1 {
+		t.Errorf("GetPool() size = %d after rejected update, want 1", got.GetSpec().GetSize())
 	}
 }
 

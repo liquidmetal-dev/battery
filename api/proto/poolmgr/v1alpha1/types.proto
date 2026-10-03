@@ -59,6 +59,12 @@ message PoolSpec {
 
   // MicroVMTemplate is the flintlock MicroVM spec used to provision every VM in the pool.
   // allow_guest_agent is always forced true server-side, regardless of what's set here.
+  //
+  // Everything else is sent to flintlock unchanged for each VM, so an interface's guest_mac
+  // or static address would be shared by all of them. A template that sets either is
+  // rejected unless the pool never holds two VMs at once: size at most 1 and a
+  // replenishment strategy other than IMMEDIATE_ON_LEASE. Any other pool must leave both
+  // unset, so flintlock generates the MAC and the guest uses DHCP.
   flintlock.types.MicroVMSpec microvm_template = 3;
 
   // Size is the target pool size.

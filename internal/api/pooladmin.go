@@ -104,10 +104,12 @@ func (s *PoolAdminServer) lockPool(name, namespace string) func() {
 	return l.Unlock
 }
 
-// validatePoolSpec checks the fields CreatePool/UpdatePool both require, and
-// forces spec.MicrovmTemplate.AllowGuestAgent to true: pool-managed VMs
-// always need the guest-agent vsock channel for create/pre-lease hooks,
-// regardless of what the caller's template set.
+// validatePoolSpec checks the fields CreatePool/UpdatePool both require,
+// rejects a template whose network config would be duplicated across the
+// pool's VMs (see validateTemplateNetwork), and forces
+// spec.MicrovmTemplate.AllowGuestAgent to true: pool-managed VMs always need
+// the guest-agent vsock channel for create/pre-lease hooks, regardless of
+// what the caller's template set.
 func validatePoolSpec(spec *poolmgrv1alpha1.PoolSpec) error {
 	if spec.GetName() == "" {
 		return status.Error(codes.InvalidArgument, "spec.name is required")
@@ -127,8 +129,41 @@ func validatePoolSpec(spec *poolmgrv1alpha1.PoolSpec) error {
 	if spec.MicrovmTemplate == nil {
 		return status.Error(codes.InvalidArgument, "spec.microvm_template is required")
 	}
+	if err := validateTemplateNetwork(spec); err != nil {
+		return err
+	}
 	spec.MicrovmTemplate.AllowGuestAgent = true
 
+	return nil
+}
+
+// validateTemplateNetwork rejects a template interface with a guest_mac or
+// a static address in a pool that can hold more than one VM at a time. The
+// template is sent to flintlock unchanged for every VM (Provision overrides
+// only the id, namespace and allow_guest_agent), so such a field would give
+// every one of them the same MAC or IP.
+//
+// A pool holds more than one VM when its size is above 1, or, at any size,
+// when its strategy is IMMEDIATE_ON_LEASE: that strategy provisions a new VM
+// on every claim without counting the leased ones. MIN_SIZE_THRESHOLD and
+// REPLACE_ON_DELETE count leased VMs toward size, so at size <= 1 they keep
+// the pool to a single VM and a static template is accepted.
+func validateTemplateNetwork(spec *poolmgrv1alpha1.PoolSpec) error {
+	if spec.GetSize() <= 1 && spec.GetReplenishmentStrategy().GetType() != poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE {
+		return nil
+	}
+
+	const remedy = "leave it unset unless size is at most 1 and the replenishment strategy is not IMMEDIATE_ON_LEASE"
+	for i, iface := range spec.GetMicrovmTemplate().GetInterfaces() {
+		if iface.GetGuestMac() != "" {
+			return status.Errorf(codes.InvalidArgument,
+				"spec.microvm_template.interfaces[%d].guest_mac: a fixed MAC address would be given to every VM in the pool; %s", i, remedy)
+		}
+		if iface.GetAddress() != nil {
+			return status.Errorf(codes.InvalidArgument,
+				"spec.microvm_template.interfaces[%d].address: a static address would be given to every VM in the pool; %s (DHCP is used when it is unset)", i, remedy)
+		}
+	}
 	return nil
 }
 
