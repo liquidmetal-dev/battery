@@ -356,6 +356,19 @@ While the `Events.Subscribe` stream from step 7 is open, confirm the expected se
 `VM_PROVISIONED → VM_AVAILABLE → VM_CLAIMED → VM_DELETED_ON_RELEASE`, plus
 `POOL_REPLENISHING`/`POOL_SIZE_BELOW_TARGET` around replenishment.
 
+When you're done with `e2e-pool`, delete it. `DeletePool` drains the pool: the replenished
+`AVAILABLE` VM is deleted from its flintlock host along with the pool, and a
+`VM_DELETED_ON_POOL_DELETE` event is emitted for it.
+
+```sh
+grpcurl -d '{"ref": {"name": "e2e-pool", "namespace": "e2e"}}' \
+  -plaintext localhost:9091 poolmgr.v1alpha1.PoolAdmin/DeletePool
+```
+
+If a VM is still leased the call fails with `FAILED_PRECONDITION`. Release the lease first, or
+add `"force": true` to the request (`poolmgrctl pool delete --force`) to delete the leased VM
+and end its lease as well.
+
 ## 9. Blocked: lease expiry
 
 Blocked: `cmd/poolmgrd/main.go` never constructs or runs `reconciler.Sweeper`, so a claimed lease
