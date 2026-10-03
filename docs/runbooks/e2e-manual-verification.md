@@ -26,8 +26,11 @@ the `poolmgr-hostagent`/vsock-connect path (see [#29](https://github.com/liquidm
   role is verifying against a **real** `flintlockd`/Firecracker host: steps 1–4 (`MicroVMExec`/
   `MicroVMSSHProxy` against a real guest OS) can't be faked, and steps 5–8 are worth re-running
   manually whenever real-host behavior specifically is in question.
-- **Not automated yet**: the automated suite does not exercise lease expiry
-  (`VM_DELETED_DUE_TO_EXPIRY`), so step 9 is the only check of it.
+- **Not in the e2e suite yet**: `cmd/poolmgrd/e2e_test.go` does not exercise lease expiry
+  (`VM_DELETED_DUE_TO_EXPIRY`). The sweeper's unit tests in `internal/reconciler` cover it, and
+  so does the external acceptance suite in
+  [liquidmetal-dev/acceptance-tests](https://github.com/liquidmetal-dev/acceptance-tests), but
+  step 9 is this repository's only end-to-end check of expiry against a real host.
 
 ## Prerequisites
 
@@ -361,8 +364,8 @@ While the `Events.Subscribe` stream from step 7 is open, confirm the expected se
 
 `poolmgrd` runs a lease sweeper (`reconciler.Sweeper`) alongside the per-pool reconcilers. Every
 `sweep_interval` (default `10s`) it deletes the VM of any lease that has gone past its pool's
-`heartbeat_expiry_threshold` without a heartbeat. The automated suite only exercises explicit
-`ReleaseVM`, so this step is the only check of expiry.
+`heartbeat_expiry_threshold` without a heartbeat. The automated e2e suite only exercises
+explicit `ReleaseVM`, so this step is this repository's only end-to-end check of expiry.
 
 With the `Events.Subscribe` stream from step 7 still open, claim a VM from `e2e-pool` and then
 leave it alone:
