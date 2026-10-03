@@ -196,6 +196,9 @@ func TestCreatePoolTemplateNetworkValidation(t *testing.T) {
 	size := func(n int32) func(*poolmgrv1alpha1.PoolSpec) {
 		return func(s *poolmgrv1alpha1.PoolSpec) { s.Size = n }
 	}
+	quarantine := func(s *poolmgrv1alpha1.PoolSpec) {
+		s.HookFailurePolicy = poolmgrv1alpha1.HookFailurePolicy_QUARANTINE
+	}
 
 	tests := []struct {
 		name    string
@@ -218,6 +221,11 @@ func TestCreatePoolTemplateNetworkValidation(t *testing.T) {
 		{"static address at size 1 with replace_on_delete", []func(*poolmgrv1alpha1.PoolSpec){
 			staticAddress, strategy(poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE),
 		}, codes.OK, ""},
+		{"static address at size 1 with quarantine", []func(*poolmgrv1alpha1.PoolSpec){staticAddress, quarantine},
+			codes.InvalidArgument, "spec.microvm_template.interfaces[0].address"},
+		{"guest_mac at size 1 with quarantine", []func(*poolmgrv1alpha1.PoolSpec){guestMAC, quarantine},
+			codes.InvalidArgument, "spec.microvm_template.interfaces[0].guest_mac"},
+		{"no static config at size 3 with quarantine", []func(*poolmgrv1alpha1.PoolSpec){dhcp, size(3), quarantine}, codes.OK, ""},
 		{"static address at size 0", []func(*poolmgrv1alpha1.PoolSpec){staticAddress, size(0)}, codes.OK, ""},
 		{"no static config at size 3", []func(*poolmgrv1alpha1.PoolSpec){dhcp, size(3)}, codes.OK, ""},
 		{"no static config with immediate_on_lease", []func(*poolmgrv1alpha1.PoolSpec){
@@ -231,7 +239,7 @@ func TestCreatePoolTemplateNetworkValidation(t *testing.T) {
 			st := openTestStore(t)
 			s := api.NewPoolAdminServer(st, nil, nil)
 
-			spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+			spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_DELETE_AND_REPLACE, nil)
 			for _, m := range tt.mutate {
 				m(spec)
 			}
@@ -256,7 +264,7 @@ func TestUpdatePoolRejectsGrowingStaticAddressPool(t *testing.T) {
 	s := api.NewPoolAdminServer(st, nil, nil)
 
 	newSpec := func() *poolmgrv1alpha1.PoolSpec {
-		spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+		spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_DELETE_AND_REPLACE, nil)
 		spec.MicrovmTemplate.Interfaces = []*flintlocktypes.NetworkInterface{{
 			DeviceId: "eth1",
 			Address:  &flintlocktypes.StaticAddress{Address: "192.168.100.31/32"},

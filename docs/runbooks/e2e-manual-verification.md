@@ -258,8 +258,8 @@ volume plus at least one network interface, so a minimal `{vcpu, memory_in_mb}` 
 never let a VM reach `AVAILABLE` once [#40](https://github.com/liquidmetal-dev/battery/issues/40)
 starts provisioning against it. The template gives its interface a static address, which every
 VM in the pool would share, so the pool has to stay at `size: 1` with `MIN_SIZE_THRESHOLD` (or
-`REPLACE_ON_DELETE`): `CreatePool` rejects a static address at a larger size or with
-`IMMEDIATE_ON_LEASE`.
+`REPLACE_ON_DELETE`) and `DELETE_AND_REPLACE`: `CreatePool` rejects a static address at a larger
+size, with `IMMEDIATE_ON_LEASE` or with `QUARANTINE`.
 
 ```sh
 grpcurl -d '{

@@ -144,13 +144,20 @@ without changing the external API.
   The rest of the template is sent to flintlock unchanged for every VM, so an interface's
   `guest_mac` or static `address` would be shared by all of them. `CreatePool`/`UpdatePool`
   reject a template that sets either with `InvalidArgument`, unless the pool never holds two
-  VMs at once: `size` at most 1 and a strategy other than `IMMEDIATE_ON_LEASE` (which
-  provisions on every claim without counting leased VMs). Any other pool must leave both
-  unset, so flintlock generates the MAC and the guest uses DHCP. Not enforced:
-  - a size-1 pool with `hook_failure_policy: QUARANTINE` can hold a quarantined VM alongside
-    its replacement, both with the template's address;
-  - a pool stored before this rule existed keeps running until its next `UpdatePool`;
-  - addresses configured through the template's cloud-init `metadata` are not inspected.
+  VMs at once: `size` at most 1, a strategy other than `IMMEDIATE_ON_LEASE` (which provisions
+  on every claim without counting leased VMs) and a `hook_failure_policy` other than
+  `QUARANTINE` (which keeps the failed VM, and nothing but deleting the pool removes it). Any
+  other pool must leave both unset, so flintlock generates the MAC and the guest uses DHCP.
+
+  The spec alone doesn't guarantee a single VM, so the reconciler also enforces it: for a
+  template with static network config it provisions at most one VM, and only when the pool
+  has no VM record left in any phase. This covers a VM that is still `DELETING` after a slow
+  or failed flintlock delete, a pool shrunk to `size: 1` that still has its old VMs, and a
+  pool stored before the rule existed (it is kept to one VM rather than rejected; a stored
+  `QUARANTINE` pool stops replenishing once it holds a quarantined VM). Not enforced:
+  - addresses configured through the template's cloud-init `metadata` are not inspected;
+  - a VM being provisioned by the previous reconciler when `UpdatePool` restarts it has no
+    VM record until flintlock accepts it, so the new reconciler can't see it in that window.
 - `size`: target pool size
 - `flintlock_hosts`: list of eligible host identifiers
 - `replenishment_strategy`: enum `IMMEDIATE_ON_LEASE | MIN_SIZE_THRESHOLD | REPLACE_ON_DELETE`

@@ -143,17 +143,25 @@ func validatePoolSpec(spec *poolmgrv1alpha1.PoolSpec) error {
 // only the id, namespace and allow_guest_agent), so such a field would give
 // every one of them the same MAC or IP.
 //
-// A pool holds more than one VM when its size is above 1, or, at any size,
-// when its strategy is IMMEDIATE_ON_LEASE: that strategy provisions a new VM
-// on every claim without counting the leased ones. MIN_SIZE_THRESHOLD and
-// REPLACE_ON_DELETE count leased VMs toward size, so at size <= 1 they keep
-// the pool to a single VM and a static template is accepted.
+// Three settings make a pool hold more than one VM by design:
+//   - a size above 1;
+//   - IMMEDIATE_ON_LEASE, which provisions a new VM on every claim without
+//     counting the leased ones;
+//   - QUARANTINE, which keeps a VM whose hook failed. Nothing but deleting
+//     the pool removes it, so the pool could never be replenished.
+//
+// What's left is a size <= 1 MIN_SIZE_THRESHOLD or REPLACE_ON_DELETE pool
+// with DELETE_AND_REPLACE. This check only sees the spec, so for that pool
+// the reconciler enforces the single VM at provision time, against the VMs
+// that actually exist (see reconciler.TemplateHasStaticNetwork's caller).
 func validateTemplateNetwork(spec *poolmgrv1alpha1.PoolSpec) error {
-	if spec.GetSize() <= 1 && spec.GetReplenishmentStrategy().GetType() != poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE {
+	if spec.GetSize() <= 1 &&
+		spec.GetReplenishmentStrategy().GetType() != poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE &&
+		spec.GetHookFailurePolicy() != poolmgrv1alpha1.HookFailurePolicy_QUARANTINE {
 		return nil
 	}
 
-	const remedy = "leave it unset unless size is at most 1 and the replenishment strategy is not IMMEDIATE_ON_LEASE"
+	const remedy = "leave it unset unless size is at most 1, the replenishment strategy is not IMMEDIATE_ON_LEASE and the hook failure policy is not QUARANTINE"
 	for i, iface := range spec.GetMicrovmTemplate().GetInterfaces() {
 		if iface.GetGuestMac() != "" {
 			return status.Errorf(codes.InvalidArgument,
