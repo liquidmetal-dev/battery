@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,7 +108,7 @@ func TestReconciler_MinSizeThreshold_CountsPreLeaseHookRunningAsInFlight(t *test
 }
 
 // seedAvailableVMs creates the pool in st along with n AVAILABLE VMs, so a
-// starting reconciler's seed has nothing left to do.
+// starting reconciler has nothing to provision.
 func seedAvailableVMs(t *testing.T, st store.Store, pool *poolmgrv1alpha1.PoolSpec, n int) {
 	t.Helper()
 	ctx := context.Background()
@@ -122,18 +123,40 @@ func seedAvailableVMs(t *testing.T, st store.Store, pool *poolmgrv1alpha1.PoolSp
 	}
 }
 
-func TestReconciler_EventDriven_SeedsFreshPool(t *testing.T) {
-	for _, strategy := range []poolmgrv1alpha1.ReplenishmentStrategyType{
-		poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE,
-		poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE,
-	} {
+// waitForAvailable polls until the pool has exactly want AVAILABLE VMs, or
+// fails the test after timeout.
+func waitForAvailable(t *testing.T, st store.Store, poolName string, want int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		got := 0
+		for _, v := range onlyVMsInPool(t, st, poolName) {
+			if v.GetPhase() == poolmgrv1alpha1.VMPhase_AVAILABLE {
+				got++
+			}
+		}
+		if got == want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d AVAILABLE VM(s) in pool %q", want, poolName)
+}
+
+var eventDrivenStrategies = []poolmgrv1alpha1.ReplenishmentStrategyType{
+	poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE,
+	poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE,
+}
+
+func TestReconciler_EventDriven_FillsFreshPool(t *testing.T) {
+	for _, strategy := range eventDrivenStrategies {
 		t.Run(strategy.String(), func(t *testing.T) {
 			vm := &fakeMicroVM{}
 			flint := startFakeFlintlock(t, vm, alwaysReadyExec())
 			st := openTestStore(t)
 
-			// A fresh pool with no VMs: without seeding, nothing can be
-			// claimed or deleted, so replenishment would never trigger.
+			// A fresh pool with no VMs: nothing can be claimed or deleted,
+			// so it has to fill without waiting for a notification.
 			pool := samplePool("pool-a", strategy, 3, []string{"host-a"})
 
 			r, err := reconciler.New(pool, st, flint, 10*time.Millisecond, fastProvisionConfig(), nil)
@@ -147,16 +170,129 @@ func TestReconciler_EventDriven_SeedsFreshPool(t *testing.T) {
 
 			waitForVMs(t, st, "pool-a", 3, 2*time.Second)
 
-			// Give several ticks a chance to (wrongly) seed again.
+			// Give several ticks a chance to (wrongly) over-provision.
 			time.Sleep(50 * time.Millisecond)
 			if got := len(onlyVMsInPool(t, st, "pool-a")); got != 3 {
-				t.Fatalf("expected pool to stay at 3 VMs after seeding, got %d", got)
+				t.Fatalf("expected pool to stay at 3 VMs once full, got %d", got)
 			}
 		})
 	}
 }
 
-func TestReconciler_ImmediateOnLease_OnlyOnClaimNotification(t *testing.T) {
+// A provision that fails must not leave the pool short forever: with the
+// pool's only VM gone there is nothing to claim or delete, so only a later
+// tick can make up the difference.
+func TestReconciler_EventDriven_RecoversAfterFailedProvision(t *testing.T) {
+	for _, strategy := range eventDrivenStrategies {
+		t.Run(strategy.String(), func(t *testing.T) {
+			var setupCalls atomic.Int64
+			exec := &fakeMicroVMExec{
+				respond: func(start *microvmexecv1alpha1.ExecStart) ([]byte, []byte, int32, string, error) {
+					if start.GetCmd() == "setup" && setupCalls.Add(1) == 1 {
+						return nil, nil, 1, "", nil
+					}
+					return nil, nil, 0, "", nil
+				},
+			}
+			vm := &fakeMicroVM{}
+			flint := startFakeFlintlock(t, vm, exec)
+			st := openTestStore(t)
+
+			pool := samplePool("pool-a", strategy, 1, []string{"host-a"})
+			pool.CreateCommands = []string{"setup"}
+			pool.HookFailurePolicy = poolmgrv1alpha1.HookFailurePolicy_DELETE_AND_REPLACE
+
+			r, err := reconciler.New(pool, st, flint, 10*time.Millisecond, fastProvisionConfig(), nil)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go func() { _ = r.Run(ctx) }()
+
+			waitForAvailable(t, st, "pool-a", 1, 2*time.Second)
+
+			time.Sleep(50 * time.Millisecond)
+			if got := len(onlyVMsInPool(t, st, "pool-a")); got != 1 {
+				t.Fatalf("expected pool to stay at 1 VM after recovering, got %d", got)
+			}
+		})
+	}
+}
+
+// longTick keeps the tick out of a test that is about what a notification
+// alone does.
+const longTick = time.Hour
+
+func TestReconciler_ImmediateOnLease_ClaimNotificationReplenishes(t *testing.T) {
+	vm := &fakeMicroVM{}
+	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
+	st := openTestStore(t)
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE, 2, []string{"host-a"})
+	seedAvailableVMs(t, st, pool, 2)
+
+	r, err := reconciler.New(pool, st, flint, longTick, fastProvisionConfig(), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = r.Run(ctx) }()
+
+	// Already at size, so starting up should provision nothing.
+	time.Sleep(50 * time.Millisecond)
+	if got := len(onlyVMsInPool(t, st, "pool-a")); got != 2 {
+		t.Fatalf("expected 2 VMs before any claim, got %d", got)
+	}
+
+	leaseVM(t, st, "vm-0", "pool-a")
+	r.NotifyVMClaimed()
+	waitForAvailable(t, st, "pool-a", 2, 2*time.Second)
+	if got := len(onlyVMsInPool(t, st, "pool-a")); got != 3 {
+		t.Fatalf("expected 3 VMs (1 leased, 2 warm) after the claim, got %d", got)
+	}
+}
+
+func TestReconciler_ReplaceOnDelete_DeleteNotificationReplenishes(t *testing.T) {
+	vm := &fakeMicroVM{}
+	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
+	st := openTestStore(t)
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE, 3, []string{"host-a"})
+	seedAvailableVMs(t, st, pool, 3)
+
+	r, err := reconciler.New(pool, st, flint, longTick, fastProvisionConfig(), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = r.Run(ctx) }()
+
+	time.Sleep(50 * time.Millisecond)
+	if got := len(onlyVMsInPool(t, st, "pool-a")); got != 3 {
+		t.Fatalf("expected 3 VMs before any delete, got %d", got)
+	}
+
+	// Two deletions that reach the reconciler as a single notification, as
+	// happens when the second lands while the first is still pending: both
+	// have to be replaced.
+	for _, uid := range []string{"vm-0", "vm-1"} {
+		if err := st.DeleteVM(context.Background(), uid); err != nil {
+			t.Fatalf("DeleteVM(%s): %v", uid, err)
+		}
+	}
+	r.NotifyVMDeleted()
+	waitForAvailable(t, st, "pool-a", 3, 2*time.Second)
+}
+
+// A tick that runs between a claim and its notification already replaces the
+// claimed VM; the notification must not then add a second replacement.
+func TestReconciler_ImmediateOnLease_TickAndNotificationDoNotOvershoot(t *testing.T) {
 	vm := &fakeMicroVM{}
 	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
 	st := openTestStore(t)
@@ -173,41 +309,22 @@ func TestReconciler_ImmediateOnLease_OnlyOnClaimNotification(t *testing.T) {
 	defer cancel()
 	go func() { _ = r.Run(ctx) }()
 
-	// Already at size, so neither the seed nor any tick should provision
-	// before a claim.
-	time.Sleep(50 * time.Millisecond)
-	if got := len(onlyVMsInPool(t, st, "pool-a")); got != 2 {
-		t.Fatalf("expected 2 VMs before any claim notification, got %d", got)
-	}
-
+	leaseVM(t, st, "vm-0", "pool-a")
+	waitForAvailable(t, st, "pool-a", 2, 2*time.Second)
 	r.NotifyVMClaimed()
-	waitForVMs(t, st, "pool-a", 3, 2*time.Second)
+
+	time.Sleep(50 * time.Millisecond)
+	if got := len(onlyVMsInPool(t, st, "pool-a")); got != 3 {
+		t.Fatalf("expected 3 VMs (1 leased, 2 warm), got %d", got)
+	}
 }
 
-func TestReconciler_ReplaceOnDelete_OnlyOnDeleteNotification(t *testing.T) {
-	vm := &fakeMicroVM{}
-	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
-	st := openTestStore(t)
-
-	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE, 2, []string{"host-a"})
-	seedAvailableVMs(t, st, pool, 2)
-
-	r, err := reconciler.New(pool, st, flint, 10*time.Millisecond, fastProvisionConfig(), nil)
-	if err != nil {
-		t.Fatalf("New: %v", err)
+// leaseVM flips an existing VM to LEASED, standing in for a ClaimVM.
+func leaseVM(t *testing.T, st store.Store, uid, poolName string) {
+	t.Helper()
+	if err := st.UpdateVM(context.Background(), sampleVM(uid, poolName, "host-a", poolmgrv1alpha1.VMPhase_LEASED)); err != nil {
+		t.Fatalf("UpdateVM(%s): %v", uid, err)
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = r.Run(ctx) }()
-
-	time.Sleep(50 * time.Millisecond)
-	if got := len(onlyVMsInPool(t, st, "pool-a")); got != 2 {
-		t.Fatalf("expected 2 VMs before any delete notification, got %d", got)
-	}
-
-	r.NotifyVMDeleted()
-	waitForVMs(t, st, "pool-a", 3, 2*time.Second)
 }
 
 // staticPool returns a size-1 pool whose template gives its interface a
@@ -260,7 +377,7 @@ func TestReconciler_StaticNetwork_WaitsForEveryVMToGo(t *testing.T) {
 				defer cancel()
 				go func() { _ = r.Run(runCtx) }()
 
-				// The seed and several ticks all see the old VM.
+				// The start-up reconcile and several ticks all see the old VM.
 				time.Sleep(100 * time.Millisecond)
 				if got := len(onlyVMsInPool(t, st, "pool-a")); got != 1 {
 					t.Fatalf("expected no VM provisioned alongside the %v one, got %d VMs", phase, got)
@@ -279,8 +396,8 @@ func TestReconciler_StaticNetwork_WaitsForEveryVMToGo(t *testing.T) {
 
 // TestReconciler_StaticNetwork_ShrunkPoolReplacesOnlyTheLastVM covers a
 // REPLACE_ON_DELETE pool updated from several VMs down to size 1 with a
-// static template: each old VM's deletion asks for one replacement, but only
-// the last one may get it.
+// static template: no VM may be provisioned while one of the old ones
+// remains, and exactly one once the last is gone.
 func TestReconciler_StaticNetwork_ShrunkPoolReplacesOnlyTheLastVM(t *testing.T) {
 	vm := &fakeMicroVM{}
 	flint := startFakeFlintlock(t, vm, alwaysReadyExec())

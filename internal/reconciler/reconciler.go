@@ -22,13 +22,15 @@ const DefaultTickInterval = 10 * time.Second
 
 // notifyBuffer is the size of the claimed/deleted notification channels.
 // Notifications are coalescing signals, not a queue of individual events:
-// a full buffer means a reconcile is already pending, so further
-// notifications before it runs are redundant.
+// a full buffer means a reconcile is already pending, and since that
+// reconcile provisions the pool's whole shortfall rather than one VM per
+// notification, further notifications before it runs are redundant.
 const notifyBuffer = 1
 
 // Reconciler runs the control loop for a single pool: once at start, on
-// every tick, and on every claim/delete notification, it asks the pool's
-// Strategy how many new VMs are needed and provisions them.
+// every tick, and on every claim/delete notification, it counts the pool's
+// VMs, asks the pool's Strategy how many new ones are needed and provisions
+// them.
 type Reconciler struct {
 	pool         *poolmgrv1alpha1.PoolSpec
 	store        store.Store
@@ -39,10 +41,6 @@ type Reconciler struct {
 
 	claimed chan struct{}
 	deleted chan struct{}
-
-	// seeded records whether the start-of-life top-up (see seed) has run.
-	// Only touched by the Run goroutine.
-	seeded bool
 }
 
 // New returns a Reconciler for pool. tickInterval <= 0 uses
@@ -92,9 +90,10 @@ func (r *Reconciler) NotifyVMDeleted() {
 }
 
 // Run drives the control loop until ctx is done, at which point it returns
-// ctx.Err(). It first seeds the pool (see seed), then each tick and each notification independently computes how
-// many VMs to provision and starts that many Provision calls concurrently;
-// one failed Provision is logged and does not stop the others or the loop.
+// ctx.Err(). At start, on each tick and on each notification it reconciles:
+// computes how many VMs to provision and starts that many Provision calls
+// concurrently; one failed Provision is logged and does not stop the others
+// or the loop, and the next reconcile retries it.
 func (r *Reconciler) Run(ctx context.Context) error {
 	ticker := time.NewTicker(r.tickInterval)
 	defer ticker.Stop()
@@ -102,47 +101,34 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	r.log.InfoContext(ctx, "reconciler: started", "tick_interval", r.tickInterval)
 	defer r.log.InfoContext(ctx, "reconciler: stopped")
 
-	r.seed(ctx)
+	// Reconcile straight away rather than waiting out the first tick, so a
+	// fresh pool starts filling as soon as its reconciler does.
+	r.reconcile(ctx, r.strategy.DesiredNewVMs)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if !r.seeded {
-				r.seed(ctx)
-			}
-			counts, err := r.countVMs(ctx)
-			if err != nil {
-				r.log.ErrorContext(ctx, "reconciler: failed to count VMs", "error", err)
-				continue
-			}
-			r.provisionN(ctx, r.strategy.DesiredNewVMs(r.pool, counts))
+			r.reconcile(ctx, r.strategy.DesiredNewVMs)
 		case <-r.claimed:
-			r.provisionN(ctx, r.strategy.OnVMClaimed(r.pool))
+			r.reconcile(ctx, r.strategy.OnVMClaimed)
 		case <-r.deleted:
-			r.provisionN(ctx, r.strategy.OnVMDeleted(r.pool))
+			r.reconcile(ctx, r.strategy.OnVMDeleted)
 		}
 	}
 }
 
-// seed provisions the Strategy's InitialNewVMs once per Reconciler
-// lifetime, so an event-driven pool starting empty isn't deadlocked waiting
-// for a claim/delete that can never happen. If counting VMs fails, seeded
-// stays false and the next tick retries.
-func (r *Reconciler) seed(ctx context.Context) {
+// reconcile counts the pool's VMs and provisions however many desired, one
+// of the Strategy's hooks, asks for. If counting fails nothing is
+// provisioned; the next tick tries again.
+func (r *Reconciler) reconcile(ctx context.Context, desired func(*poolmgrv1alpha1.PoolSpec, VMCounts) int) {
 	counts, err := r.countVMs(ctx)
 	if err != nil {
-		r.log.ErrorContext(ctx, "reconciler: failed to count VMs for seeding", "error", err)
+		r.log.ErrorContext(ctx, "reconciler: failed to count VMs", "error", err)
 		return
 	}
-	r.seeded = true
-
-	n := r.strategy.InitialNewVMs(r.pool, counts)
-	if n > 0 {
-		r.log.InfoContext(ctx, "reconciler: seeding pool", "count", n)
-	}
-	r.provisionN(ctx, n)
+	r.provisionN(ctx, desired(r.pool, counts))
 }
 
 // countVMs summarizes the pool's current VMs into VMCounts.
@@ -199,9 +185,7 @@ func TemplateHasStaticNetwork(template *flintlocktypes.MicroVMSpec) bool {
 //
 // The Strategy can't be trusted for this. VMCounts leaves out DELETING and
 // FAILED VMs and no strategy counts QUARANTINED ones, yet all three may
-// still be running on their host with the template's address; and
-// REPLACE_ON_DELETE asks for a replacement on every deletion, even while a
-// pool that was shrunk to size 1 still has other VMs left. So this counts
+// still be running on their host with the template's address. So this counts
 // records in every phase, which also keeps a pool stored before the API
 // rejected such a spec down to a single VM.
 func (r *Reconciler) capForStaticNetwork(ctx context.Context) int {
