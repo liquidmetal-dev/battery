@@ -14,7 +14,8 @@ the `poolmgr-hostagent`/vsock-connect path (see [#29](https://github.com/liquidm
 
 - **Runnable today**: flintlockd's `MicroVMExec`/`MicroVMSSHProxy` (steps 2–4), `poolmgrd`'s
   `/metrics` startup check and `PoolAdmin` CRUD (steps 5–6), an `Events.Subscribe` connectivity
-  check (step 7), and the claim/heartbeat/release/replenishment flow (step 8) — now that
+  check (step 7), the claim/heartbeat/release/replenishment flow (step 8), and lease expiry
+  (step 9) — now that
   [#40](https://github.com/liquidmetal-dev/battery/issues/40) ("Dynamic per-pool Reconciler
   lifecycle") has landed, `CreatePool` provisions VMs and `ClaimVM` succeeds once one is
   `AVAILABLE`.
@@ -25,10 +26,9 @@ the `poolmgr-hostagent`/vsock-connect path (see [#29](https://github.com/liquidm
   role is verifying against a **real** `flintlockd`/Firecracker host: steps 1–4 (`MicroVMExec`/
   `MicroVMSSHProxy` against a real guest OS) can't be faked, and steps 5–8 are worth re-running
   manually whenever real-host behavior specifically is in question.
-- **Still blocked**: lease expiry (step 9). `cmd/poolmgrd/main.go` never constructs or runs
-  `reconciler.Sweeper`, so a lease left without heartbeats is never expired -
-  `VM_DELETED_DUE_TO_EXPIRY` can't be exercised through the real API yet, manually or in the new
-  automated suite.
+- **Manual only**: lease expiry (step 9). `poolmgrd` runs `reconciler.Sweeper`, so a lease left
+  without heartbeats expires and its VM is deleted, but the automated suite does not exercise
+  `VM_DELETED_DUE_TO_EXPIRY` yet.
 
 ## Prerequisites
 
@@ -286,7 +286,9 @@ grpcurl -d '{
     "size": 1,
     "flintlock_hosts": ["host-a"],
     "replenishment_strategy": { "type": "MIN_SIZE_THRESHOLD", "min_size": 1 },
-    "hook_failure_policy": "DELETE_AND_REPLACE"
+    "hook_failure_policy": "DELETE_AND_REPLACE",
+    "heartbeat_interval": "30s",
+    "heartbeat_expiry_threshold": "90s"
   }
 }' -plaintext localhost:9091 poolmgr.v1alpha1.PoolAdmin/CreatePool
 
@@ -309,7 +311,7 @@ curl -s localhost:9092/metrics | grep '^poolmgr_pool_'
 # poolmgr_pool_quarantined{pool_name="e2e-pool",pool_namespace="e2e"} 0
 ```
 
-Leave `e2e-pool` in place — step 8 reuses it. (If you're not continuing to step 8
+Leave `e2e-pool` in place — steps 8 and 9 reuse it. (If you're not continuing to step 8
 right now, clean it up with `DeletePool`:
 `grpcurl -d '{"ref": {"name": "e2e-pool", "namespace": "e2e"}}' -plaintext localhost:9091 poolmgr.v1alpha1.PoolAdmin/DeletePool`.)
 
@@ -322,10 +324,10 @@ grpcurl -d '{}' -plaintext localhost:9091 poolmgr.v1alpha1.Events/Subscribe
 ```
 
 In another, poke the store with a throwaway pool (using a different name so `e2e-pool` from step 6
-is left untouched — step 8 needs it):
+is left untouched — steps 8 and 9 need it):
 
 ```sh
-grpcurl -d '{"spec": {"name": "e2e-events-poke", "namespace": "e2e", "microvm_template": {"vcpu": 1, "memory_in_mb": 1024, "root_volume": {"id": "root", "is_read_only": false, "source": {"container_source": "docker.io/richardcase/ubuntu-bionic-test:cloudimage_v0.0.1"}}, "interfaces": [{"device_id": "eth1", "type": 1, "address": {"address": "192.168.100.32/32"}}]}, "size": 0, "flintlock_hosts": ["host-a"], "replenishment_strategy": {"type": "MIN_SIZE_THRESHOLD", "min_size": 1}, "hook_failure_policy": "DELETE_AND_REPLACE"}}' \
+grpcurl -d '{"spec": {"name": "e2e-events-poke", "namespace": "e2e", "microvm_template": {"vcpu": 1, "memory_in_mb": 1024, "root_volume": {"id": "root", "is_read_only": false, "source": {"container_source": "docker.io/richardcase/ubuntu-bionic-test:cloudimage_v0.0.1"}}, "interfaces": [{"device_id": "eth1", "type": 1, "address": {"address": "192.168.100.32/32"}}]}, "size": 0, "flintlock_hosts": ["host-a"], "replenishment_strategy": {"type": "MIN_SIZE_THRESHOLD", "min_size": 1}, "hook_failure_policy": "DELETE_AND_REPLACE", "heartbeat_interval": "30s", "heartbeat_expiry_threshold": "90s"}}' \
   -plaintext localhost:9091 poolmgr.v1alpha1.PoolAdmin/CreatePool
 
 grpcurl -d '{"ref": {"name": "e2e-events-poke", "namespace": "e2e"}}' \
@@ -356,16 +358,53 @@ While the `Events.Subscribe` stream from step 7 is open, confirm the expected se
 `VM_PROVISIONED → VM_AVAILABLE → VM_CLAIMED → VM_DELETED_ON_RELEASE`, plus
 `POOL_REPLENISHING`/`POOL_SIZE_BELOW_TARGET` around replenishment.
 
-## 9. Blocked: lease expiry
+## 9. Lease expiry
 
-Blocked: `cmd/poolmgrd/main.go` never constructs or runs `reconciler.Sweeper`, so a claimed lease
-left without heartbeats is never expired — no VM is deleted and no `VM_DELETED_DUE_TO_EXPIRY`
-event is emitted. (`internal/reconciler/sweeper.go`'s `Sweeper` exists and is unit-tested, but
-nothing in the daemon starts one yet.) This suite's `TestE2E_PoolLifecycle` only exercises explicit
-`ReleaseVM`, so it doesn't cover expiry either. Come back and exercise this once a `Sweeper` is
-wired into `poolmgrd` startup: claim a VM, don't heartbeat it, and wait past
-`heartbeat_expiry_threshold` for `VM_DELETED_DUE_TO_EXPIRY` on the `Events.Subscribe` stream from
-step 7 and the VM's replacement to appear.
+`poolmgrd` runs a lease sweeper (`reconciler.Sweeper`) alongside the per-pool reconcilers. Every
+`sweep_interval` (default `10s`) it deletes the VM of any lease that has gone past its pool's
+`heartbeat_expiry_threshold` without a heartbeat. The automated suite only exercises explicit
+`ReleaseVM`, so this step is the only check of expiry.
+
+With the `Events.Subscribe` stream from step 7 still open, claim a VM from `e2e-pool` and then
+leave it alone:
+
+```sh
+grpcurl -d '{"pool": {"name": "e2e-pool", "namespace": "e2e"}}' \
+  -plaintext localhost:9091 poolmgr.v1alpha1.Lease/ClaimVM
+```
+
+`e2e-pool` was created with a `heartbeat_expiry_threshold` of `90s`, so expect, on the stream:
+
+- `VM_EXPIRING_SOON` about a minute after the claim (`warning_window`, default `30s`, before the
+  deadline).
+- `VM_DELETED_DUE_TO_EXPIRY` shortly after the 90 seconds are up, within one `sweep_interval`.
+
+Then confirm the lease is gone and the pool has replenished:
+
+```sh
+# Expect NOT_FOUND.
+grpcurl -d '{"lease_id": "<lease_id>"}' \
+  -plaintext localhost:9091 poolmgr.v1alpha1.Lease/Heartbeat
+
+# Expect status.available back at 1 within a reconciler tick or two.
+grpcurl -d '{"ref": {"name": "e2e-pool", "namespace": "e2e"}}' \
+  -plaintext localhost:9091 poolmgr.v1alpha1.PoolAdmin/GetPool
+```
+
+## 10. Clean up
+
+When you're done with `e2e-pool`, delete it. `DeletePool` drains the pool: the replenished
+`AVAILABLE` VM is deleted from its flintlock host along with the pool, and a
+`VM_DELETED_ON_POOL_DELETE` event is emitted for it.
+
+```sh
+grpcurl -d '{"ref": {"name": "e2e-pool", "namespace": "e2e"}}' \
+  -plaintext localhost:9091 poolmgr.v1alpha1.PoolAdmin/DeletePool
+```
+
+If a VM is still leased the call fails with `FAILED_PRECONDITION`. Release the lease first, or
+add `"force": true` to the request (`poolmgrctl pool delete --force`) to delete the leased VM
+and end its lease as well.
 
 ## Troubleshooting
 

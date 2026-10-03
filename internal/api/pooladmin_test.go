@@ -1,8 +1,12 @@
 package api_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -10,16 +14,19 @@ import (
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/liquidmetal-dev/battery/internal/api"
+	"github.com/liquidmetal-dev/battery/internal/reconciler"
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
 
 func TestCreateGetPool(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
-	s := api.NewPoolAdminServer(st, nil)
+	s := api.NewPoolAdminServer(st, nil, nil)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
 	created, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec})
@@ -43,7 +50,7 @@ func TestCreateGetPool(t *testing.T) {
 func TestCreatePoolForcesAllowGuestAgent(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
-	s := api.NewPoolAdminServer(st, nil)
+	s := api.NewPoolAdminServer(st, nil, nil)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
 	spec.MicrovmTemplate.AllowGuestAgent = false
@@ -72,7 +79,7 @@ func TestCreatePoolForcesAllowGuestAgent(t *testing.T) {
 func TestCreatePoolNilSpec(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
-	s := api.NewPoolAdminServer(st, nil)
+	s := api.NewPoolAdminServer(st, nil, nil)
 
 	_, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{})
 	if status.Code(err) != codes.InvalidArgument {
@@ -113,7 +120,7 @@ func TestCreatePoolValidation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 			st := openTestStore(t)
-			s := api.NewPoolAdminServer(st, nil)
+			s := api.NewPoolAdminServer(st, nil, nil)
 
 			spec := base()
 			tt.mutate(spec)
@@ -129,7 +136,7 @@ func TestCreatePoolValidation(t *testing.T) {
 func TestCreatePoolAlreadyExists(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
-	s := api.NewPoolAdminServer(st, nil)
+	s := api.NewPoolAdminServer(st, nil, nil)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
 	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
@@ -145,7 +152,7 @@ func TestCreatePoolAlreadyExists(t *testing.T) {
 func TestGetUpdateDeletePoolNotFound(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
-	s := api.NewPoolAdminServer(st, nil)
+	s := api.NewPoolAdminServer(st, nil, nil)
 
 	ref := &poolmgrv1alpha1.PoolRef{Name: "missing", Namespace: "default"}
 
@@ -163,7 +170,7 @@ func TestGetUpdateDeletePoolNotFound(t *testing.T) {
 func TestUpdatePool(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
-	s := api.NewPoolAdminServer(st, nil)
+	s := api.NewPoolAdminServer(st, nil, nil)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
 	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
@@ -193,7 +200,7 @@ func TestUpdatePool(t *testing.T) {
 func TestListPoolsNamespaceFilter(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
-	s := api.NewPoolAdminServer(st, nil)
+	s := api.NewPoolAdminServer(st, nil, nil)
 
 	a := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
 	b := samplePool("pool-b", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
@@ -227,7 +234,7 @@ func TestListPoolsNamespaceFilter(t *testing.T) {
 func TestDeletePool(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
-	s := api.NewPoolAdminServer(st, nil)
+	s := api.NewPoolAdminServer(st, nil, nil)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
 	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
@@ -243,43 +250,10 @@ func TestDeletePool(t *testing.T) {
 	}
 }
 
-func TestDeletePoolBlockedWithVMs(t *testing.T) {
-	// CountVMs only tallies AVAILABLE/LEASED/PROVISIONING/QUARANTINED, so
-	// DeletePool's guard must not be built on top of it - a pool whose only
-	// VM is DELETING or FAILED must still be blocked.
-	phases := []poolmgrv1alpha1.VMPhase{
-		poolmgrv1alpha1.VMPhase_AVAILABLE,
-		poolmgrv1alpha1.VMPhase_DELETING,
-		poolmgrv1alpha1.VMPhase_FAILED,
-	}
-
-	for _, phase := range phases {
-		t.Run(phase.String(), func(t *testing.T) {
-			ctx := context.Background()
-			st := openTestStore(t)
-			s := api.NewPoolAdminServer(st, nil)
-
-			spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
-			if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
-				t.Fatalf("CreatePool() error = %v", err)
-			}
-			if err := st.CreateVM(ctx, withPhase(sampleAvailableVM("vm-1", "pool-a"), phase)); err != nil {
-				t.Fatalf("CreateVM() error = %v", err)
-			}
-
-			ref := &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}
-			_, err := s.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: ref})
-			if status.Code(err) != codes.FailedPrecondition {
-				t.Fatalf("DeletePool() with VM in phase %s error = %v, want FailedPrecondition", phase, err)
-			}
-		})
-	}
-}
-
 func TestGetPoolStatusCounts(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
-	s := api.NewPoolAdminServer(st, nil)
+	s := api.NewPoolAdminServer(st, nil, nil)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
 	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
@@ -321,7 +295,7 @@ func TestCreatePool_StartsReconciler(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
 	lifecycle := &fakePoolLifecycle{}
-	s := api.NewPoolAdminServer(st, lifecycle)
+	s := api.NewPoolAdminServer(st, nil, lifecycle)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
 	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
@@ -339,7 +313,7 @@ func TestCreatePool_ValidationFailure_DoesNotStartReconciler(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
 	lifecycle := &fakePoolLifecycle{}
-	s := api.NewPoolAdminServer(st, lifecycle)
+	s := api.NewPoolAdminServer(st, nil, lifecycle)
 
 	spec := samplePool("", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil) // empty name is invalid
 	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err == nil {
@@ -357,7 +331,7 @@ func TestDeletePool_StopsReconciler(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
 	lifecycle := &fakePoolLifecycle{}
-	s := api.NewPoolAdminServer(st, lifecycle)
+	s := api.NewPoolAdminServer(st, nil, lifecycle)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
 	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
@@ -379,7 +353,7 @@ func TestUpdatePool_RestartsReconciler(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
 	lifecycle := &fakePoolLifecycle{}
-	s := api.NewPoolAdminServer(st, lifecycle)
+	s := api.NewPoolAdminServer(st, nil, lifecycle)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
 	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
@@ -441,13 +415,13 @@ func TestUpdatePool_ConcurrentUpdates_Serialized(t *testing.T) {
 	lifecycle := &fakePoolLifecycle{}
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
-	setup := api.NewPoolAdminServer(st, lifecycle)
+	setup := api.NewPoolAdminServer(st, nil, lifecycle)
 	if _, err := setup.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
 		t.Fatalf("CreatePool() error = %v", err)
 	}
 
 	ps := &pausingStore{Store: st, paused: make(chan struct{}), resume: make(chan struct{})}
-	s := api.NewPoolAdminServer(ps, lifecycle)
+	s := api.NewPoolAdminServer(ps, nil, lifecycle)
 
 	specA := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
 	specA.Size = 3
@@ -506,7 +480,7 @@ func TestCreatePool_StartReconcilerFails_StillReturnsSuccess(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
 	lifecycle := &fakePoolLifecycle{startErr: errors.New("boom")}
-	s := api.NewPoolAdminServer(st, lifecycle)
+	s := api.NewPoolAdminServer(st, nil, lifecycle)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
 	got, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec})
@@ -518,11 +492,200 @@ func TestCreatePool_StartReconcilerFails_StillReturnsSuccess(t *testing.T) {
 	}
 }
 
-func TestDeletePool_VMsStillPresent_DoesNotStopReconciler(t *testing.T) {
+// newDeletePoolFixture creates pool-a in a fresh store, served by a
+// PoolAdminServer wired to a fake flintlock and a recording lifecycle.
+func newDeletePoolFixture(t *testing.T) (*api.PoolAdminServer, store.Store, *fakeMicroVM, *fakePoolLifecycle) {
+	t.Helper()
+
+	st := openTestStore(t)
+	fakeVM := &fakeMicroVM{}
+	lifecycle := &fakePoolLifecycle{}
+	s := api.NewPoolAdminServer(st, startFakeFlintlock(t, fakeVM, &fakeMicroVMExec{}), lifecycle)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	if _, err := s.CreatePool(context.Background(), &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+	return s, st, fakeVM, lifecycle
+}
+
+// leasedVMWithLease stores a LEASED VM in pool-a together with its lease row.
+func leasedVMWithLease(t *testing.T, st store.Store, uid, leaseID string) {
+	t.Helper()
+	ctx := context.Background()
+
+	vm := withPhase(sampleAvailableVM(uid, "pool-a"), poolmgrv1alpha1.VMPhase_LEASED)
+	vm.LeaseId = proto.String(leaseID)
+	if err := st.CreateVM(ctx, vm); err != nil {
+		t.Fatalf("CreateVM(%s) error = %v", uid, err)
+	}
+	now := time.Now()
+	if err := st.CreateLease(ctx, &poolmgrv1alpha1.LeaseRecord{
+		LeaseId:         leaseID,
+		VmUid:           uid,
+		PoolName:        "pool-a",
+		PoolNamespace:   "default",
+		ClaimedAt:       timestamppb.New(now),
+		LastHeartbeatAt: timestamppb.New(now),
+		ExpiresAt:       timestamppb.New(now.Add(time.Hour)),
+	}); err != nil {
+		t.Fatalf("CreateLease(%s) error = %v", leaseID, err)
+	}
+}
+
+var poolARef = &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}
+
+func TestDeletePool_DrainsUnleasedVMs(t *testing.T) {
+	// Every phase other than the two leased ones is drained without force,
+	// including DELETING and FAILED, which CountVMs doesn't tally.
+	phases := []poolmgrv1alpha1.VMPhase{
+		poolmgrv1alpha1.VMPhase_PROVISIONING,
+		poolmgrv1alpha1.VMPhase_CREATE_HOOK_RUNNING,
+		poolmgrv1alpha1.VMPhase_AVAILABLE,
+		poolmgrv1alpha1.VMPhase_DELETING,
+		poolmgrv1alpha1.VMPhase_QUARANTINED,
+		poolmgrv1alpha1.VMPhase_FAILED,
+	}
+
+	ctx := context.Background()
+	s, st, fakeVM, lifecycle := newDeletePoolFixture(t)
+
+	var wantUIDs []string
+	for _, phase := range phases {
+		uid := "vm-" + phase.String()
+		wantUIDs = append(wantUIDs, uid)
+		if err := st.CreateVM(ctx, withPhase(sampleAvailableVM(uid, "pool-a"), phase)); err != nil {
+			t.Fatalf("CreateVM(%s) error = %v", uid, err)
+		}
+	}
+	slices.Sort(wantUIDs)
+
+	if _, err := s.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: poolARef}); err != nil {
+		t.Fatalf("DeletePool() error = %v", err)
+	}
+
+	if _, err := s.GetPool(ctx, &poolmgrv1alpha1.GetPoolRequest{Ref: poolARef}); status.Code(err) != codes.NotFound {
+		t.Errorf("GetPool() after delete error = %v, want NotFound", err)
+	}
+	remaining, err := st.ListVMsByPool(ctx, "pool-a", "default", nil)
+	if err != nil {
+		t.Fatalf("ListVMsByPool() error = %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Errorf("VM rows left after delete = %+v, want none", remaining)
+	}
+
+	gotDeleted := fakeVM.deletedUIDs()
+	slices.Sort(gotDeleted)
+	if !slices.Equal(gotDeleted, wantUIDs) {
+		t.Errorf("flintlock deleted uids = %v, want %v", gotDeleted, wantUIDs)
+	}
+
+	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
+	if err != nil {
+		t.Fatalf("ListEventsSince() error = %v", err)
+	}
+	var gotEventUIDs []string
+	for _, e := range events {
+		if e.GetType() != poolmgrv1alpha1.EventType_VM_DELETED_ON_POOL_DELETE {
+			t.Errorf("event type = %v, want VM_DELETED_ON_POOL_DELETE", e.GetType())
+		}
+		gotEventUIDs = append(gotEventUIDs, e.GetVmUid())
+	}
+	slices.Sort(gotEventUIDs)
+	if !slices.Equal(gotEventUIDs, wantUIDs) {
+		t.Errorf("event vm uids = %v, want %v", gotEventUIDs, wantUIDs)
+	}
+
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
+	if len(lifecycle.stopped) != 1 || lifecycle.stopped[0] != "pool-a" {
+		t.Errorf("stopped = %v, want [pool-a]", lifecycle.stopped)
+	}
+	if len(lifecycle.started) != 1 {
+		t.Errorf("started = %v, want only the CreatePool start", lifecycle.started)
+	}
+}
+
+func TestDeletePool_LeasedVMWithoutForce_Refused(t *testing.T) {
+	ctx := context.Background()
+	s, st, fakeVM, lifecycle := newDeletePoolFixture(t)
+
+	leasedVMWithLease(t, st, "vm-leased", "lease-1")
+	if err := st.CreateVM(ctx, sampleAvailableVM("vm-available", "pool-a")); err != nil {
+		t.Fatalf("CreateVM() error = %v", err)
+	}
+
+	_, err := s.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: poolARef})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("DeletePool() error = %v, want FailedPrecondition", err)
+	}
+
+	if _, err := st.GetPool(ctx, "pool-a", "default"); err != nil {
+		t.Errorf("GetPool() after refusal error = %v, want the pool still present", err)
+	}
+	if vm, err := st.GetVM(ctx, "vm-available"); err != nil || vm.GetPhase() != poolmgrv1alpha1.VMPhase_AVAILABLE {
+		t.Errorf("vm-available after refusal = %+v, err %v, want AVAILABLE", vm, err)
+	}
+	if _, err := st.GetLease(ctx, "lease-1"); err != nil {
+		t.Errorf("GetLease() after refusal error = %v, want the lease still present", err)
+	}
+	if got := fakeVM.deletedUIDs(); len(got) != 0 {
+		t.Errorf("flintlock deleted uids = %v, want none", got)
+	}
+
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
+	if len(lifecycle.stopped) != 0 {
+		t.Errorf("stopped = %v, want none", lifecycle.stopped)
+	}
+}
+
+func TestDeletePool_PreLeaseHookRunningWithoutForce_Refused(t *testing.T) {
+	ctx := context.Background()
+	s, st, _, _ := newDeletePoolFixture(t)
+
+	// A ClaimVM that has claimed its VM but not yet created the lease row.
+	if err := st.CreateVM(ctx, withPhase(sampleAvailableVM("vm-claiming", "pool-a"), poolmgrv1alpha1.VMPhase_PRE_LEASE_HOOK_RUNNING)); err != nil {
+		t.Fatalf("CreateVM() error = %v", err)
+	}
+
+	_, err := s.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: poolARef})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("DeletePool() error = %v, want FailedPrecondition", err)
+	}
+}
+
+func TestDeletePool_LeasedVMWithForce_DeletesVMAndLease(t *testing.T) {
+	ctx := context.Background()
+	s, st, fakeVM, _ := newDeletePoolFixture(t)
+
+	leasedVMWithLease(t, st, "vm-leased", "lease-1")
+
+	if _, err := s.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: poolARef, Force: true}); err != nil {
+		t.Fatalf("DeletePool(force) error = %v", err)
+	}
+
+	if _, err := st.GetPool(ctx, "pool-a", "default"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("GetPool() error = %v, want ErrNotFound", err)
+	}
+	if _, err := st.GetVM(ctx, "vm-leased"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("GetVM() error = %v, want ErrNotFound", err)
+	}
+	if _, err := st.GetLease(ctx, "lease-1"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("GetLease() error = %v, want ErrNotFound", err)
+	}
+	if got := fakeVM.deletedUIDs(); len(got) != 1 || got[0] != "vm-leased" {
+		t.Errorf("flintlock deleted uids = %v, want [vm-leased]", got)
+	}
+}
+
+func TestDeletePool_FlintlockDeleteFails_SweeperFinishes(t *testing.T) {
 	ctx := context.Background()
 	st := openTestStore(t)
-	lifecycle := &fakePoolLifecycle{}
-	s := api.NewPoolAdminServer(st, lifecycle)
+	fakeVM := &fakeMicroVM{deleteErr: status.Error(codes.Unavailable, "host down")}
+	flint := startFakeFlintlock(t, fakeVM, &fakeMicroVMExec{})
+	s := api.NewPoolAdminServer(st, flint, nil)
 
 	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
 	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
@@ -532,13 +695,297 @@ func TestDeletePool_VMsStillPresent_DoesNotStopReconciler(t *testing.T) {
 		t.Fatalf("CreateVM() error = %v", err)
 	}
 
-	if _, err := s.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: &poolmgrv1alpha1.PoolRef{Name: "pool-a", Namespace: "default"}}); err == nil {
-		t.Fatal("expected DeletePool to fail with VMs still present")
+	if _, err := s.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: poolARef}); err != nil {
+		t.Fatalf("DeletePool() error = %v, want nil despite the flintlock failure", err)
+	}
+	if _, err := st.GetPool(ctx, "pool-a", "default"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("GetPool() error = %v, want ErrNotFound", err)
+	}
+	vm, err := st.GetVM(ctx, "vm-1")
+	if err != nil {
+		t.Fatalf("GetVM() error = %v, want the row kept for retry", err)
+	}
+	if vm.GetPhase() != poolmgrv1alpha1.VMPhase_DELETING {
+		t.Fatalf("vm-1 phase = %v, want DELETING", vm.GetPhase())
+	}
+
+	// The host comes back: the sweeper's pending-deletion retry finishes the
+	// job even though the VM's pool no longer exists.
+	fakeVM.mu.Lock()
+	fakeVM.deleteErr = nil
+	fakeVM.mu.Unlock()
+
+	reconciler.NewSweeper(st, flint, 0, 0, nil, nil).Tick(ctx, time.Now())
+
+	if _, err := st.GetVM(ctx, "vm-1"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("GetVM() after sweep error = %v, want ErrNotFound", err)
+	}
+	if got := fakeVM.deletedUIDs(); len(got) != 1 || got[0] != "vm-1" {
+		t.Errorf("flintlock deleted uids = %v, want [vm-1]", got)
+	}
+}
+
+func TestDeletePool_NilFlintlockLeavesVMsDeleting(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	s := api.NewPoolAdminServer(st, nil, nil)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+	if err := st.CreateVM(ctx, sampleAvailableVM("vm-1", "pool-a")); err != nil {
+		t.Fatalf("CreateVM() error = %v", err)
+	}
+
+	if _, err := s.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: poolARef}); err != nil {
+		t.Fatalf("DeletePool() error = %v", err)
+	}
+	vm, err := st.GetVM(ctx, "vm-1")
+	if err != nil {
+		t.Fatalf("GetVM() error = %v", err)
+	}
+	if vm.GetPhase() != poolmgrv1alpha1.VMPhase_DELETING {
+		t.Errorf("vm-1 phase = %v, want DELETING", vm.GetPhase())
+	}
+}
+
+// tombstoneHookStore wraps a store.Store to intercept DeletePoolAndMarkVMs.
+// If refuse is set the call returns that error without touching the store;
+// otherwise before (if set) runs, then the real call, and after is invoked
+// once it has succeeded.
+type tombstoneHookStore struct {
+	store.Store
+	refuse error
+	before func()
+	after  func()
+}
+
+func (h *tombstoneHookStore) DeletePoolAndMarkVMs(ctx context.Context, name, namespace string, force bool) ([]*poolmgrv1alpha1.VMRecord, error) {
+	if h.refuse != nil {
+		return nil, h.refuse
+	}
+	if h.before != nil {
+		h.before()
+	}
+	vms, err := h.Store.DeletePoolAndMarkVMs(ctx, name, namespace, force)
+	if err == nil && h.after != nil {
+		h.after()
+	}
+	return vms, err
+}
+
+func TestDeletePool_ClaimRacesIn_RestartsReconciler(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	lifecycle := &fakePoolLifecycle{}
+	// The pre-check sees no leased VM, then the tombstone finds one: a
+	// ClaimVM landed in between.
+	hooked := &tombstoneHookStore{Store: st, refuse: store.ErrPoolHasLeasedVMs}
+	s := api.NewPoolAdminServer(hooked, nil, lifecycle)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+
+	_, err := s.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: poolARef})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("DeletePool() error = %v, want FailedPrecondition", err)
+	}
+	if _, err := st.GetPool(ctx, "pool-a", "default"); err != nil {
+		t.Errorf("GetPool() error = %v, want the pool still present", err)
 	}
 
 	lifecycle.mu.Lock()
 	defer lifecycle.mu.Unlock()
-	if len(lifecycle.stopped) != 0 {
-		t.Fatalf("stopped = %v, want none", lifecycle.stopped)
+	if len(lifecycle.stopped) != 1 {
+		t.Errorf("stopped = %v, want [pool-a]", lifecycle.stopped)
+	}
+	if len(lifecycle.started) != 2 {
+		t.Errorf("started = %v, want 2 entries (create, restart after the refusal)", lifecycle.started)
+	}
+}
+
+func TestDeletePool_StopWaitFails_RestartsReconciler(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	lifecycle := &fakePoolLifecycle{stopWaitErr: context.DeadlineExceeded}
+	s := api.NewPoolAdminServer(st, nil, lifecycle)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+
+	_, err := s.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: poolARef})
+	if status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("DeletePool() error = %v, want DeadlineExceeded", err)
+	}
+	if _, err := st.GetPool(ctx, "pool-a", "default"); err != nil {
+		t.Errorf("GetPool() error = %v, want the pool still present", err)
+	}
+
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
+	if len(lifecycle.started) != 2 {
+		t.Errorf("started = %v, want 2 entries (create, restart after the failed wait)", lifecycle.started)
+	}
+}
+
+func TestDeletePool_ClientCancelStillDeletesVMs(t *testing.T) {
+	st := openTestStore(t)
+	fakeVM := &fakeMicroVM{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// The client goes away the moment the tombstone has committed.
+	hooked := &tombstoneHookStore{Store: st, after: cancel}
+	s := api.NewPoolAdminServer(hooked, startFakeFlintlock(t, fakeVM, &fakeMicroVMExec{}), nil)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+	if err := st.CreateVM(ctx, sampleAvailableVM("vm-1", "pool-a")); err != nil {
+		t.Fatalf("CreateVM() error = %v", err)
+	}
+
+	if _, err := s.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: poolARef}); err != nil {
+		t.Fatalf("DeletePool() error = %v", err)
+	}
+
+	if got := fakeVM.deletedUIDs(); len(got) != 1 || got[0] != "vm-1" {
+		t.Errorf("flintlock deleted uids = %v, want [vm-1]", got)
+	}
+	if _, err := st.GetVM(context.Background(), "vm-1"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("GetVM() error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestDeletePool_HungHostDoesNotStarveOtherVMs: one unresponsive flintlock
+// host must not hold up the pool's other VMs, nor cost them their
+// VM_DELETED_ON_POOL_DELETE event.
+func TestDeletePool_HungHostDoesNotStarveOtherVMs(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	gate := make(chan struct{})
+	fakeVM := &fakeMicroVM{hangUID: "vm-1", hangGate: gate}
+	s := api.NewPoolAdminServer(st, startFakeFlintlock(t, fakeVM, &fakeMicroVMExec{}), nil)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+	for _, uid := range []string{"vm-1", "vm-2", "vm-3"} {
+		if err := st.CreateVM(ctx, sampleAvailableVM(uid, "pool-a")); err != nil {
+			t.Fatalf("CreateVM(%s) error = %v", uid, err)
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: poolARef})
+		done <- err
+	}()
+
+	// While vm-1's delete is still hanging, the other two are deleted and
+	// all three have their event.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		deleted := fakeVM.deletedUIDs()
+		slices.Sort(deleted)
+		events, err := st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
+		if err != nil {
+			t.Fatalf("ListEventsSince() error = %v", err)
+		}
+		if slices.Equal(deleted, []string{"vm-2", "vm-3"}) && len(events) == 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(gate)
+			t.Fatalf("with vm-1 hanging: flintlock deleted %v, want [vm-2 vm-3]; %d events, want 3", deleted, len(events))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	close(gate)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("DeletePool() error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for DeletePool to return")
+	}
+	if remaining, err := st.ListVMsByPool(ctx, "pool-a", "default", nil); err != nil || len(remaining) != 0 {
+		t.Errorf("VM rows left = %+v, err %v, want none", remaining, err)
+	}
+}
+
+// TestDeletePool_CancelledDuringTombstone_ReportsCancelled: a client that
+// goes away before the tombstone commits gets CANCELLED, not INTERNAL, and
+// the pool is left as it was with its reconciler running again.
+func TestDeletePool_CancelledDuringTombstone_ReportsCancelled(t *testing.T) {
+	st := openTestStore(t)
+	lifecycle := &fakePoolLifecycle{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hooked := &tombstoneHookStore{Store: st, before: cancel}
+	s := api.NewPoolAdminServer(hooked, nil, lifecycle)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+
+	_, err := s.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: poolARef})
+	if status.Code(err) != codes.Canceled {
+		t.Fatalf("DeletePool() error = %v, want Canceled", err)
+	}
+	if _, err := st.GetPool(context.Background(), "pool-a", "default"); err != nil {
+		t.Errorf("GetPool() error = %v, want the pool still present", err)
+	}
+
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
+	if len(lifecycle.started) != 2 {
+		t.Errorf("started = %v, want 2 entries (create, restart after the cancelled delete)", lifecycle.started)
+	}
+}
+
+// TestDeletePool_VMRowAlreadyGone_NoFailureLogged: the Sweeper retries
+// DELETING VMs on its own schedule, so it can finish one between the
+// tombstone and DeletePool's inline delete. That VM is deleted, which is the
+// outcome DeletePool wanted, so it must not be logged as a failed delete.
+func TestDeletePool_VMRowAlreadyGone_NoFailureLogged(t *testing.T) {
+	var logs bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	ctx := context.Background()
+	st := openTestStore(t)
+	fakeVM := &fakeMicroVM{}
+	hooked := &tombstoneHookStore{Store: st, after: func() {
+		if err := st.DeleteVM(ctx, "vm-1"); err != nil {
+			t.Errorf("DeleteVM() error = %v", err)
+		}
+	}}
+	s := api.NewPoolAdminServer(hooked, startFakeFlintlock(t, fakeVM, &fakeMicroVMExec{}), nil)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+	if err := st.CreateVM(ctx, sampleAvailableVM("vm-1", "pool-a")); err != nil {
+		t.Fatalf("CreateVM() error = %v", err)
+	}
+
+	if _, err := s.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: poolARef}); err != nil {
+		t.Fatalf("DeletePool() error = %v", err)
+	}
+
+	if strings.Contains(logs.String(), "microvm delete failed") {
+		t.Errorf("DeletePool logged a failed delete for a VM that was already gone:\n%s", logs.String())
 	}
 }

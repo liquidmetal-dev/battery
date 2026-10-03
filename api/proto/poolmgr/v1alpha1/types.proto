@@ -146,6 +146,8 @@ enum EventType {
   VM_HOOK_FAILED = 8;
   POOL_REPLENISHING = 9;
   POOL_SIZE_BELOW_TARGET = 10;
+  // VM_DELETED_ON_POOL_DELETE is emitted for each VM removed because its pool was deleted.
+  VM_DELETED_ON_POOL_DELETE = 11;
 }
 
 // Event is a single row from the pool manager's event outbox.

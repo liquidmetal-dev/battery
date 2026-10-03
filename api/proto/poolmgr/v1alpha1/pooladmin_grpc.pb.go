@@ -35,6 +35,10 @@ const (
 type PoolAdminClient interface {
 	CreatePool(ctx context.Context, in *CreatePoolRequest, opts ...grpc.CallOption) (*Pool, error)
 	UpdatePool(ctx context.Context, in *UpdatePoolRequest, opts ...grpc.CallOption) (*Pool, error)
+	// DeletePool deletes a pool and drains it: every VM the pool owns that is not leased is
+	// deleted along with it. If any VM is leased the call fails with FAILED_PRECONDITION,
+	// unless force is set. Once it returns OK the pool is gone; a microVM whose flintlock host
+	// could not be reached is deleted in the background.
 	DeletePool(ctx context.Context, in *DeletePoolRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	GetPool(ctx context.Context, in *GetPoolRequest, opts ...grpc.CallOption) (*Pool, error)
 	ListPools(ctx context.Context, in *ListPoolsRequest, opts ...grpc.CallOption) (*ListPoolsResponse, error)
@@ -106,6 +110,10 @@ func (c *poolAdminClient) ListPools(ctx context.Context, in *ListPoolsRequest, o
 type PoolAdminServer interface {
 	CreatePool(context.Context, *CreatePoolRequest) (*Pool, error)
 	UpdatePool(context.Context, *UpdatePoolRequest) (*Pool, error)
+	// DeletePool deletes a pool and drains it: every VM the pool owns that is not leased is
+	// deleted along with it. If any VM is leased the call fails with FAILED_PRECONDITION,
+	// unless force is set. Once it returns OK the pool is gone; a microVM whose flintlock host
+	// could not be reached is deleted in the background.
 	DeletePool(context.Context, *DeletePoolRequest) (*emptypb.Empty, error)
 	GetPool(context.Context, *GetPoolRequest) (*Pool, error)
 	ListPools(context.Context, *ListPoolsRequest) (*ListPoolsResponse, error)

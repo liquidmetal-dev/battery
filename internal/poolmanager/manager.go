@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
@@ -42,6 +43,8 @@ type poolKey struct {
 type reconcilerHandle struct {
 	runner reconcilerRunner
 	cancel context.CancelFunc
+	// done is closed when the goroutine running runner.Run exits.
+	done chan struct{}
 }
 
 // Manager owns one reconcilerRunner goroutine per pool: startReconciler
@@ -55,6 +58,10 @@ type Manager struct {
 
 	mu      sync.Mutex
 	handles map[poolKey]*reconcilerHandle
+	// exiting holds the reconcilers that were cancelled and forgotten but
+	// whose goroutines have not exited yet, so StopReconcilerAndWait can
+	// wait for them as well.
+	exiting map[poolKey][]*reconcilerHandle
 	wg      sync.WaitGroup
 	stopped bool
 }
@@ -72,6 +79,7 @@ func New(ctx context.Context, st store.Store, flint *flintlockclient.Pool, m *me
 		metrics: m,
 		rootCtx: ctx,
 		handles: make(map[poolKey]*reconcilerHandle),
+		exiting: make(map[poolKey][]*reconcilerHandle),
 	}
 }
 
@@ -122,7 +130,8 @@ func (m *Manager) StartReconciler(spec *poolmgrv1alpha1.PoolSpec) error {
 	}
 
 	childCtx, cancel := context.WithCancel(m.rootCtx)
-	m.handles[key] = &reconcilerHandle{runner: runner, cancel: cancel}
+	h := &reconcilerHandle{runner: runner, cancel: cancel, done: make(chan struct{})}
+	m.handles[key] = h
 
 	log := slog.Default().With("pool", key.name, "namespace", key.namespace)
 	log.Info("poolmanager: starting reconciler")
@@ -130,6 +139,7 @@ func (m *Manager) StartReconciler(spec *poolmgrv1alpha1.PoolSpec) error {
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
+		defer m.exited(key, h)
 		if err := runner.Run(childCtx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Error("poolmanager: reconciler exited unexpectedly", "error", err)
 			m.metrics.RecordReconcilerUnexpectedExit(key.name, key.namespace)
@@ -140,20 +150,70 @@ func (m *Manager) StartReconciler(spec *poolmgrv1alpha1.PoolSpec) error {
 
 // StopReconciler cancels and forgets the reconciler for (name, namespace),
 // if one is running. It does not wait for the reconciler's goroutine to
-// exit - see Run for the shutdown path that does.
+// exit - see StopReconcilerAndWait, and Run for the shutdown path.
 func (m *Manager) StopReconciler(name, namespace string) {
+	m.cancelAndForget(name, namespace)
+}
+
+// StopReconcilerAndWait cancels and forgets the reconciler for (name,
+// namespace) like StopReconciler, then waits for its goroutine to exit, along
+// with any reconciler stopped earlier for the same pool that is still
+// exiting (UpdatePool stops one without waiting before starting its
+// replacement). On a nil return nothing is still provisioning for the pool.
+// It returns ctx.Err() if ctx is done first; the reconciler stays cancelled
+// and forgotten either way. A no-op returning nil if there is nothing to
+// stop or wait for.
+func (m *Manager) StopReconcilerAndWait(ctx context.Context, name, namespace string) error {
+	m.cancelAndForget(name, namespace)
+
+	m.mu.Lock()
+	exiting := slices.Clone(m.exiting[poolKey{name: name, namespace: namespace}])
+	m.mu.Unlock()
+
+	for _, h := range exiting {
+		select {
+		case <-h.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+// cancelAndForget removes the handle for (name, namespace), cancels its
+// reconciler and records it as exiting.
+func (m *Manager) cancelAndForget(name, namespace string) {
 	key := poolKey{name: name, namespace: namespace}
 
 	m.mu.Lock()
 	h, ok := m.handles[key]
 	if ok {
 		delete(m.handles, key)
+		select {
+		case <-h.done:
+			// Already exited on its own; nothing left to wait for.
+		default:
+			m.exiting[key] = append(m.exiting[key], h)
+		}
 	}
 	m.mu.Unlock()
 
 	if ok {
 		slog.Info("poolmanager: stopping reconciler", "pool", name, "namespace", namespace)
 		h.cancel()
+	}
+}
+
+// exited marks h's goroutine as finished: it closes h.done and drops h from
+// the exiting list, if cancelAndForget put it there.
+func (m *Manager) exited(key poolKey, h *reconcilerHandle) {
+	close(h.done)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.exiting[key] = slices.DeleteFunc(m.exiting[key], func(e *reconcilerHandle) bool { return e == h })
+	if len(m.exiting[key]) == 0 {
+		delete(m.exiting, key)
 	}
 }
 

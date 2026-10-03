@@ -280,12 +280,15 @@ func TestE2E_PoolLifecycle(t *testing.T) {
 	// pool replenishes back to available=1 without waiting on another tick.
 	waitForAvailable(ctx, t, pm.PoolAdmin, ref, 1)
 
-	// No VM-level cordon/force-delete API exists yet (see DeletePool's own
-	// doc comment) - deleting a pool that still owns a VM must fail rather
-	// than orphan it.
-	_, err = pm.PoolAdmin.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: ref})
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("DeletePool on a pool with a live VM: got err=%v, want FailedPrecondition", err)
+	// DeletePool drains the pool: the replenished VM goes with it.
+	if _, err := pm.PoolAdmin.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: ref}); err != nil {
+		t.Fatalf("DeletePool on a pool with a live VM: %v", err)
+	}
+	waitForEvent(ctx, t, recorder, poolmgrv1alpha1.EventType_VM_DELETED_ON_POOL_DELETE)
+
+	_, err = pm.PoolAdmin.GetPool(ctx, &poolmgrv1alpha1.GetPoolRequest{Ref: ref})
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("GetPool after DeletePool: got err=%v, want NotFound", err)
 	}
 }
 

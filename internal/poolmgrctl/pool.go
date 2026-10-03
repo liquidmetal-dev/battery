@@ -138,16 +138,22 @@ func newPoolUpdateCmd() *cobra.Command {
 }
 
 func newPoolDeleteCmd() *cobra.Command {
-	var name, namespace string
+	var (
+		name, namespace string
+		force           bool
+	)
 
 	cmd := &cobra.Command{
 		Use:   "delete",
-		Short: "Delete a pool",
+		Short: "Delete a pool and the VMs it owns",
+		Long: "Delete a pool and the VMs it owns. The delete is refused while any of the " +
+			"pool's VMs is leased, unless --force is given.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			poolAdmin := clientsFromContext(cmd.Context()).poolAdmin
 
 			_, err := poolAdmin.DeletePool(cmd.Context(), &poolmgrv1alpha1.DeletePoolRequest{
-				Ref: &poolmgrv1alpha1.PoolRef{Name: name, Namespace: namespace},
+				Ref:   &poolmgrv1alpha1.PoolRef{Name: name, Namespace: namespace},
+				Force: force,
 			})
 			if err != nil {
 				return wrapGRPCErr(err)
@@ -160,6 +166,7 @@ func newPoolDeleteCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&name, "name", "", "pool name")
 	cmd.Flags().StringVar(&namespace, "namespace", "", "pool namespace")
+	cmd.Flags().BoolVar(&force, "force", false, "also delete leased VMs and end their leases")
 	_ = cmd.MarkFlagRequired("name")
 	_ = cmd.MarkFlagRequired("namespace")
 

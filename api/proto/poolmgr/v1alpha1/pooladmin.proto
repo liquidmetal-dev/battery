@@ -11,6 +11,10 @@ option go_package = "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alph
 service PoolAdmin {
   rpc CreatePool(CreatePoolRequest) returns (Pool);
   rpc UpdatePool(UpdatePoolRequest) returns (Pool);
+  // DeletePool deletes a pool and drains it: every VM the pool owns that is not leased is
+  // deleted along with it. If any VM is leased the call fails with FAILED_PRECONDITION,
+  // unless force is set. Once it returns OK the pool is gone; a microVM whose flintlock host
+  // could not be reached is deleted in the background.
   rpc DeletePool(DeletePoolRequest) returns (google.protobuf.Empty);
   rpc GetPool(GetPoolRequest) returns (Pool);
   rpc ListPools(ListPoolsRequest) returns (ListPoolsResponse);
@@ -28,6 +32,8 @@ message UpdatePoolRequest {
 
 message DeletePoolRequest {
   PoolRef ref = 1;
+  // Force also deletes the pool's leased VMs and ends their leases.
+  bool force = 2;
 }
 
 message GetPoolRequest {
