@@ -144,18 +144,16 @@ populated pool, with a note on `force` and the new event.
 - If a pool is recreated under the same name before the sweeper finishes a
   straggler, `FinishVMDeletion` attributes that deletion to the new pool: the
   event type is wrong, and a `REPLACE_ON_DELETE` pool provisions one extra VM.
-- With `force`, a `ClaimVM` that is mid-flight on a VM whose inline flintlock
-  delete also fails can flip that VM back to `LEASED` through its unconditional
-  `UpdateVM`, in a pool that no longer exists. Closing this needs a
-  phase-guarded VM update, which belongs with #103.
-- In the same race, if the inline delete succeeds after the claim's
-  `UpdateVM`, `ClaimVM` can still create its lease and return `OK` for a VM
-  that is already gone. The consumer finds out on its first `Heartbeat`
-  (`NOT_FOUND`), and the lease row lingers until it expires. The same
-  phase-guarded update closes it.
-- A `ReleaseVM` racing the delete of its pool can return `INTERNAL` or
-  `UNAVAILABLE` although the VM and lease were cleaned up. A retry returns
-  `NOT_FOUND`.
+- With `force`, a `ClaimVM` whose pre-lease hook fails because the pool
+  delete took its microVM away reports `INTERNAL` and emits `VM_HOOK_FAILED`,
+  although nothing was wrong with the hook. The VM is still deleted.
+
+A `ClaimVM` or `ReleaseVM` racing the delete used to be able to flip a
+`DELETING` VM back to a live phase, lease a VM that was already gone, or fail
+although cleanup succeeded. #116 closed those: the store no longer moves a VM
+out of `DELETING`, `ClaimVM` commits the VM's move to `LEASED` and its lease
+in one transaction and returns `ABORTED` if the VM was deleted first, and
+`ReleaseVM` returns `OK` when the pool delete finished its cleanup.
 
 ### Files touched
 

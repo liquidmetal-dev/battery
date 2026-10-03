@@ -353,7 +353,8 @@ func (p *Provisioner) waitCreated(ctx context.Context, log *slog.Logger, client 
 // failure (a create-hook failure during provisioning, or a pre-lease-hook
 // failure during ClaimVM), and emits VM_HOOK_FAILED. Store/flintlock errors
 // here are best-effort: the original failure cause is what the caller
-// should return/log. hook ("create" or "pre_lease") and m label/record
+// should return/log - including the store refusing to quarantine a VM that
+// has since gone DELETING, which is left to whoever is deleting it. hook ("create" or "pre_lease") and m label/record
 // poolmgr_hook_failures_total; every failure path in Provision and
 // runPreLeaseHooks funnels through here, so this is the single place that
 // metric is recorded rather than duplicating it at each call site.

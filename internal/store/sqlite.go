@@ -378,20 +378,53 @@ func (s *sqliteStore) ListVMsByPhase(ctx context.Context, phase poolmgrv1alpha1.
 }
 
 func (s *sqliteStore) UpdateVM(ctx context.Context, v *poolmgrv1alpha1.VMRecord) error {
+	return updateVM(ctx, s.db, v)
+}
+
+// execQuerier is the part of *sql.DB and *sql.Tx that updateVM and
+// insertLease need, so each runs either on its own or inside a transaction.
+type execQuerier interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// updateVM implements UpdateVM on q. The WHERE clause is what makes DELETING
+// terminal: a DELETING row only matches an update that keeps it DELETING.
+func updateVM(ctx context.Context, q execQuerier, v *poolmgrv1alpha1.VMRecord) error {
 	row, err := vmToRow(v)
 	if err != nil {
 		return fmt.Errorf("store: marshal vm: %w", err)
 	}
 
-	res, err := s.db.ExecContext(ctx, `
+	deleting := int32(poolmgrv1alpha1.VMPhase_DELETING)
+	res, err := q.ExecContext(ctx, `
 		UPDATE vms SET pool_name = ?, pool_namespace = ?, flintlock_host = ?, phase = ?, lease_id = ?, updated_at = ?
-		WHERE uid = ?`,
-		row.poolName, row.poolNamespace, row.flintlockHost, row.phase, row.leaseID, row.updatedAt, row.uid,
+		WHERE uid = ? AND (phase != ? OR ? = ?)`,
+		row.poolName, row.poolNamespace, row.flintlockHost, row.phase, row.leaseID, row.updatedAt,
+		row.uid, deleting, row.phase, deleting,
 	)
 	if err != nil {
 		return fmt.Errorf("store: update vm: %w", err)
 	}
-	return checkRowsAffected(res)
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: rows affected: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+
+	// Nothing matched: either the row is missing, or it is DELETING and the
+	// update would have moved it elsewhere.
+	var exists int
+	err = q.QueryRowContext(ctx, `SELECT 1 FROM vms WHERE uid = ?`, row.uid).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("store: query vm: %w", err)
+	}
+	return ErrVMDeleting
 }
 
 func (s *sqliteStore) DeleteVM(ctx context.Context, uid string) error {
@@ -497,12 +530,17 @@ func (s *sqliteStore) queryLeases(ctx context.Context, query string, args ...any
 }
 
 func (s *sqliteStore) CreateLease(ctx context.Context, l *poolmgrv1alpha1.LeaseRecord) error {
+	return insertLease(ctx, s.db, l)
+}
+
+// insertLease implements CreateLease on q.
+func insertLease(ctx context.Context, q execQuerier, l *poolmgrv1alpha1.LeaseRecord) error {
 	row, err := leaseToRow(l)
 	if err != nil {
 		return fmt.Errorf("store: marshal lease: %w", err)
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	_, err = q.ExecContext(ctx, `
 		INSERT INTO leases (`+leaseColumns+`)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.leaseID, row.vmUID, row.poolName, row.poolNamespace, row.claimedAt, row.lastHeartbeatAt, row.expiresAt, row.requestID,
@@ -512,6 +550,25 @@ func (s *sqliteStore) CreateLease(ctx context.Context, l *poolmgrv1alpha1.LeaseR
 	}
 	if err != nil {
 		return fmt.Errorf("store: insert lease: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) LeaseVM(ctx context.Context, v *poolmgrv1alpha1.VMRecord, l *poolmgrv1alpha1.LeaseRecord) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin lease vm tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if err := updateVM(ctx, tx, v); err != nil {
+		return err
+	}
+	if err := insertLease(ctx, tx, l); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit lease vm tx: %w", err)
 	}
 	return nil
 }

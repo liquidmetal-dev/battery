@@ -35,6 +35,10 @@ var ErrHostCordoned = errors.New("store: host is cordoned")
 // leased VM and force was not set.
 var ErrPoolHasLeasedVMs = errors.New("store: pool has leased vms")
 
+// ErrVMDeleting is returned by UpdateVM and LeaseVM when the VM is DELETING
+// and the write would have moved it to another phase.
+var ErrVMDeleting = errors.New("store: vm is deleting")
+
 // Store is the repository interface for pool manager persistence.
 type Store interface {
 	CreatePool(ctx context.Context, p *poolmgrv1alpha1.PoolSpec) error
@@ -52,6 +56,9 @@ type Store interface {
 	CreateVM(ctx context.Context, v *poolmgrv1alpha1.VMRecord) error
 	GetVM(ctx context.Context, uid string) (*poolmgrv1alpha1.VMRecord, error)
 	ListVMsByPool(ctx context.Context, poolName, poolNamespace string, phase *poolmgrv1alpha1.VMPhase) ([]*poolmgrv1alpha1.VMRecord, error)
+	// UpdateVM overwrites the VM row with v's uid. DELETING is terminal: an update that
+	// would move a DELETING VM to any other phase changes nothing and returns
+	// ErrVMDeleting. Returns ErrNotFound if there is no such row.
 	UpdateVM(ctx context.Context, v *poolmgrv1alpha1.VMRecord) error
 	DeleteVM(ctx context.Context, uid string) error
 	// ClaimAvailableVM atomically selects one AVAILABLE VM in the pool identified by
@@ -63,6 +70,11 @@ type Store interface {
 	// Returns ErrDuplicateRequestID if another lease already has l's non-empty
 	// RequestId.
 	CreateLease(ctx context.Context, l *poolmgrv1alpha1.LeaseRecord) error
+	// LeaseVM completes a claim: in one transaction it writes v (as UpdateVM does, under
+	// the same DELETING rule) and stores l. Returns ErrVMDeleting or ErrNotFound if v
+	// was deleted underneath the claim, or ErrDuplicateRequestID as CreateLease does;
+	// on any error neither row is changed.
+	LeaseVM(ctx context.Context, v *poolmgrv1alpha1.VMRecord, l *poolmgrv1alpha1.LeaseRecord) error
 	GetLease(ctx context.Context, leaseID string) (*poolmgrv1alpha1.LeaseRecord, error)
 	// GetLeaseByRequestID returns the lease created with requestID. Returns
 	// ErrNotFound if there is none, including when requestID is empty.

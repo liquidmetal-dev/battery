@@ -148,6 +148,9 @@ type fakeMicroVM struct {
 	// is closed (or the call's context ends), like an unresponsive host.
 	hangUID  string
 	hangGate chan struct{}
+	// onDelete, if set, runs inside each DeleteMicroVM before it answers, so
+	// a test can change the store while a delete is in flight.
+	onDelete func(uid string)
 }
 
 func (f *fakeMicroVM) GetMicroVM(_ context.Context, _ *microvmv1alpha1.GetMicroVMRequest) (*microvmv1alpha1.GetMicroVMResponse, error) {
@@ -178,6 +181,9 @@ func (f *fakeMicroVM) DeleteMicroVM(ctx context.Context, req *microvmv1alpha1.De
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	if f.onDelete != nil {
+		f.onDelete(req.GetUid())
+	}
 	if f.deleteErr != nil {
 		return nil, f.deleteErr
 	}
