@@ -1270,3 +1270,37 @@ func TestReleaseVM_PoolDeletedAfterVMDelete(t *testing.T) {
 		t.Fatalf("expected only the VM_CLAIMED event, got %+v", events)
 	}
 }
+
+// TestReleaseVM_SweeperRemovesVMFirst reproduces the Sweeper's pending-
+// deletion retry deleting the VM row while ReleaseVM's own flintlock delete
+// is in flight, in a pool that still exists. The Sweeper goes on to finish
+// the deletion and tells a release from an expiry by the lease row, so
+// ReleaseVM must succeed without taking that row, or the notification, from
+// it.
+func TestReleaseVM_SweeperRemovesVMFirst(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	vm := &fakeMicroVM{}
+	flint := startFakeFlintlock(t, vm, &fakeMicroVMExec{})
+	notifier := &spyNotifier{}
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, notifier, nil)
+	leaseID := claimForRelease(t, st, s)
+
+	vm.mu.Lock()
+	vm.onDelete = func(uid string) {
+		if err := st.DeleteVM(ctx, uid); err != nil {
+			t.Errorf("DeleteVM: %v", err)
+		}
+	}
+	vm.mu.Unlock()
+
+	if _, err := s.ReleaseVM(ctx, &poolmgrv1alpha1.ReleaseVMRequest{LeaseId: leaseID}); err != nil {
+		t.Fatalf("ReleaseVM: %v", err)
+	}
+	if _, err := st.GetLease(ctx, leaseID); err != nil {
+		t.Fatalf("expected the lease row to be left for the Sweeper, GetLease error = %v", err)
+	}
+	if len(notifier.deleted) != 0 {
+		t.Fatalf("expected the notification to be left to the Sweeper, got %v", notifier.deleted)
+	}
+}
