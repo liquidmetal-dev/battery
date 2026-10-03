@@ -31,6 +31,10 @@ var ErrDuplicateRequestID = errors.New("store: duplicate lease request id")
 // at the moment the reservation was attempted.
 var ErrHostCordoned = errors.New("store: host is cordoned")
 
+// ErrPoolHasLeasedVMs is returned by DeletePoolAndMarkVMs when the pool has a
+// leased VM and force was not set.
+var ErrPoolHasLeasedVMs = errors.New("store: pool has leased vms")
+
 // Store is the repository interface for pool manager persistence.
 type Store interface {
 	CreatePool(ctx context.Context, p *poolmgrv1alpha1.PoolSpec) error
@@ -38,6 +42,12 @@ type Store interface {
 	ListPools(ctx context.Context) ([]*poolmgrv1alpha1.PoolSpec, error)
 	UpdatePool(ctx context.Context, p *poolmgrv1alpha1.PoolSpec) error
 	DeletePool(ctx context.Context, name, namespace string) error
+	// DeletePoolAndMarkVMs deletes the pool row, marks every VM of the pool DELETING
+	// (clearing its lease_id) and deletes the pool's lease rows, all in one transaction. It
+	// returns the VMs as marked, ordered by uid. Returns ErrNotFound if the pool doesn't
+	// exist. Unless force is set, returns ErrPoolHasLeasedVMs and changes nothing if any VM
+	// is LEASED or PRE_LEASE_HOOK_RUNNING.
+	DeletePoolAndMarkVMs(ctx context.Context, name, namespace string, force bool) ([]*poolmgrv1alpha1.VMRecord, error)
 
 	CreateVM(ctx context.Context, v *poolmgrv1alpha1.VMRecord) error
 	GetVM(ctx context.Context, uid string) (*poolmgrv1alpha1.VMRecord, error)

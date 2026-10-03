@@ -219,6 +219,79 @@ func (s *sqliteStore) DeletePool(ctx context.Context, name, namespace string) er
 	return checkRowsAffected(res)
 }
 
+func (s *sqliteStore) DeletePoolAndMarkVMs(ctx context.Context, name, namespace string, force bool) ([]*poolmgrv1alpha1.VMRecord, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("store: begin delete pool tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// Delete the pool row first: it is a write, so the transaction holds the
+	// write lock before the leased check below reads the VMs, and a
+	// concurrent ClaimAvailableVM can't slip in between the check and the
+	// phase update. A refusal below rolls this delete back.
+	res, err := tx.ExecContext(ctx, `DELETE FROM pools WHERE name = ? AND namespace = ?`, name, namespace)
+	if err != nil {
+		return nil, fmt.Errorf("store: delete pool: %w", err)
+	}
+	if err := checkRowsAffected(res); err != nil {
+		return nil, err
+	}
+
+	if !force {
+		var leased int
+		err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM vms WHERE pool_name = ? AND pool_namespace = ? AND phase IN (?, ?)`,
+			name, namespace, int32(poolmgrv1alpha1.VMPhase_LEASED), int32(poolmgrv1alpha1.VMPhase_PRE_LEASE_HOOK_RUNNING),
+		).Scan(&leased)
+		if err != nil {
+			return nil, fmt.Errorf("store: count leased vms: %w", err)
+		}
+		if leased > 0 {
+			return nil, ErrPoolHasLeasedVMs
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE vms SET phase = ?, lease_id = NULL, updated_at = ? WHERE pool_name = ? AND pool_namespace = ?`,
+		int32(poolmgrv1alpha1.VMPhase_DELETING), time.Now().UnixNano(), name, namespace,
+	); err != nil {
+		return nil, fmt.Errorf("store: mark pool vms deleting: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM leases WHERE pool_name = ? AND pool_namespace = ?`, name, namespace); err != nil {
+		return nil, fmt.Errorf("store: delete pool leases: %w", err)
+	}
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT uid, pool_name, pool_namespace, flintlock_host, phase, lease_id, created_at, updated_at
+		FROM vms WHERE pool_name = ? AND pool_namespace = ? ORDER BY uid`, name, namespace)
+	if err != nil {
+		return nil, fmt.Errorf("store: query pool vms: %w", err)
+	}
+	var vms []*poolmgrv1alpha1.VMRecord
+	for rows.Next() {
+		var row vmRow
+		if err := rows.Scan(&row.uid, &row.poolName, &row.poolNamespace, &row.flintlockHost, &row.phase, &row.leaseID, &row.createdAt, &row.updatedAt); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("store: scan vm: %w", err)
+		}
+		vms = append(vms, rowToVM(row))
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("store: iterate vms: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("store: close vms: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: commit delete pool tx: %w", err)
+	}
+	return vms, nil
+}
+
 func (s *sqliteStore) CreateVM(ctx context.Context, v *poolmgrv1alpha1.VMRecord) error {
 	row, err := vmToRow(v)
 	if err != nil {

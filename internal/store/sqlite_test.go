@@ -1652,3 +1652,181 @@ func TestOpenRejectsNewerSchemaVersion(t *testing.T) {
 		t.Fatal("Open() error = nil, want an error for a newer schema version")
 	}
 }
+
+func TestDeletePoolAndMarkVMs(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if err := s.CreatePool(ctx, samplePoolSpec("pool-a")); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+	for uid, phase := range map[string]poolmgrv1alpha1.VMPhase{
+		"vm-available":    poolmgrv1alpha1.VMPhase_AVAILABLE,
+		"vm-provisioning": poolmgrv1alpha1.VMPhase_PROVISIONING,
+		"vm-quarantined":  poolmgrv1alpha1.VMPhase_QUARANTINED,
+	} {
+		if err := s.CreateVM(ctx, sampleVMRecord(uid, "pool-a", "default", phase)); err != nil {
+			t.Fatalf("CreateVM(%s) error = %v", uid, err)
+		}
+	}
+
+	got, err := s.DeletePoolAndMarkVMs(ctx, "pool-a", "default", false)
+	if err != nil {
+		t.Fatalf("DeletePoolAndMarkVMs() error = %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("DeletePoolAndMarkVMs() returned %d VMs, want 3", len(got))
+	}
+	for _, vm := range got {
+		if vm.GetPhase() != poolmgrv1alpha1.VMPhase_DELETING {
+			t.Errorf("returned VM %s phase = %v, want DELETING", vm.GetUid(), vm.GetPhase())
+		}
+	}
+
+	if _, err := s.GetPool(ctx, "pool-a", "default"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetPool() after delete error = %v, want ErrNotFound", err)
+	}
+	stored, err := s.ListVMsByPool(ctx, "pool-a", "default", nil)
+	if err != nil {
+		t.Fatalf("ListVMsByPool() error = %v", err)
+	}
+	if len(stored) != 3 {
+		t.Fatalf("stored VMs = %d, want 3", len(stored))
+	}
+	for _, vm := range stored {
+		if vm.GetPhase() != poolmgrv1alpha1.VMPhase_DELETING {
+			t.Errorf("stored VM %s phase = %v, want DELETING", vm.GetUid(), vm.GetPhase())
+		}
+	}
+}
+
+func TestDeletePoolAndMarkVMs_NotFound(t *testing.T) {
+	s := openTestStore(t)
+
+	_, err := s.DeletePoolAndMarkVMs(context.Background(), "missing", "default", false)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("DeletePoolAndMarkVMs() error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestDeletePoolAndMarkVMs_LeasedVMs(t *testing.T) {
+	leasedPhases := []poolmgrv1alpha1.VMPhase{
+		poolmgrv1alpha1.VMPhase_LEASED,
+		poolmgrv1alpha1.VMPhase_PRE_LEASE_HOOK_RUNNING,
+	}
+
+	for _, phase := range leasedPhases {
+		t.Run(phase.String(), func(t *testing.T) {
+			s := openTestStore(t)
+			ctx := context.Background()
+
+			if err := s.CreatePool(ctx, samplePoolSpec("pool-a")); err != nil {
+				t.Fatalf("CreatePool() error = %v", err)
+			}
+			leased := sampleVMRecord("vm-leased", "pool-a", "default", phase)
+			leased.LeaseId = proto.String("lease-1")
+			if err := s.CreateVM(ctx, leased); err != nil {
+				t.Fatalf("CreateVM() error = %v", err)
+			}
+			if err := s.CreateVM(ctx, sampleVMRecord("vm-available", "pool-a", "default", poolmgrv1alpha1.VMPhase_AVAILABLE)); err != nil {
+				t.Fatalf("CreateVM() error = %v", err)
+			}
+			if err := s.CreateLease(ctx, sampleLeaseRecord("lease-1", "vm-leased", "pool-a", "default", time.Now().Add(time.Hour))); err != nil {
+				t.Fatalf("CreateLease() error = %v", err)
+			}
+
+			// Without force: refused, and nothing changes.
+			if _, err := s.DeletePoolAndMarkVMs(ctx, "pool-a", "default", false); !errors.Is(err, ErrPoolHasLeasedVMs) {
+				t.Fatalf("DeletePoolAndMarkVMs(force=false) error = %v, want ErrPoolHasLeasedVMs", err)
+			}
+			if _, err := s.GetPool(ctx, "pool-a", "default"); err != nil {
+				t.Fatalf("GetPool() after refusal error = %v, want the pool still present", err)
+			}
+			if vm, err := s.GetVM(ctx, "vm-available"); err != nil || vm.GetPhase() != poolmgrv1alpha1.VMPhase_AVAILABLE {
+				t.Fatalf("vm-available after refusal = %+v, err %v, want AVAILABLE", vm, err)
+			}
+			if vm, err := s.GetVM(ctx, "vm-leased"); err != nil || vm.GetPhase() != phase {
+				t.Fatalf("vm-leased after refusal = %+v, err %v, want %v", vm, err, phase)
+			}
+			if _, err := s.GetLease(ctx, "lease-1"); err != nil {
+				t.Fatalf("GetLease() after refusal error = %v, want the lease still present", err)
+			}
+
+			// With force: everything goes.
+			got, err := s.DeletePoolAndMarkVMs(ctx, "pool-a", "default", true)
+			if err != nil {
+				t.Fatalf("DeletePoolAndMarkVMs(force=true) error = %v", err)
+			}
+			if len(got) != 2 {
+				t.Fatalf("DeletePoolAndMarkVMs(force=true) returned %d VMs, want 2", len(got))
+			}
+			for _, vm := range got {
+				if vm.GetPhase() != poolmgrv1alpha1.VMPhase_DELETING {
+					t.Errorf("VM %s phase = %v, want DELETING", vm.GetUid(), vm.GetPhase())
+				}
+				if vm.LeaseId != nil {
+					t.Errorf("VM %s lease_id = %q, want cleared", vm.GetUid(), vm.GetLeaseId())
+				}
+			}
+			if _, err := s.GetLease(ctx, "lease-1"); !errors.Is(err, ErrNotFound) {
+				t.Errorf("GetLease() after forced delete error = %v, want ErrNotFound", err)
+			}
+			if _, err := s.GetPool(ctx, "pool-a", "default"); !errors.Is(err, ErrNotFound) {
+				t.Errorf("GetPool() after forced delete error = %v, want ErrNotFound", err)
+			}
+		})
+	}
+}
+
+func TestDeletePoolAndMarkVMs_LeavesOtherPoolsAlone(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	// pool-a exists in two namespaces, and pool-b sits beside it in "default".
+	otherNS := samplePoolSpec("pool-a")
+	otherNS.Namespace = "other"
+	for _, p := range []*poolmgrv1alpha1.PoolSpec{samplePoolSpec("pool-a"), samplePoolSpec("pool-b"), otherNS} {
+		if err := s.CreatePool(ctx, p); err != nil {
+			t.Fatalf("CreatePool(%s/%s) error = %v", p.GetNamespace(), p.GetName(), err)
+		}
+	}
+
+	keepLeased := sampleVMRecord("vm-b-leased", "pool-b", "default", poolmgrv1alpha1.VMPhase_LEASED)
+	keepLeased.LeaseId = proto.String("lease-b")
+	for _, vm := range []*poolmgrv1alpha1.VMRecord{
+		sampleVMRecord("vm-a", "pool-a", "default", poolmgrv1alpha1.VMPhase_AVAILABLE),
+		sampleVMRecord("vm-other-ns", "pool-a", "other", poolmgrv1alpha1.VMPhase_AVAILABLE),
+		keepLeased,
+	} {
+		if err := s.CreateVM(ctx, vm); err != nil {
+			t.Fatalf("CreateVM(%s) error = %v", vm.GetUid(), err)
+		}
+	}
+	if err := s.CreateLease(ctx, sampleLeaseRecord("lease-b", "vm-b-leased", "pool-b", "default", time.Now().Add(time.Hour))); err != nil {
+		t.Fatalf("CreateLease() error = %v", err)
+	}
+
+	// pool-b's leased VM must not make default/pool-a's delete refuse.
+	got, err := s.DeletePoolAndMarkVMs(ctx, "pool-a", "default", false)
+	if err != nil {
+		t.Fatalf("DeletePoolAndMarkVMs() error = %v", err)
+	}
+	if len(got) != 1 || got[0].GetUid() != "vm-a" {
+		t.Fatalf("DeletePoolAndMarkVMs() returned %+v, want just vm-a", got)
+	}
+
+	if vm, err := s.GetVM(ctx, "vm-other-ns"); err != nil || vm.GetPhase() != poolmgrv1alpha1.VMPhase_AVAILABLE {
+		t.Errorf("vm-other-ns = %+v, err %v, want untouched AVAILABLE", vm, err)
+	}
+	if vm, err := s.GetVM(ctx, "vm-b-leased"); err != nil || vm.GetPhase() != poolmgrv1alpha1.VMPhase_LEASED || vm.GetLeaseId() != "lease-b" {
+		t.Errorf("vm-b-leased = %+v, err %v, want untouched LEASED with lease-b", vm, err)
+	}
+	if _, err := s.GetLease(ctx, "lease-b"); err != nil {
+		t.Errorf("GetLease(lease-b) error = %v, want untouched", err)
+	}
+	for _, ref := range [][2]string{{"pool-b", "default"}, {"pool-a", "other"}} {
+		if _, err := s.GetPool(ctx, ref[0], ref[1]); err != nil {
+			t.Errorf("GetPool(%s/%s) error = %v, want untouched", ref[1], ref[0], err)
+		}
+	}
+}
