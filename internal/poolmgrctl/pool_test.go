@@ -131,7 +131,7 @@ func bufconnPoolAdmin(t *testing.T) *grpc.ClientConn {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	return bufconnServe(t, api.NewPoolAdminServer(st, nil))
+	return bufconnServe(t, api.NewPoolAdminServer(st, nil, nil))
 }
 
 // bufconnServe serves admin over an in-memory bufconn listener and returns a

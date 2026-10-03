@@ -90,7 +90,7 @@ func startE2EPoolmgrd(t *testing.T, flint *flintlockclient.Pool) string {
 		t.Fatalf("server.New: %v", err)
 	}
 
-	poolmgrv1alpha1.RegisterPoolAdminServer(srv, api.NewPoolAdminServer(st, poolMgr))
+	poolmgrv1alpha1.RegisterPoolAdminServer(srv, api.NewPoolAdminServer(st, flint, poolMgr))
 	poolmgrv1alpha1.RegisterLeaseServer(srv, api.NewLeaseServer(st, flint, api.HookExecConfig{}, poolMgr, reg))
 	poolmgrv1alpha1.RegisterEventsServer(srv, api.NewEventsServer(st, 0, 0))
 
