@@ -354,3 +354,49 @@ func TestManager_StopReconcilerAndWait_UnknownPoolIsNoop(t *testing.T) {
 		t.Fatalf("StopReconcilerAndWait() error = %v, want nil", err)
 	}
 }
+
+// TestManager_StopReconcilerAndWait_WaitsForEarlierStoppedReconciler: a
+// reconciler stopped moments ago by the non-waiting StopReconciler (as
+// UpdatePool does before starting its replacement) may still be unwinding
+// in-flight work. StopReconcilerAndWait must wait for it too, not only for
+// the reconciler currently tracked for the pool.
+func TestManager_StopReconcilerAndWait_WaitsForEarlierStoppedReconciler(t *testing.T) {
+	fakes := map[string]*fakeRunner{}
+	withFakeReconciler(t, fakes)
+
+	m := New(context.Background(), nil, nil, nil)
+	if err := m.StartReconciler(testPool("pool-a")); err != nil {
+		t.Fatalf("StartReconciler: %v", err)
+	}
+	old := fakes["pool-a"]
+	gate := make(chan struct{})
+	old.mu.Lock()
+	old.exitGate = gate
+	old.mu.Unlock()
+
+	// UpdatePool's sequence: stop without waiting, start the replacement.
+	m.StopReconciler("pool-a", "default")
+	if err := m.StartReconciler(testPool("pool-a")); err != nil {
+		t.Fatalf("StartReconciler (replacement): %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- m.StopReconcilerAndWait(context.Background(), "pool-a", "default") }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("StopReconcilerAndWait returned (err=%v) while the earlier reconciler was still exiting", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(gate)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("StopReconcilerAndWait() error = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for StopReconcilerAndWait to return")
+	}
+}
