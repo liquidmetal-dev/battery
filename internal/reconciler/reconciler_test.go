@@ -538,3 +538,103 @@ func TestReconciler_StaticNetwork_NeverProvisionsMoreThanOne(t *testing.T) {
 		t.Fatalf("expected the pool to stay at 1 VM, got %d", got)
 	}
 }
+
+// abandonedClaims are the states a VM can be left in by a poolmgrd that died
+// part-way through a ClaimVM, or after the sweeper ended its lease but
+// before it marked the VM for deletion: claimed, with no lease to show for it.
+func abandonedClaims() map[string]*poolmgrv1alpha1.VMRecord {
+	hookRunning := sampleVM("seed-0", "pool-a", "host-a", poolmgrv1alpha1.VMPhase_PRE_LEASE_HOOK_RUNNING)
+	reserved := sampleVM("seed-0", "pool-a", "host-a", poolmgrv1alpha1.VMPhase_LEASED)
+	leaseGone := sampleVM("seed-0", "pool-a", "host-a", poolmgrv1alpha1.VMPhase_LEASED)
+	leaseID := "lease-with-no-row"
+	leaseGone.LeaseId = &leaseID
+	return map[string]*poolmgrv1alpha1.VMRecord{
+		"pre-lease hook running":              hookRunning,
+		"leased with no lease id":             reserved,
+		"leased with a lease id but no lease": leaseGone,
+	}
+}
+
+// A VM whose claim was abandoned counts as a pending claim, so without
+// recovery an IMMEDIATE_ON_LEASE pool restarted with one would treat it as
+// warm forever and never provision a VM anyone can claim.
+func TestRecoverAbandonedClaims_RestartedPoolRefills(t *testing.T) {
+	for name, abandoned := range abandonedClaims() {
+		t.Run(name, func(t *testing.T) {
+			vm := &fakeMicroVM{}
+			flint := startFakeFlintlock(t, vm, alwaysReadyExec())
+			st := openTestStore(t)
+			ctx := context.Background()
+
+			pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE, 1, []string{"host-a"})
+			if err := st.CreatePool(ctx, pool); err != nil {
+				t.Fatalf("CreatePool: %v", err)
+			}
+			if err := st.CreateVM(ctx, abandoned); err != nil {
+				t.Fatalf("CreateVM: %v", err)
+			}
+
+			// What poolmgrd does on startup, before any reconciler runs.
+			n, err := reconciler.RecoverAbandonedClaims(ctx, st)
+			if err != nil {
+				t.Fatalf("RecoverAbandonedClaims: %v", err)
+			}
+			if n != 1 {
+				t.Fatalf("RecoverAbandonedClaims() = %d, want 1", n)
+			}
+			got, err := st.GetVM(ctx, "seed-0")
+			if err != nil {
+				t.Fatalf("GetVM: %v", err)
+			}
+			if got.GetPhase() != poolmgrv1alpha1.VMPhase_DELETING {
+				t.Fatalf("abandoned VM phase = %v, want DELETING", got.GetPhase())
+			}
+
+			r, err := reconciler.New(pool, st, flint, 10*time.Millisecond, fastProvisionConfig(), nil)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			runCtx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go func() { _ = r.Run(runCtx) }()
+
+			waitForAvailable(t, st, "pool-a", 1, 2*time.Second)
+		})
+	}
+}
+
+func TestRecoverAbandonedClaims_LeavesOtherVMsAlone(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE, 2, []string{"host-a"})
+	seedAvailableVMs(t, st, pool, 2)
+	leaseVM(t, st, "seed-0", "pool-a")
+	for uid, phase := range map[string]poolmgrv1alpha1.VMPhase{
+		"provisioning": poolmgrv1alpha1.VMPhase_PROVISIONING,
+		"quarantined":  poolmgrv1alpha1.VMPhase_QUARANTINED,
+	} {
+		if err := st.CreateVM(ctx, sampleVM(uid, "pool-a", "host-a", phase)); err != nil {
+			t.Fatalf("CreateVM(%s): %v", uid, err)
+		}
+	}
+
+	n, err := reconciler.RecoverAbandonedClaims(ctx, st)
+	if err != nil {
+		t.Fatalf("RecoverAbandonedClaims: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("RecoverAbandonedClaims() = %d, want 0", n)
+	}
+	want := map[string]poolmgrv1alpha1.VMPhase{
+		"seed-0":       poolmgrv1alpha1.VMPhase_LEASED,
+		"seed-1":       poolmgrv1alpha1.VMPhase_AVAILABLE,
+		"provisioning": poolmgrv1alpha1.VMPhase_PROVISIONING,
+		"quarantined":  poolmgrv1alpha1.VMPhase_QUARANTINED,
+	}
+	for _, v := range onlyVMsInPool(t, st, "pool-a") {
+		if v.GetPhase() != want[v.GetUid()] {
+			t.Errorf("VM %s phase = %v, want %v", v.GetUid(), v.GetPhase(), want[v.GetUid()])
+		}
+	}
+}

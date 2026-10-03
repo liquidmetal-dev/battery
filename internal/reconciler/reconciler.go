@@ -10,6 +10,7 @@ import (
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	flintlocktypes "github.com/liquidmetal-dev/flintlock/api/types"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/liquidmetal-dev/battery/internal/flintlockclient"
 	"github.com/liquidmetal-dev/battery/internal/metrics"
@@ -172,7 +173,8 @@ func CountVMs(ctx context.Context, st store.Store, poolName, poolNamespace strin
 			// is final. Only the lease row itself, which store.LeaseVM
 			// writes together with the VM's lease id, proves the claim
 			// committed; without one the claim is still pending and can
-			// hand the VM back.
+			// hand the VM back. (One left that way by a dead process is
+			// cleared by RecoverAbandonedClaims.)
 			if _, ok := committed[vm.GetLeaseId()]; ok {
 				counts.Leased++
 			} else {
@@ -255,4 +257,54 @@ func (r *Reconciler) provisionN(ctx context.Context, n int) {
 		}()
 	}
 	wg.Wait()
+}
+
+// RecoverAbandonedClaims marks DELETING every VM, in any pool, that is
+// claimed with no lease to show for it (PRE_LEASE_HOOK_RUNNING, or LEASED
+// with no lease row), and returns how many it marked. The Sweeper's
+// pending-deletion scan then removes them.
+//
+// It is only safe to call while no ClaimVM and no Sweeper can be running,
+// i.e. at poolmgrd startup before anything is served: only then is such a VM
+// certain to have been left by a previous process, one that died part-way
+// through a claim or between ending a lease and deleting its VM. Nothing
+// else would ever move it on, and since CountVMs counts it as a pending
+// claim, an IMMEDIATE_ON_LEASE pool would go on treating it as warm.
+//
+// The VM is deleted rather than returned to AVAILABLE: its pre-lease hooks
+// may have partly run, or a consumer may already have used it.
+func RecoverAbandonedClaims(ctx context.Context, st store.Store) (int, error) {
+	leases, err := st.ListLeases(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("reconciler: ListLeases: %w", err)
+	}
+	committed := make(map[string]struct{}, len(leases))
+	for _, lease := range leases {
+		committed[lease.GetLeaseId()] = struct{}{}
+	}
+
+	recovered := 0
+	for _, phase := range []poolmgrv1alpha1.VMPhase{
+		poolmgrv1alpha1.VMPhase_PRE_LEASE_HOOK_RUNNING,
+		poolmgrv1alpha1.VMPhase_LEASED,
+	} {
+		vms, err := st.ListVMsByPhase(ctx, phase)
+		if err != nil {
+			return recovered, fmt.Errorf("reconciler: ListVMsByPhase: %w", err)
+		}
+		for _, vm := range vms {
+			if _, ok := committed[vm.GetLeaseId()]; ok {
+				continue
+			}
+			slog.WarnContext(ctx, "reconciler: deleting microvm left claimed with no lease",
+				"pool", vm.GetPoolName(), "namespace", vm.GetPoolNamespace(), "microvm_uid", vm.GetUid(), "phase", vm.GetPhase())
+			vm.Phase = poolmgrv1alpha1.VMPhase_DELETING
+			vm.UpdatedAt = timestamppb.Now()
+			if err := st.UpdateVM(ctx, vm); err != nil {
+				return recovered, fmt.Errorf("reconciler: mark vm %s deleting: %w", vm.GetUid(), err)
+			}
+			recovered++
+		}
+	}
+	return recovered, nil
 }

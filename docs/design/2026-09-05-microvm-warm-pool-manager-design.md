@@ -257,7 +257,9 @@ ignores notifications and acts only at start and on ticks.
 A VM whose claim is still in progress (its pre-lease hook is running, or its lease isn't
 committed yet) counts toward every strategy's total, including the warm set of
 `IMMEDIATE_ON_LEASE`: it is replaced only once the lease commits, since until then the claim can
-still hand the VM back.
+still hand the VM back. A claim can't stay in progress across a restart: on startup, before any
+reconciler runs, the manager marks every VM that is claimed with no lease for deletion, so a
+claim abandoned by a crash doesn't hold a place in the pool forever.
 
 A VM in `DELETING` counts toward no strategy's total, so a `REPLACE_ON_DELETE` tick can start the
 replacement before the old VM's deletion completes. A failing provision is retried on every tick
