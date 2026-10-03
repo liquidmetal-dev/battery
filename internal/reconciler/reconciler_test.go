@@ -9,6 +9,7 @@ import (
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	microvmexecv1alpha1 "github.com/liquidmetal-dev/flintlock/api/services/microvmexec/v1alpha1"
+	flintlocktypes "github.com/liquidmetal-dev/flintlock/api/types"
 
 	"github.com/liquidmetal-dev/battery/internal/reconciler"
 	"github.com/liquidmetal-dev/battery/internal/store"
@@ -207,4 +208,139 @@ func TestReconciler_ReplaceOnDelete_OnlyOnDeleteNotification(t *testing.T) {
 
 	r.NotifyVMDeleted()
 	waitForVMs(t, st, "pool-a", 3, 2*time.Second)
+}
+
+// staticPool returns a size-1 pool whose template gives its interface a
+// static address, which every VM provisioned from it would share.
+func staticPool(strategy poolmgrv1alpha1.ReplenishmentStrategyType) *poolmgrv1alpha1.PoolSpec {
+	pool := samplePool("pool-a", strategy, 1, []string{"host-a"})
+	if strategy == poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD {
+		pool.ReplenishmentStrategy.MinSize = int32Ptr(1)
+	}
+	pool.MicrovmTemplate.Interfaces = []*flintlocktypes.NetworkInterface{{
+		DeviceId: "eth1",
+		Address:  &flintlocktypes.StaticAddress{Address: "192.168.100.31/32"},
+	}}
+	return pool
+}
+
+// TestReconciler_StaticNetwork_WaitsForEveryVMToGo covers the phases no
+// Strategy counts: a VM that is DELETING, QUARANTINED or FAILED may still be
+// running with the template's address, so a static-network pool must not
+// provision alongside it.
+func TestReconciler_StaticNetwork_WaitsForEveryVMToGo(t *testing.T) {
+	for _, phase := range []poolmgrv1alpha1.VMPhase{
+		poolmgrv1alpha1.VMPhase_DELETING,
+		poolmgrv1alpha1.VMPhase_QUARANTINED,
+		poolmgrv1alpha1.VMPhase_FAILED,
+	} {
+		for _, strategy := range []poolmgrv1alpha1.ReplenishmentStrategyType{
+			poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD,
+			poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE,
+		} {
+			t.Run(phase.String()+"/"+strategy.String(), func(t *testing.T) {
+				vm := &fakeMicroVM{}
+				flint := startFakeFlintlock(t, vm, alwaysReadyExec())
+				st := openTestStore(t)
+				ctx := context.Background()
+
+				pool := staticPool(strategy)
+				if err := st.CreatePool(ctx, pool); err != nil {
+					t.Fatalf("CreatePool: %v", err)
+				}
+				if err := st.CreateVM(ctx, sampleVM("vm-old", "pool-a", "host-a", phase)); err != nil {
+					t.Fatalf("CreateVM: %v", err)
+				}
+
+				r, err := reconciler.New(pool, st, flint, 10*time.Millisecond, fastProvisionConfig(), nil)
+				if err != nil {
+					t.Fatalf("New: %v", err)
+				}
+				runCtx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				go func() { _ = r.Run(runCtx) }()
+
+				// The seed and several ticks all see the old VM.
+				time.Sleep(100 * time.Millisecond)
+				if got := len(onlyVMsInPool(t, st, "pool-a")); got != 1 {
+					t.Fatalf("expected no VM provisioned alongside the %v one, got %d VMs", phase, got)
+				}
+
+				// Once it is gone the pool replenishes as usual.
+				if err := st.DeleteVM(ctx, "vm-old"); err != nil {
+					t.Fatalf("DeleteVM: %v", err)
+				}
+				r.NotifyVMDeleted()
+				waitForVMs(t, st, "pool-a", 1, 2*time.Second)
+			})
+		}
+	}
+}
+
+// TestReconciler_StaticNetwork_ShrunkPoolReplacesOnlyTheLastVM covers a
+// REPLACE_ON_DELETE pool updated from several VMs down to size 1 with a
+// static template: each old VM's deletion asks for one replacement, but only
+// the last one may get it.
+func TestReconciler_StaticNetwork_ShrunkPoolReplacesOnlyTheLastVM(t *testing.T) {
+	vm := &fakeMicroVM{}
+	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	pool := staticPool(poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE)
+	seedAvailableVMs(t, st, pool, 2)
+
+	r, err := reconciler.New(pool, st, flint, 10*time.Millisecond, fastProvisionConfig(), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = r.Run(runCtx) }()
+
+	if err := st.DeleteVM(ctx, "vm-0"); err != nil {
+		t.Fatalf("DeleteVM: %v", err)
+	}
+	r.NotifyVMDeleted()
+	time.Sleep(100 * time.Millisecond)
+	if got := len(onlyVMsInPool(t, st, "pool-a")); got != 1 {
+		t.Fatalf("expected no replacement while another VM remains, got %d VMs", got)
+	}
+
+	if err := st.DeleteVM(ctx, "vm-1"); err != nil {
+		t.Fatalf("DeleteVM: %v", err)
+	}
+	r.NotifyVMDeleted()
+	waitForVMs(t, st, "pool-a", 1, 2*time.Second)
+	time.Sleep(50 * time.Millisecond)
+	if got := len(onlyVMsInPool(t, st, "pool-a")); got != 1 {
+		t.Fatalf("expected exactly one replacement, got %d VMs", got)
+	}
+}
+
+// TestReconciler_StaticNetwork_NeverProvisionsMoreThanOne covers a pool
+// stored before CreatePool rejected a static template at size > 1: the
+// reconciler still keeps it to a single VM.
+func TestReconciler_StaticNetwork_NeverProvisionsMoreThanOne(t *testing.T) {
+	vm := &fakeMicroVM{}
+	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
+	st := openTestStore(t)
+
+	pool := staticPool(poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD)
+	pool.Size = 3
+	pool.ReplenishmentStrategy.MinSize = int32Ptr(3)
+
+	r, err := reconciler.New(pool, st, flint, 10*time.Millisecond, fastProvisionConfig(), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = r.Run(ctx) }()
+
+	waitForVMs(t, st, "pool-a", 1, 2*time.Second)
+	time.Sleep(100 * time.Millisecond)
+	if got := len(onlyVMsInPool(t, st, "pool-a")); got != 1 {
+		t.Fatalf("expected the pool to stay at 1 VM, got %d", got)
+	}
 }

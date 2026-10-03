@@ -401,6 +401,13 @@ type PoolSpec struct {
 	Namespace string                 `protobuf:"bytes,2,opt,name=namespace,proto3" json:"namespace,omitempty"`
 	// MicroVMTemplate is the flintlock MicroVM spec used to provision every VM in the pool.
 	// allow_guest_agent is always forced true server-side, regardless of what's set here.
+	//
+	// Everything else is sent to flintlock unchanged for each VM, so an interface's guest_mac
+	// or static address would be shared by all of them. A template that sets either is
+	// rejected unless the pool never holds two VMs at once: size at most 1, a replenishment
+	// strategy other than IMMEDIATE_ON_LEASE and a hook failure policy other than QUARANTINE.
+	// Such a pool is replenished only once no VM of it is left in any phase. Any other pool
+	// must leave both unset, so flintlock generates the MAC and the guest uses DHCP.
 	MicrovmTemplate *types.MicroVMSpec `protobuf:"bytes,3,opt,name=microvm_template,json=microvmTemplate,proto3" json:"microvm_template,omitempty"`
 	// Size is the target pool size.
 	Size int32 `protobuf:"varint,4,opt,name=size,proto3" json:"size,omitempty"`

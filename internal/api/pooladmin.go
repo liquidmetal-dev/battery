@@ -104,10 +104,12 @@ func (s *PoolAdminServer) lockPool(name, namespace string) func() {
 	return l.Unlock
 }
 
-// validatePoolSpec checks the fields CreatePool/UpdatePool both require, and
-// forces spec.MicrovmTemplate.AllowGuestAgent to true: pool-managed VMs
-// always need the guest-agent vsock channel for create/pre-lease hooks,
-// regardless of what the caller's template set.
+// validatePoolSpec checks the fields CreatePool/UpdatePool both require,
+// rejects a template whose network config would be duplicated across the
+// pool's VMs (see validateTemplateNetwork), and forces
+// spec.MicrovmTemplate.AllowGuestAgent to true: pool-managed VMs always need
+// the guest-agent vsock channel for create/pre-lease hooks, regardless of
+// what the caller's template set.
 func validatePoolSpec(spec *poolmgrv1alpha1.PoolSpec) error {
 	if spec.GetName() == "" {
 		return status.Error(codes.InvalidArgument, "spec.name is required")
@@ -127,8 +129,49 @@ func validatePoolSpec(spec *poolmgrv1alpha1.PoolSpec) error {
 	if spec.MicrovmTemplate == nil {
 		return status.Error(codes.InvalidArgument, "spec.microvm_template is required")
 	}
+	if err := validateTemplateNetwork(spec); err != nil {
+		return err
+	}
 	spec.MicrovmTemplate.AllowGuestAgent = true
 
+	return nil
+}
+
+// validateTemplateNetwork rejects a template interface with a guest_mac or
+// a static address in a pool that can hold more than one VM at a time. The
+// template is sent to flintlock unchanged for every VM (Provision overrides
+// only the id, namespace and allow_guest_agent), so such a field would give
+// every one of them the same MAC or IP.
+//
+// Three settings make a pool hold more than one VM by design:
+//   - a size above 1;
+//   - IMMEDIATE_ON_LEASE, which provisions a new VM on every claim without
+//     counting the leased ones;
+//   - QUARANTINE, which keeps a VM whose hook failed. Nothing but deleting
+//     the pool removes it, so the pool could never be replenished.
+//
+// What's left is a size <= 1 MIN_SIZE_THRESHOLD or REPLACE_ON_DELETE pool
+// with DELETE_AND_REPLACE. This check only sees the spec, so for that pool
+// the reconciler enforces the single VM at provision time, against the VMs
+// that actually exist (see reconciler.TemplateHasStaticNetwork's caller).
+func validateTemplateNetwork(spec *poolmgrv1alpha1.PoolSpec) error {
+	if spec.GetSize() <= 1 &&
+		spec.GetReplenishmentStrategy().GetType() != poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE &&
+		spec.GetHookFailurePolicy() != poolmgrv1alpha1.HookFailurePolicy_QUARANTINE {
+		return nil
+	}
+
+	const remedy = "leave it unset unless size is at most 1, the replenishment strategy is not IMMEDIATE_ON_LEASE and the hook failure policy is not QUARANTINE"
+	for i, iface := range spec.GetMicrovmTemplate().GetInterfaces() {
+		if iface.GetGuestMac() != "" {
+			return status.Errorf(codes.InvalidArgument,
+				"spec.microvm_template.interfaces[%d].guest_mac: a fixed MAC address would be given to every VM in the pool; %s", i, remedy)
+		}
+		if iface.GetAddress() != nil {
+			return status.Errorf(codes.InvalidArgument,
+				"spec.microvm_template.interfaces[%d].address: a static address would be given to every VM in the pool; %s (DHCP is used when it is unset)", i, remedy)
+		}
+	}
 	return nil
 }
 

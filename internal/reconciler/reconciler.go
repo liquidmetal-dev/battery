@@ -9,6 +9,7 @@ import (
 	"time"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
+	flintlocktypes "github.com/liquidmetal-dev/flintlock/api/types"
 
 	"github.com/liquidmetal-dev/battery/internal/flintlockclient"
 	"github.com/liquidmetal-dev/battery/internal/metrics"
@@ -179,10 +180,51 @@ func CountVMs(ctx context.Context, st store.Store, poolName, poolNamespace strin
 	return counts, nil
 }
 
+// TemplateHasStaticNetwork reports whether any of template's interfaces sets
+// a guest_mac or a static address. Provision sends the template unchanged
+// for every VM, so two VMs created from such a template share that MAC or
+// address.
+func TemplateHasStaticNetwork(template *flintlocktypes.MicroVMSpec) bool {
+	for _, iface := range template.GetInterfaces() {
+		if iface.GetGuestMac() != "" || iface.GetAddress() != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// capForStaticNetwork returns how many VMs a pool whose template has static
+// network config may provision right now: one if the pool has no VM record
+// at all, otherwise none.
+//
+// The Strategy can't be trusted for this. VMCounts leaves out DELETING and
+// FAILED VMs and no strategy counts QUARANTINED ones, yet all three may
+// still be running on their host with the template's address; and
+// REPLACE_ON_DELETE asks for a replacement on every deletion, even while a
+// pool that was shrunk to size 1 still has other VMs left. So this counts
+// records in every phase, which also keeps a pool stored before the API
+// rejected such a spec down to a single VM.
+func (r *Reconciler) capForStaticNetwork(ctx context.Context) int {
+	vms, err := r.store.ListVMsByPool(ctx, r.pool.GetName(), r.pool.GetNamespace(), nil)
+	if err != nil {
+		r.log.ErrorContext(ctx, "reconciler: failed to list VMs for static-network check", "error", err)
+		return 0
+	}
+	if len(vms) > 0 {
+		r.log.DebugContext(ctx, "reconciler: template has static network config, waiting for existing VMs to be removed", "existing", len(vms))
+		return 0
+	}
+	return 1
+}
+
 // provisionN starts n Provision calls concurrently and logs any failures.
 // It does not block the caller past all of them completing or ctx being
-// done, whichever comes first.
+// done, whichever comes first. For a template with static network config n
+// is first capped by capForStaticNetwork.
 func (r *Reconciler) provisionN(ctx context.Context, n int) {
+	if n > 0 && TemplateHasStaticNetwork(r.pool.GetMicrovmTemplate()) {
+		n = r.capForStaticNetwork(ctx)
+	}
 	if n <= 0 {
 		return
 	}

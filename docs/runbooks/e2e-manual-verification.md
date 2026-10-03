@@ -258,7 +258,10 @@ This uses a real, provisionable `microvm_template` (same shape as step 2's `Crea
 payload) rather than a token one — flintlock validates `memory_in_mb >= 1024` and requires a root
 volume plus at least one network interface, so a minimal `{vcpu, memory_in_mb}` template would
 never let a VM reach `AVAILABLE` once [#40](https://github.com/liquidmetal-dev/battery/issues/40)
-starts provisioning against it:
+starts provisioning against it. The template gives its interface a static address, which every
+VM in the pool would share, so the pool has to stay at `size: 1` with `MIN_SIZE_THRESHOLD` (or
+`REPLACE_ON_DELETE`) and `DELETE_AND_REPLACE`: `CreatePool` rejects a static address at a larger
+size, with `IMMEDIATE_ON_LEASE` or with `QUARANTINE`.
 
 ```sh
 grpcurl -d '{
