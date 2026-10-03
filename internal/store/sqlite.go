@@ -226,10 +226,9 @@ func (s *sqliteStore) DeletePoolAndMarkVMs(ctx context.Context, name, namespace 
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	// Delete the pool row first: it is a write, so the transaction holds the
-	// write lock before the leased check below reads the VMs, and a
-	// concurrent ClaimAvailableVM can't slip in between the check and the
-	// phase update. A refusal below rolls this delete back.
+	// Delete the pool row first, so a missing pool is reported as
+	// ErrNotFound before anything else is looked at. A refusal below rolls
+	// this delete back.
 	res, err := tx.ExecContext(ctx, `DELETE FROM pools WHERE name = ? AND namespace = ?`, name, namespace)
 	if err != nil {
 		return nil, fmt.Errorf("store: delete pool: %w", err)

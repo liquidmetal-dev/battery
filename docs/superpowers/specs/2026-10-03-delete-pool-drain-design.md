@@ -85,9 +85,12 @@ leave that row `QUARANTINED` in a pool that no longer exists.
   goroutine exits.
 - New `Manager.StopReconcilerAndWait(ctx, name, namespace) error` cancels and
   forgets the reconciler, then waits for `done` or for `ctx`, returning
-  `ctx.Err()` if the wait is cut short. It is a no-op returning nil for an
-  unknown pool. A cancelled `Provision` settles within
-  `hookFailureCleanupTimeout` (30s).
+  `ctx.Err()` if the wait is cut short. It also waits for any reconciler
+  stopped earlier for the same pool that has not exited yet: `UpdatePool`
+  stops one without waiting, and it may still be unwinding a cancelled
+  `Provision`. It is a no-op returning nil when there is nothing to stop or
+  wait for. A cancelled `Provision` settles within `hookFailureCleanupTimeout`
+  (30s).
 - `api.PoolLifecycle` gains the same method; `NoopPoolLifecycle` implements it
   as a no-op.
 - `UpdatePool` keeps using the non-waiting `StopReconciler`.
@@ -153,10 +156,6 @@ populated pool, with a note on `force` and the new event.
 - A `ReleaseVM` racing the delete of its pool can return `INTERNAL` or
   `UNAVAILABLE` although the VM and lease were cleaned up. A retry returns
   `NOT_FOUND`.
-- `StopReconcilerAndWait` waits only for the reconciler currently tracked for
-  the pool. One stopped moments earlier by `UpdatePool`, and still unwinding a
-  cancelled `Provision`, is not waited for, so under `QUARANTINE` it can flip a
-  tombstoned VM back to `QUARANTINED`.
 
 ### Files touched
 
