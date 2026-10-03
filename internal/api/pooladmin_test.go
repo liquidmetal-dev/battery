@@ -853,3 +853,63 @@ func TestDeletePool_ClientCancelStillDeletesVMs(t *testing.T) {
 		t.Errorf("GetVM() error = %v, want ErrNotFound", err)
 	}
 }
+
+// TestDeletePool_HungHostDoesNotStarveOtherVMs: one unresponsive flintlock
+// host must not hold up the pool's other VMs, nor cost them their
+// VM_DELETED_ON_POOL_DELETE event.
+func TestDeletePool_HungHostDoesNotStarveOtherVMs(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+	gate := make(chan struct{})
+	fakeVM := &fakeMicroVM{hangUID: "vm-1", hangGate: gate}
+	s := api.NewPoolAdminServer(st, startFakeFlintlock(t, fakeVM, &fakeMicroVMExec{}), nil)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+	for _, uid := range []string{"vm-1", "vm-2", "vm-3"} {
+		if err := st.CreateVM(ctx, sampleAvailableVM(uid, "pool-a")); err != nil {
+			t.Fatalf("CreateVM(%s) error = %v", uid, err)
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: poolARef})
+		done <- err
+	}()
+
+	// While vm-1's delete is still hanging, the other two are deleted and
+	// all three have their event.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		deleted := fakeVM.deletedUIDs()
+		slices.Sort(deleted)
+		events, err := st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
+		if err != nil {
+			t.Fatalf("ListEventsSince() error = %v", err)
+		}
+		if slices.Equal(deleted, []string{"vm-2", "vm-3"}) && len(events) == 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(gate)
+			t.Fatalf("with vm-1 hanging: flintlock deleted %v, want [vm-2 vm-3]; %d events, want 3", deleted, len(events))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	close(gate)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("DeletePool() error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for DeletePool to return")
+	}
+	if remaining, err := st.ListVMsByPool(ctx, "pool-a", "default", nil); err != nil || len(remaining) != 0 {
+		t.Errorf("VM rows left = %+v, err %v, want none", remaining, err)
+	}
+}

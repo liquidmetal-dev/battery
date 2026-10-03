@@ -362,19 +362,38 @@ func (s *PoolAdminServer) restartReconciler(ctx context.Context, log *slog.Logge
 // detached from ctx's cancellation: the pool is already gone, so a client
 // that hangs up must not stop its microVMs being deleted. A failed delete is
 // only logged; the VM stays DELETING for the Sweeper to retry.
+//
+// Every event is emitted before any flintlock call, and the deletes run
+// concurrently, each bounded by its own poolDeleteCleanupTimeout: the
+// Sweeper emits nothing for a VM whose pool is gone, so an unresponsive
+// host must not be able to cost the pool's other VMs their event, or hold
+// up their deletion.
 func (s *PoolAdminServer) deletePoolVMs(ctx context.Context, log *slog.Logger, spec *poolmgrv1alpha1.PoolSpec, vms []*poolmgrv1alpha1.VMRecord) {
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), poolDeleteCleanupTimeout)
-	defer cancel()
+	ctx = context.WithoutCancel(ctx)
 
+	eventCtx, cancel := context.WithTimeout(ctx, poolDeleteCleanupTimeout)
 	for _, vm := range vms {
-		reconciler.EmitEvent(cleanupCtx, s.store, spec, vm.GetUid(), poolmgrv1alpha1.EventType_VM_DELETED_ON_POOL_DELETE)
-		if s.flint == nil {
-			continue
-		}
-		if err := reconciler.EnsureVMDeleted(cleanupCtx, s.store, s.flint, vm); err != nil {
-			log.WarnContext(ctx, "pooladmin: DeletePool: microvm delete failed, leaving it for the sweeper", "microvm_uid", vm.GetUid(), "error", err)
-		}
+		reconciler.EmitEvent(eventCtx, s.store, spec, vm.GetUid(), poolmgrv1alpha1.EventType_VM_DELETED_ON_POOL_DELETE)
 	}
+	cancel()
+
+	if s.flint == nil {
+		return
+	}
+
+	var wg sync.WaitGroup
+	for _, vm := range vms {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			deleteCtx, cancel := context.WithTimeout(ctx, poolDeleteCleanupTimeout)
+			defer cancel()
+			if err := reconciler.EnsureVMDeleted(deleteCtx, s.store, s.flint, vm); err != nil {
+				log.WarnContext(ctx, "pooladmin: DeletePool: microvm delete failed, leaving it for the sweeper", "microvm_uid", vm.GetUid(), "error", err)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func (s *PoolAdminServer) getPool(ctx context.Context, name, namespace string) (*poolmgrv1alpha1.Pool, error) {

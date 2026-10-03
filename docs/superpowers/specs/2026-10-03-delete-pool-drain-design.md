@@ -109,11 +109,15 @@ leave that row `QUARANTINED` in a pool that no longer exists.
    after step 2: the reconciler is started again and the RPC fails with
    `FAILED_PRECONDITION`. Any other error restarts the reconciler and fails
    with `INTERNAL`.
-5. For each returned VM, on a context detached from the RPC's cancellation and
-   bounded by a timeout: emit `VM_DELETED_ON_POOL_DELETE`, then call
-   `reconciler.EnsureVMDeleted`. A failure is logged and the VM is left
-   `DELETING` for `Sweeper.retryPendingDeletions`, which already deletes
-   `DELETING` VMs whose pool row is gone.
+5. On a context detached from the RPC's cancellation: emit
+   `VM_DELETED_ON_POOL_DELETE` for every returned VM, then call
+   `reconciler.EnsureVMDeleted` for each of them concurrently, each bounded by
+   its own timeout. Events go first and deletes run side by side so that one
+   unresponsive flintlock host cannot hold up the other VMs or cost them their
+   event (the sweeper emits nothing for a VM whose pool is gone). A failed
+   delete is logged and the VM is left `DELETING` for
+   `Sweeper.retryPendingDeletions`, which already deletes `DELETING` VMs whose
+   pool row is gone.
 6. Return `OK`.
 
 A consumer holding a lease that was force-deleted gets `NOT_FOUND` from its
@@ -141,6 +145,18 @@ populated pool, with a note on `force` and the new event.
   delete also fails can flip that VM back to `LEASED` through its unconditional
   `UpdateVM`, in a pool that no longer exists. Closing this needs a
   phase-guarded VM update, which belongs with #103.
+- In the same race, if the inline delete succeeds after the claim's
+  `UpdateVM`, `ClaimVM` can still create its lease and return `OK` for a VM
+  that is already gone. The consumer finds out on its first `Heartbeat`
+  (`NOT_FOUND`), and the lease row lingers until it expires. The same
+  phase-guarded update closes it.
+- A `ReleaseVM` racing the delete of its pool can return `INTERNAL` or
+  `UNAVAILABLE` although the VM and lease were cleaned up. A retry returns
+  `NOT_FOUND`.
+- `StopReconcilerAndWait` waits only for the reconciler currently tracked for
+  the pool. One stopped moments earlier by `UpdatePool`, and still unwinding a
+  cancelled `Provision`, is not waited for, so under `QUARANTINE` it can flip a
+  tombstoned VM back to `QUARANTINED`.
 
 ### Files touched
 
