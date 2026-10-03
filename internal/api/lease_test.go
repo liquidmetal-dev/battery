@@ -19,6 +19,7 @@ import (
 
 	"github.com/liquidmetal-dev/battery/internal/api"
 	"github.com/liquidmetal-dev/battery/internal/metrics"
+	"github.com/liquidmetal-dev/battery/internal/reconciler"
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
 
@@ -572,6 +573,9 @@ type racingCreateLeaseStore struct {
 
 	mu          sync.Mutex
 	winnerLease *poolmgrv1alpha1.LeaseRecord
+	// midRace is the pool's VM counts once the winner's lease is committed
+	// and the loser is about to try to commit its own.
+	midRace reconciler.VMCounts
 }
 
 func (s *racingCreateLeaseStore) LeaseVM(ctx context.Context, v *poolmgrv1alpha1.VMRecord, l *poolmgrv1alpha1.LeaseRecord) error {
@@ -596,6 +600,9 @@ func (s *racingCreateLeaseStore) LeaseVM(ctx context.Context, v *poolmgrv1alpha1
 		return fmt.Errorf("racer: create lease: %w", err)
 	}
 	s.winnerLease = winner
+	if s.midRace, err = reconciler.CountVMs(ctx, s.Store, l.GetPoolName(), l.GetPoolNamespace()); err != nil {
+		return fmt.Errorf("racer: count vms: %w", err)
+	}
 	return s.Store.LeaseVM(ctx, v, l)
 }
 
@@ -624,6 +631,13 @@ func TestClaimVM_ConcurrentDuplicateRequestID(t *testing.T) {
 	}
 	if len(resp.GetNetworkInterfaces()) != 1 {
 		t.Fatalf("expected 1 network interface, got %v", resp.GetNetworkInterfaces())
+	}
+
+	// Until its lease commits the loser must count as a pending claim:
+	// counted as leased, an IMMEDIATE_ON_LEASE pool would replace it and be
+	// left a VM over once it's handed back.
+	if want := (reconciler.VMCounts{Claiming: 1, Leased: 1}); racer.midRace != want {
+		t.Fatalf("mid-race counts = %+v, want %+v", racer.midRace, want)
 	}
 
 	loser := "vm-1"

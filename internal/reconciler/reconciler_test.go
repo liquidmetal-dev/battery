@@ -11,6 +11,7 @@ import (
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	microvmexecv1alpha1 "github.com/liquidmetal-dev/flintlock/api/services/microvmexec/v1alpha1"
 	flintlocktypes "github.com/liquidmetal-dev/flintlock/api/types"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/liquidmetal-dev/battery/internal/reconciler"
 	"github.com/liquidmetal-dev/battery/internal/store"
@@ -344,14 +345,16 @@ func TestReconciler_ImmediateOnLease_PendingClaimIsNotReplaced(t *testing.T) {
 	go func() { _ = r.Run(runCtx) }()
 
 	// Two ClaimVM calls racing on one request_id each reserve a VM: one is
-	// still running its pre-lease hook, the other has finished it but has
-	// no lease yet (the state store.ClaimAvailableVM leaves a VM in).
-	for uid, phase := range map[string]poolmgrv1alpha1.VMPhase{
-		"seed-0": poolmgrv1alpha1.VMPhase_PRE_LEASE_HOOK_RUNNING,
-		"seed-1": poolmgrv1alpha1.VMPhase_LEASED,
-	} {
-		if err := st.UpdateVM(ctx, sampleVM(uid, "pool-a", "host-a", phase)); err != nil {
-			t.Fatalf("UpdateVM(%s): %v", uid, err)
+	// still running its pre-lease hook. The other carries a lease id with
+	// no lease behind it, which the claim path no longer produces but
+	// CountVMs must still read as pending rather than trust the id.
+	hookRunning := sampleVM("seed-0", "pool-a", "host-a", poolmgrv1alpha1.VMPhase_PRE_LEASE_HOOK_RUNNING)
+	uncommitted := sampleVM("seed-1", "pool-a", "host-a", poolmgrv1alpha1.VMPhase_LEASED)
+	uncommittedLease := "lease-never-created"
+	uncommitted.LeaseId = &uncommittedLease
+	for _, v := range []*poolmgrv1alpha1.VMRecord{hookRunning, uncommitted} {
+		if err := st.UpdateVM(ctx, v); err != nil {
+			t.Fatalf("UpdateVM(%s): %v", v.GetUid(), err)
 		}
 	}
 
@@ -375,15 +378,29 @@ func TestReconciler_ImmediateOnLease_PendingClaimIsNotReplaced(t *testing.T) {
 	}
 }
 
-// leaseVM flips an existing VM to LEASED with a lease id, standing in for a
-// ClaimVM that has committed its lease.
+// leaseVM flips an existing VM to LEASED and creates its lease, standing in
+// for a ClaimVM that has committed.
 func leaseVM(t *testing.T, st store.Store, uid, poolName string) {
 	t.Helper()
+	ctx := context.Background()
 	vm := sampleVM(uid, poolName, "host-a", poolmgrv1alpha1.VMPhase_LEASED)
 	leaseID := "lease-" + uid
 	vm.LeaseId = &leaseID
-	if err := st.UpdateVM(context.Background(), vm); err != nil {
+	if err := st.UpdateVM(ctx, vm); err != nil {
 		t.Fatalf("UpdateVM(%s): %v", uid, err)
+	}
+	now := timestamppb.Now()
+	lease := &poolmgrv1alpha1.LeaseRecord{
+		LeaseId:         leaseID,
+		VmUid:           uid,
+		PoolName:        poolName,
+		PoolNamespace:   "default",
+		ClaimedAt:       now,
+		LastHeartbeatAt: now,
+		ExpiresAt:       timestamppb.New(now.AsTime().Add(time.Hour)),
+	}
+	if err := st.CreateLease(ctx, lease); err != nil {
+		t.Fatalf("CreateLease(%s): %v", leaseID, err)
 	}
 }
 

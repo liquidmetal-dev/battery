@@ -26,7 +26,7 @@ var ErrMinSizeRequired = errors.New("reconciler: MIN_SIZE_THRESHOLD requires a p
 // tracked separately because they never count toward Available.
 //
 // Claiming is VMs a ClaimVM has reserved but not yet committed a lease for;
-// Leased is only those whose lease is committed. They are kept apart because
+// Leased is only those whose lease row exists. They are kept apart because
 // a pending claim can still hand its VM back to AVAILABLE, so a strategy
 // that doesn't count leased VMs toward its target must still count these.
 type VMCounts struct {

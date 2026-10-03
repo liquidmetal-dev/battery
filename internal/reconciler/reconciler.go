@@ -145,6 +145,17 @@ func CountVMs(ctx context.Context, st store.Store, poolName, poolNamespace strin
 	if err != nil {
 		return VMCounts{}, fmt.Errorf("reconciler: ListVMsByPool: %w", err)
 	}
+	// Leases are read after the VMs, so a lease committed in between is seen
+	// and its VM counts as leased; read the other way round, a claim that
+	// commits between the two reads would look pending.
+	leases, err := st.ListLeases(ctx, &poolmgrv1alpha1.PoolRef{Name: poolName, Namespace: poolNamespace})
+	if err != nil {
+		return VMCounts{}, fmt.Errorf("reconciler: ListLeases: %w", err)
+	}
+	committed := make(map[string]struct{}, len(leases))
+	for _, lease := range leases {
+		committed[lease.GetLeaseId()] = struct{}{}
+	}
 
 	var counts VMCounts
 	for _, vm := range vms {
@@ -157,13 +168,15 @@ func CountVMs(ctx context.Context, st store.Store, poolName, poolNamespace strin
 			// as neither available nor in-flight and over-provision.
 			counts.Claiming++
 		case poolmgrv1alpha1.VMPhase_LEASED:
-			// store.ClaimAvailableVM marks a VM LEASED before ClaimVM has a
-			// lease for it; the lease id is only set once the pre-lease
-			// hooks pass. Until then the claim is still pending.
-			if vm.GetLeaseId() == "" {
-				counts.Claiming++
-			} else {
+			// store.ClaimAvailableVM marks a VM LEASED well before its claim
+			// is final. Only the lease row itself, which store.LeaseVM
+			// writes together with the VM's lease id, proves the claim
+			// committed; without one the claim is still pending and can
+			// hand the VM back.
+			if _, ok := committed[vm.GetLeaseId()]; ok {
 				counts.Leased++
+			} else {
+				counts.Claiming++
 			}
 		case poolmgrv1alpha1.VMPhase_PROVISIONING, poolmgrv1alpha1.VMPhase_CREATE_HOOK_RUNNING:
 			counts.Provisioning++
