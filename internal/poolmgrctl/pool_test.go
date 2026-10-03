@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/emptypb"
 
 	"github.com/liquidmetal-dev/battery/internal/api"
 	"github.com/liquidmetal-dev/battery/internal/store"
@@ -129,11 +131,19 @@ func bufconnPoolAdmin(t *testing.T) *grpc.ClientConn {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
+	return bufconnServe(t, api.NewPoolAdminServer(st, nil))
+}
+
+// bufconnServe serves admin over an in-memory bufconn listener and returns a
+// dialed *grpc.ClientConn to it.
+func bufconnServe(t *testing.T, admin poolmgrv1alpha1.PoolAdminServer) *grpc.ClientConn {
+	t.Helper()
+
 	lis := bufconn.Listen(1024 * 1024)
 	t.Cleanup(func() { _ = lis.Close() })
 
 	srv := grpc.NewServer()
-	poolmgrv1alpha1.RegisterPoolAdminServer(srv, api.NewPoolAdminServer(st, nil))
+	poolmgrv1alpha1.RegisterPoolAdminServer(srv, admin)
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 
@@ -318,5 +328,58 @@ func TestPoolDelete_Bufconn(t *testing.T) {
 	getCmd.SetArgs([]string{"--name", "pool-a", "--namespace", "default"})
 	if err := getCmd.Execute(); err == nil {
 		t.Fatal("expected get after delete to fail, got nil")
+	}
+}
+
+// recordingPoolAdmin is a PoolAdmin server that records the DeletePool
+// requests it receives and always succeeds.
+type recordingPoolAdmin struct {
+	poolmgrv1alpha1.UnimplementedPoolAdminServer
+
+	mu      sync.Mutex
+	deletes []*poolmgrv1alpha1.DeletePoolRequest
+}
+
+func (r *recordingPoolAdmin) DeletePool(_ context.Context, req *poolmgrv1alpha1.DeletePoolRequest) (*emptypb.Empty, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.deletes = append(r.deletes, req)
+	return &emptypb.Empty{}, nil
+}
+
+func TestPoolDelete_ForceFlag(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"default", []string{"--name", "pool-a", "--namespace", "default"}, false},
+		{"force", []string{"--name", "pool-a", "--namespace", "default", "--force"}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := &recordingPoolAdmin{}
+			ctx := withTestClients(bufconnServe(t, rec))
+
+			cmd := newPoolDeleteCmd()
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetContext(ctx)
+			cmd.SetArgs(tt.args)
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+
+			rec.mu.Lock()
+			defer rec.mu.Unlock()
+			if len(rec.deletes) != 1 {
+				t.Fatalf("got %d DeletePool requests, want 1", len(rec.deletes))
+			}
+			if got := rec.deletes[0].GetForce(); got != tt.want {
+				t.Errorf("DeletePoolRequest.force = %v, want %v", got, tt.want)
+			}
+			if ref := rec.deletes[0].GetRef(); ref.GetName() != "pool-a" || ref.GetNamespace() != "default" {
+				t.Errorf("DeletePoolRequest.ref = %+v, want default/pool-a", ref)
+			}
+		})
 	}
 }
