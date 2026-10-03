@@ -42,6 +42,8 @@ type poolKey struct {
 type reconcilerHandle struct {
 	runner reconcilerRunner
 	cancel context.CancelFunc
+	// done is closed when the goroutine running runner.Run exits.
+	done chan struct{}
 }
 
 // Manager owns one reconcilerRunner goroutine per pool: startReconciler
@@ -122,7 +124,8 @@ func (m *Manager) StartReconciler(spec *poolmgrv1alpha1.PoolSpec) error {
 	}
 
 	childCtx, cancel := context.WithCancel(m.rootCtx)
-	m.handles[key] = &reconcilerHandle{runner: runner, cancel: cancel}
+	done := make(chan struct{})
+	m.handles[key] = &reconcilerHandle{runner: runner, cancel: cancel, done: done}
 
 	log := slog.Default().With("pool", key.name, "namespace", key.namespace)
 	log.Info("poolmanager: starting reconciler")
@@ -130,6 +133,7 @@ func (m *Manager) StartReconciler(spec *poolmgrv1alpha1.PoolSpec) error {
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
+		defer close(done)
 		if err := runner.Run(childCtx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Error("poolmanager: reconciler exited unexpectedly", "error", err)
 			m.metrics.RecordReconcilerUnexpectedExit(key.name, key.namespace)
@@ -140,8 +144,33 @@ func (m *Manager) StartReconciler(spec *poolmgrv1alpha1.PoolSpec) error {
 
 // StopReconciler cancels and forgets the reconciler for (name, namespace),
 // if one is running. It does not wait for the reconciler's goroutine to
-// exit - see Run for the shutdown path that does.
+// exit - see StopReconcilerAndWait, and Run for the shutdown path.
 func (m *Manager) StopReconciler(name, namespace string) {
+	m.cancelAndForget(name, namespace)
+}
+
+// StopReconcilerAndWait cancels and forgets the reconciler for (name,
+// namespace) like StopReconciler, then waits for its goroutine to exit, so
+// that on a nil return nothing is still provisioning for the pool. It
+// returns ctx.Err() if ctx is done first; the reconciler stays cancelled and
+// forgotten either way. A no-op returning nil if none is running.
+func (m *Manager) StopReconcilerAndWait(ctx context.Context, name, namespace string) error {
+	h, ok := m.cancelAndForget(name, namespace)
+	if !ok {
+		return nil
+	}
+
+	select {
+	case <-h.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// cancelAndForget removes the handle for (name, namespace) and cancels its
+// reconciler, returning the handle if there was one.
+func (m *Manager) cancelAndForget(name, namespace string) (*reconcilerHandle, bool) {
 	key := poolKey{name: name, namespace: namespace}
 
 	m.mu.Lock()
@@ -155,6 +184,7 @@ func (m *Manager) StopReconciler(name, namespace string) {
 		slog.Info("poolmanager: stopping reconciler", "pool", name, "namespace", namespace)
 		h.cancel()
 	}
+	return h, ok
 }
 
 // Running reports whether a reconciler for (name, namespace) is currently

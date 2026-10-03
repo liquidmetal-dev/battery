@@ -28,6 +28,9 @@ type fakeRunner struct {
 	claimed   int
 	deleted   int
 	runErr    error
+	// exitGate, if set, holds Run open after its ctx is done until the gate
+	// is closed, standing in for a reconciler finishing in-flight work.
+	exitGate chan struct{}
 }
 
 func (f *fakeRunner) Run(ctx context.Context) error {
@@ -36,8 +39,12 @@ func (f *fakeRunner) Run(ctx context.Context) error {
 	f.mu.Lock()
 	f.cancelled = true
 	err := f.runErr
+	gate := f.exitGate
 	f.mu.Unlock()
 
+	if gate != nil {
+		<-gate
+	}
 	if err != nil {
 		return err
 	}
@@ -278,4 +285,72 @@ func TestManager_UnexpectedExit_RecordsMetric(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("timed out waiting for unexpected-exit metric")
+}
+
+func TestManager_StopReconcilerAndWait_WaitsForRunnerExit(t *testing.T) {
+	fakes := map[string]*fakeRunner{}
+	withFakeReconciler(t, fakes)
+
+	m := New(context.Background(), nil, nil, nil)
+	if err := m.StartReconciler(testPool("pool-a")); err != nil {
+		t.Fatalf("StartReconciler: %v", err)
+	}
+	gate := make(chan struct{})
+	fakes["pool-a"].mu.Lock()
+	fakes["pool-a"].exitGate = gate
+	fakes["pool-a"].mu.Unlock()
+
+	done := make(chan error, 1)
+	go func() { done <- m.StopReconcilerAndWait(context.Background(), "pool-a", "default") }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("StopReconcilerAndWait returned (err=%v) before the runner exited", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if m.Running("pool-a", "default") {
+		t.Fatal("expected pool-a to be forgotten while its runner is still exiting")
+	}
+
+	close(gate)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("StopReconcilerAndWait() error = %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for StopReconcilerAndWait to return")
+	}
+}
+
+func TestManager_StopReconcilerAndWait_ContextExpires(t *testing.T) {
+	fakes := map[string]*fakeRunner{}
+	withFakeReconciler(t, fakes)
+
+	m := New(context.Background(), nil, nil, nil)
+	if err := m.StartReconciler(testPool("pool-a")); err != nil {
+		t.Fatalf("StartReconciler: %v", err)
+	}
+	gate := make(chan struct{})
+	t.Cleanup(func() { close(gate) })
+	fakes["pool-a"].mu.Lock()
+	fakes["pool-a"].exitGate = gate
+	fakes["pool-a"].mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	err := m.StopReconcilerAndWait(ctx, "pool-a", "default")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("StopReconcilerAndWait() error = %v, want context.DeadlineExceeded", err)
+	}
+}
+
+func TestManager_StopReconcilerAndWait_UnknownPoolIsNoop(t *testing.T) {
+	m := New(context.Background(), nil, nil, nil)
+
+	if err := m.StopReconcilerAndWait(context.Background(), "does-not-exist", "default"); err != nil {
+		t.Fatalf("StopReconcilerAndWait() error = %v, want nil", err)
+	}
 }
