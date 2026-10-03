@@ -218,9 +218,15 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 	if err := p.store.CreateVM(ctx, vm); err != nil {
 		// No VMRecord was persisted, so there's nothing to quarantine and
 		// hook_failure_policy doesn't apply: best-effort delete the
-		// now-orphaned microvm before returning, regardless of policy.
+		// now-orphaned microvm before returning, regardless of policy. As in
+		// ApplyHookFailurePolicy, this runs detached from ctx: a cancelled
+		// ctx (the reconciler stopped because its pool was updated or
+		// deleted) is a likely reason CreateVM failed at all, and the delete
+		// would fail on it too, leaving the microvm running with no record.
 		log.WarnContext(ctx, "reconciler: CreateVM failed, deleting orphaned microvm", "error", err)
-		_, _ = client.DeleteMicroVM(ctx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: uid})
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hookFailureCleanupTimeout)
+		_, _ = client.DeleteMicroVM(cleanupCtx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: uid})
+		cancel()
 		return fmt.Errorf("reconciler: provision: CreateVM: %w", err)
 	}
 	// The vms row now stands in for the reservation; release it here rather
