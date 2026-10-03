@@ -24,8 +24,14 @@ var ErrMinSizeRequired = errors.New("reconciler: MIN_SIZE_THRESHOLD requires a p
 // VMCounts summarizes a pool's current VM population by phase, as needed by
 // a Strategy to decide how many new VMs to provision. Quarantined VMs are
 // tracked separately because they never count toward Available.
+//
+// Claiming is VMs a ClaimVM has reserved but not yet committed a lease for;
+// Leased is only those whose lease is committed. They are kept apart because
+// a pending claim can still hand its VM back to AVAILABLE, so a strategy
+// that doesn't count leased VMs toward its target must still count these.
 type VMCounts struct {
 	Available    int
+	Claiming     int
 	Leased       int
 	Provisioning int
 	Quarantined  int
@@ -71,13 +77,15 @@ func NewStrategy(spec *poolmgrv1alpha1.ReplenishmentStrategy) (Strategy, error) 
 }
 
 // immediateOnLease keeps size warm VMs: leased VMs don't count, since each
-// claim adds a VM on top of the warm set rather than drawing it down. A
-// claim triggers the top-up immediately; the tick repeats it, so a fresh
-// pool (nothing to claim yet) fills and a failed provision is retried.
+// claim adds a VM on top of the warm set rather than drawing it down. A VM
+// whose claim is still pending does count: it is only replaced once its
+// lease commits, or it would become a surplus VM if the claim handed it
+// back. A claim triggers the top-up immediately; the tick repeats it, so a
+// fresh pool (nothing to claim yet) fills and a failed provision is retried.
 type immediateOnLease struct{}
 
 func (immediateOnLease) shortfall(pool *poolmgrv1alpha1.PoolSpec, counts VMCounts) int {
-	return max(0, int(pool.GetSize())-(counts.Available+counts.Provisioning))
+	return max(0, int(pool.GetSize())-(counts.Available+counts.Claiming+counts.Provisioning))
 }
 
 func (s immediateOnLease) DesiredNewVMs(pool *poolmgrv1alpha1.PoolSpec, counts VMCounts) int {
@@ -102,7 +110,7 @@ func (minSizeThreshold) DesiredNewVMs(pool *poolmgrv1alpha1.PoolSpec, counts VMC
 		return 0
 	}
 
-	inFlight := counts.Available + counts.Leased + counts.Provisioning
+	inFlight := counts.Available + counts.Claiming + counts.Leased + counts.Provisioning
 	need := int(pool.GetSize()) - inFlight
 	if need < 0 {
 		return 0
@@ -120,7 +128,7 @@ func (minSizeThreshold) OnVMDeleted(*poolmgrv1alpha1.PoolSpec, VMCounts) int { r
 type replaceOnDelete struct{}
 
 func (replaceOnDelete) shortfall(pool *poolmgrv1alpha1.PoolSpec, counts VMCounts) int {
-	return max(0, int(pool.GetSize())-(counts.Available+counts.Leased+counts.Provisioning))
+	return max(0, int(pool.GetSize())-(counts.Available+counts.Claiming+counts.Leased+counts.Provisioning))
 }
 
 func (s replaceOnDelete) DesiredNewVMs(pool *poolmgrv1alpha1.PoolSpec, counts VMCounts) int {

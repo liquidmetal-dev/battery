@@ -107,8 +107,11 @@ func TestReconciler_MinSizeThreshold_CountsPreLeaseHookRunningAsInFlight(t *test
 	}
 }
 
-// seedAvailableVMs creates the pool in st along with n AVAILABLE VMs, so a
-// starting reconciler has nothing to provision.
+// seedAvailableVMs creates the pool in st along with n AVAILABLE VMs named
+// seed-0..seed-(n-1), so a starting reconciler has nothing to provision. The
+// uids deliberately don't use the fake flintlock's "vm-N" scheme: its
+// counter is shared by the whole test binary, so a test run on its own
+// would otherwise be handed a uid that is already seeded.
 func seedAvailableVMs(t *testing.T, st store.Store, pool *poolmgrv1alpha1.PoolSpec, n int) {
 	t.Helper()
 	ctx := context.Background()
@@ -116,7 +119,7 @@ func seedAvailableVMs(t *testing.T, st store.Store, pool *poolmgrv1alpha1.PoolSp
 		t.Fatalf("CreatePool: %v", err)
 	}
 	for i := range n {
-		v := sampleVM(fmt.Sprintf("vm-%d", i), pool.GetName(), "host-a", poolmgrv1alpha1.VMPhase_AVAILABLE)
+		v := sampleVM(fmt.Sprintf("seed-%d", i), pool.GetName(), "host-a", poolmgrv1alpha1.VMPhase_AVAILABLE)
 		if err := st.CreateVM(ctx, v); err != nil {
 			t.Fatalf("CreateVM(%s): %v", v.GetUid(), err)
 		}
@@ -248,7 +251,7 @@ func TestReconciler_ImmediateOnLease_ClaimNotificationReplenishes(t *testing.T) 
 		t.Fatalf("expected 2 VMs before any claim, got %d", got)
 	}
 
-	leaseVM(t, st, "vm-0", "pool-a")
+	leaseVM(t, st, "seed-0", "pool-a")
 	r.NotifyVMClaimed()
 	waitForAvailable(t, st, "pool-a", 2, 2*time.Second)
 	if got := len(onlyVMsInPool(t, st, "pool-a")); got != 3 {
@@ -281,7 +284,7 @@ func TestReconciler_ReplaceOnDelete_DeleteNotificationReplenishes(t *testing.T) 
 	// Two deletions that reach the reconciler as a single notification, as
 	// happens when the second lands while the first is still pending: both
 	// have to be replaced.
-	for _, uid := range []string{"vm-0", "vm-1"} {
+	for _, uid := range []string{"seed-0", "seed-1"} {
 		if err := st.DeleteVM(context.Background(), uid); err != nil {
 			t.Fatalf("DeleteVM(%s): %v", uid, err)
 		}
@@ -309,7 +312,7 @@ func TestReconciler_ImmediateOnLease_TickAndNotificationDoNotOvershoot(t *testin
 	defer cancel()
 	go func() { _ = r.Run(ctx) }()
 
-	leaseVM(t, st, "vm-0", "pool-a")
+	leaseVM(t, st, "seed-0", "pool-a")
 	waitForAvailable(t, st, "pool-a", 2, 2*time.Second)
 	r.NotifyVMClaimed()
 
@@ -319,10 +322,67 @@ func TestReconciler_ImmediateOnLease_TickAndNotificationDoNotOvershoot(t *testin
 	}
 }
 
-// leaseVM flips an existing VM to LEASED, standing in for a ClaimVM.
+// A claim that hasn't committed its lease yet can still be handed back (see
+// api.LeaseServer.yieldClaim), so it must keep counting toward the warm set:
+// replacing it early would leave a surplus VM when it returns to AVAILABLE.
+func TestReconciler_ImmediateOnLease_PendingClaimIsNotReplaced(t *testing.T) {
+	vm := &fakeMicroVM{}
+	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE, 2, []string{"host-a"})
+	seedAvailableVMs(t, st, pool, 2)
+
+	r, err := reconciler.New(pool, st, flint, 10*time.Millisecond, fastProvisionConfig(), nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = r.Run(runCtx) }()
+
+	// Two ClaimVM calls racing on one request_id each reserve a VM: one is
+	// still running its pre-lease hook, the other has finished it but has
+	// no lease yet (the state store.ClaimAvailableVM leaves a VM in).
+	for uid, phase := range map[string]poolmgrv1alpha1.VMPhase{
+		"seed-0": poolmgrv1alpha1.VMPhase_PRE_LEASE_HOOK_RUNNING,
+		"seed-1": poolmgrv1alpha1.VMPhase_LEASED,
+	} {
+		if err := st.UpdateVM(ctx, sampleVM(uid, "pool-a", "host-a", phase)); err != nil {
+			t.Fatalf("UpdateVM(%s): %v", uid, err)
+		}
+	}
+
+	// Give several ticks a chance to (wrongly) replace the pending claims.
+	time.Sleep(50 * time.Millisecond)
+	if got := len(onlyVMsInPool(t, st, "pool-a")); got != 2 {
+		t.Fatalf("expected no replacement while both claims are pending, got %d VMs", got)
+	}
+
+	// One claim wins and commits its lease; the loser yields its VM.
+	leaseVM(t, st, "seed-0", "pool-a")
+	if err := st.UpdateVM(ctx, sampleVM("seed-1", "pool-a", "host-a", poolmgrv1alpha1.VMPhase_AVAILABLE)); err != nil {
+		t.Fatalf("UpdateVM(seed-1): %v", err)
+	}
+	r.NotifyVMClaimed()
+
+	waitForAvailable(t, st, "pool-a", 2, 2*time.Second)
+	time.Sleep(50 * time.Millisecond)
+	if got := len(onlyVMsInPool(t, st, "pool-a")); got != 3 {
+		t.Fatalf("expected 3 VMs (1 leased, 2 warm), got %d", got)
+	}
+}
+
+// leaseVM flips an existing VM to LEASED with a lease id, standing in for a
+// ClaimVM that has committed its lease.
 func leaseVM(t *testing.T, st store.Store, uid, poolName string) {
 	t.Helper()
-	if err := st.UpdateVM(context.Background(), sampleVM(uid, poolName, "host-a", poolmgrv1alpha1.VMPhase_LEASED)); err != nil {
+	vm := sampleVM(uid, poolName, "host-a", poolmgrv1alpha1.VMPhase_LEASED)
+	leaseID := "lease-" + uid
+	vm.LeaseId = &leaseID
+	if err := st.UpdateVM(context.Background(), vm); err != nil {
 		t.Fatalf("UpdateVM(%s): %v", uid, err)
 	}
 }
@@ -415,7 +475,7 @@ func TestReconciler_StaticNetwork_ShrunkPoolReplacesOnlyTheLastVM(t *testing.T) 
 	defer cancel()
 	go func() { _ = r.Run(runCtx) }()
 
-	if err := st.DeleteVM(ctx, "vm-0"); err != nil {
+	if err := st.DeleteVM(ctx, "seed-0"); err != nil {
 		t.Fatalf("DeleteVM: %v", err)
 	}
 	r.NotifyVMDeleted()
@@ -424,7 +484,7 @@ func TestReconciler_StaticNetwork_ShrunkPoolReplacesOnlyTheLastVM(t *testing.T) 
 		t.Fatalf("expected no replacement while another VM remains, got %d VMs", got)
 	}
 
-	if err := st.DeleteVM(ctx, "vm-1"); err != nil {
+	if err := st.DeleteVM(ctx, "seed-1"); err != nil {
 		t.Fatalf("DeleteVM: %v", err)
 	}
 	r.NotifyVMDeleted()

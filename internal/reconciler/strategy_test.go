@@ -70,11 +70,14 @@ func TestEventDrivenStrategies(t *testing.T) {
 	}{
 		{"immediate: empty pool fills to size", immediate, reconciler.VMCounts{}, 5, 5, 0},
 		{"immediate: leased VMs don't count", immediate, reconciler.VMCounts{Available: 2, Leased: 2, Provisioning: 1}, 2, 2, 0},
+		{"immediate: pending claims count as warm", immediate, reconciler.VMCounts{Available: 3, Claiming: 2}, 0, 0, 0},
+		{"immediate: committed leases don't count as warm", immediate, reconciler.VMCounts{Available: 3, Leased: 2}, 2, 2, 0},
 		{"immediate: at size", immediate, reconciler.VMCounts{Available: 5}, 0, 0, 0},
 		{"immediate: over size", immediate, reconciler.VMCounts{Available: 4, Provisioning: 3}, 0, 0, 0},
 		{"immediate: quarantined VMs don't count", immediate, reconciler.VMCounts{Available: 1, Quarantined: 3}, 4, 4, 0},
 		{"replace: empty pool fills to size", replace, reconciler.VMCounts{}, 5, 0, 5},
 		{"replace: leased VMs count", replace, reconciler.VMCounts{Available: 2, Leased: 2, Provisioning: 1}, 0, 0, 0},
+		{"replace: pending claims count", replace, reconciler.VMCounts{Available: 2, Claiming: 2, Provisioning: 1}, 0, 0, 0},
 		{"replace: one short", replace, reconciler.VMCounts{Available: 2, Leased: 2}, 1, 0, 1},
 		{"replace: over size", replace, reconciler.VMCounts{Available: 4, Leased: 3}, 0, 0, 0},
 		{"replace: quarantined VMs don't count", replace, reconciler.VMCounts{Leased: 1, Quarantined: 3}, 4, 0, 4},
@@ -134,6 +137,13 @@ func TestMinSizeThreshold_DesiredNewVMs(t *testing.T) {
 			size:    5,
 			minSize: 4,
 			counts:  reconciler.VMCounts{Available: 1, Leased: 2, Provisioning: 1},
+			want:    1,
+		},
+		{
+			name:    "pending claims count toward in-flight total",
+			size:    5,
+			minSize: 4,
+			counts:  reconciler.VMCounts{Available: 1, Claiming: 2, Provisioning: 1},
 			want:    1,
 		},
 		{

@@ -151,12 +151,20 @@ func CountVMs(ctx context.Context, st store.Store, poolName, poolNamespace strin
 		switch vm.GetPhase() {
 		case poolmgrv1alpha1.VMPhase_AVAILABLE:
 			counts.Available++
-		case poolmgrv1alpha1.VMPhase_LEASED, poolmgrv1alpha1.VMPhase_PRE_LEASE_HOOK_RUNNING:
-			// PRE_LEASE_HOOK_RUNNING is a transient phase before a VM is
-			// handed to a consumer: it's already claimed in all but name,
-			// so it must count toward Leased or MIN_SIZE_THRESHOLD would
-			// see it as neither available nor in-flight and over-provision.
-			counts.Leased++
+		case poolmgrv1alpha1.VMPhase_PRE_LEASE_HOOK_RUNNING:
+			// A transient phase before a VM is handed to a consumer. It
+			// must be counted somewhere, or MIN_SIZE_THRESHOLD would see it
+			// as neither available nor in-flight and over-provision.
+			counts.Claiming++
+		case poolmgrv1alpha1.VMPhase_LEASED:
+			// store.ClaimAvailableVM marks a VM LEASED before ClaimVM has a
+			// lease for it; the lease id is only set once the pre-lease
+			// hooks pass. Until then the claim is still pending.
+			if vm.GetLeaseId() == "" {
+				counts.Claiming++
+			} else {
+				counts.Leased++
+			}
 		case poolmgrv1alpha1.VMPhase_PROVISIONING, poolmgrv1alpha1.VMPhase_CREATE_HOOK_RUNNING:
 			counts.Provisioning++
 		case poolmgrv1alpha1.VMPhase_QUARANTINED:
