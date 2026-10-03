@@ -94,9 +94,29 @@ func NewLeaseServer(st store.Store, flint *flintlockclient.Pool, cfg HookExecCon
 // accepts, in bytes.
 const maxRequestIDLength = 255
 
+// errVMDeleted is returned by runPreLeaseHooks when the claim's VM was
+// deleted underneath it (see vmDeleted).
+var errVMDeleted = errors.New("vm deleted during claim")
+
+// vmDeleted reports whether err, from a store write to a claim's VM, means
+// the VM was deleted underneath the claim: it is DELETING, which the store
+// won't move it out of, or its row is already gone. Today only a forced
+// DeletePool does that to a VM being claimed. The deleter owns the VM from
+// then on, so the claim must not apply the hook failure policy to it.
+func vmDeleted(err error) bool {
+	return errors.Is(err, store.ErrVMDeleting) || errors.Is(err, store.ErrNotFound)
+}
+
+// claimAborted is ClaimVM's answer when vmDeleted: a retry gets NOT_FOUND
+// for a deleted pool, or another VM.
+func claimAborted(vm *poolmgrv1alpha1.VMRecord) error {
+	return status.Errorf(codes.Aborted, "vm %s was deleted during the claim, retry", vm.GetUid())
+}
+
 // ClaimVM atomically claims an AVAILABLE VM from the named pool, runs the
 // pool's pre_lease_commands, and creates a Lease. It fails with
-// RESOURCE_EXHAUSTED when no VM is AVAILABLE.
+// RESOURCE_EXHAUSTED when no VM is AVAILABLE, and with ABORTED if the VM it
+// claimed is deleted before the lease is created.
 //
 // If req.request_id is set and a lease created with it still exists,
 // ClaimVM returns that lease again instead of claiming another VM (see
@@ -139,6 +159,9 @@ func (s *LeaseServer) ClaimVM(ctx context.Context, req *poolmgrv1alpha1.ClaimVMR
 	// no corresponding lease.
 
 	if err := s.runPreLeaseHooks(ctx, pool, vm); err != nil {
+		if errors.Is(err, errVMDeleted) {
+			return nil, claimAborted(vm)
+		}
 		return nil, status.Errorf(codes.Internal, "pre-lease hook: %v", err)
 	}
 
@@ -149,10 +172,6 @@ func (s *LeaseServer) ClaimVM(ctx context.Context, req *poolmgrv1alpha1.ClaimVMR
 	vm.Phase = poolmgrv1alpha1.VMPhase_LEASED
 	vm.LeaseId = &leaseID
 	vm.UpdatedAt = timestamppb.New(now)
-	if err := s.store.UpdateVM(ctx, vm); err != nil {
-		s.applyHookFailurePolicy(ctx, pool, vm)
-		return nil, status.Errorf(codes.Internal, "update vm to leased: %v", err)
-	}
 
 	lease := &poolmgrv1alpha1.LeaseRecord{
 		LeaseId:         leaseID,
@@ -164,12 +183,17 @@ func (s *LeaseServer) ClaimVM(ctx context.Context, req *poolmgrv1alpha1.ClaimVMR
 		ExpiresAt:       timestamppb.New(expiresAt),
 		RequestId:       requestID,
 	}
-	if err := s.store.CreateLease(ctx, lease); err != nil {
+	// The VM's move to LEASED and the lease row commit together, so a pool
+	// delete either lands first and fails the claim, or finds the lease.
+	if err := s.store.LeaseVM(ctx, vm, lease); err != nil {
 		if errors.Is(err, store.ErrDuplicateRequestID) {
 			return s.yieldClaim(ctx, pool, vm, requestID)
 		}
+		if vmDeleted(err) {
+			return nil, claimAborted(vm)
+		}
 		s.applyHookFailurePolicy(ctx, pool, vm)
-		return nil, status.Errorf(codes.Internal, "create lease: %v", err)
+		return nil, status.Errorf(codes.Internal, "lease vm: %v", err)
 	}
 
 	reconciler.EmitEvent(ctx, s.store, pool, vm.GetUid(), poolmgrv1alpha1.EventType_VM_CLAIMED)
@@ -226,6 +250,9 @@ func (s *LeaseServer) yieldClaim(ctx context.Context, pool *poolmgrv1alpha1.Pool
 	vm.LeaseId = nil
 	vm.UpdatedAt = timestamppb.Now()
 	if err := s.store.UpdateVM(cleanupCtx, vm); err != nil {
+		if vmDeleted(err) {
+			return nil, claimAborted(vm)
+		}
 		s.applyHookFailurePolicy(ctx, pool, vm)
 		return nil, status.Errorf(codes.Internal, "return vm to available: %v", err)
 	}
@@ -274,11 +301,16 @@ func (s *LeaseServer) claimResponse(ctx context.Context, leaseID string, vm *poo
 // pool.GetPreLeaseCommands() via the VM's flintlock exec client, mirroring
 // reconciler.Provisioner.Provision's create-command loop. On any failure it
 // applies pool.HookFailurePolicy (which also emits VM_HOOK_FAILED) and
-// returns a wrapped error; no lease is created in that case.
+// returns a wrapped error; no lease is created in that case. The exception
+// is a VM deleted before the hooks start: it returns errVMDeleted and leaves
+// the VM to its deleter.
 func (s *LeaseServer) runPreLeaseHooks(ctx context.Context, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord) error {
 	vm.Phase = poolmgrv1alpha1.VMPhase_PRE_LEASE_HOOK_RUNNING
 	vm.UpdatedAt = timestamppb.Now()
 	if err := s.store.UpdateVM(ctx, vm); err != nil {
+		if vmDeleted(err) {
+			return fmt.Errorf("%w: %w", errVMDeleted, err)
+		}
 		s.applyHookFailurePolicy(ctx, pool, vm)
 		return fmt.Errorf("update vm phase: %w", err)
 	}
@@ -363,6 +395,10 @@ func (s *LeaseServer) Heartbeat(ctx context.Context, req *poolmgrv1alpha1.Heartb
 // Unavailable rather than reporting success or dropping the lease row - the
 // Sweeper's pending-deletion retry (or a client retry of ReleaseVM) finishes
 // the job once flintlock is reachable again.
+//
+// A release can race the delete of its pool, which proceeds without force
+// once the VM is DELETING, or the Sweeper's retry of this VM's deletion.
+// Whichever of them removes the VM, the release succeeds.
 func (s *LeaseServer) ReleaseVM(ctx context.Context, req *poolmgrv1alpha1.ReleaseVMRequest) (*emptypb.Empty, error) {
 	lease, err := s.store.GetLease(ctx, req.GetLeaseId())
 	if errors.Is(err, store.ErrNotFound) {
@@ -378,19 +414,42 @@ func (s *LeaseServer) ReleaseVM(ctx context.Context, req *poolmgrv1alpha1.Releas
 	}
 
 	if vm != nil {
-		if err := reconciler.EnsureVMDeleted(ctx, s.store, s.flint, vm); err != nil {
+		poolExists, err := reconciler.EnsureVMDeletedCheckingPool(ctx, s.store, s.flint, vm)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			// Someone else removed the VM row first: the Sweeper's
+			// pending-deletion retry, or the delete of this VM's pool.
+			_, perr := s.store.GetPool(ctx, lease.GetPoolName(), lease.GetPoolNamespace())
+			if perr == nil {
+				// The pool is still there, so it was the Sweeper, which is
+				// about to call FinishVMDeletion. Leave it the lease row,
+				// which is how it tells this release from an expiry, and
+				// the notification.
+				return &emptypb.Empty{}, nil
+			}
+			if !errors.Is(perr, store.ErrNotFound) {
+				return nil, status.Errorf(codes.Internal, "get pool: %v", perr)
+			}
+			// The pool's delete accounted for the VM. Fall through.
+		case err != nil:
 			return nil, status.Errorf(codes.Unavailable, "vm cleanup pending, retry later: %v", err)
+		case poolExists:
+			// This release removed the VM row while its pool still existed,
+			// so no DeletePool saw the VM and the deletion is this
+			// release's to record - even if the pool is deleted from here
+			// on, which is why the pool isn't looked up again.
+			pool := &poolmgrv1alpha1.PoolSpec{Name: lease.GetPoolName(), Namespace: lease.GetPoolNamespace()}
+			reconciler.FinishVMRelease(ctx, s.store, pool, vm, lease, s.notifier, s.metrics)
+			return &emptypb.Empty{}, nil
+		default:
+			// The pool's delete committed before the VM row was removed:
+			// it emitted this VM's event and removed the lease. Fall through.
 		}
-		pool, perr := s.store.GetPool(ctx, lease.GetPoolName(), lease.GetPoolNamespace())
-		if perr != nil {
-			return nil, status.Errorf(codes.Internal, "get pool: %v", perr)
-		}
-		reconciler.FinishVMDeletion(ctx, s.store, pool, vm, s.notifier, s.metrics)
-		return &emptypb.Empty{}, nil
 	}
 
-	// VM record already gone (a previous attempt already finished the
-	// deletion): just make sure the lease row is gone too, for idempotency.
+	// VM record already gone (a previous attempt, or the delete of the pool,
+	// finished the deletion): just make sure the lease row is gone too, for
+	// idempotency.
 	if err := s.store.DeleteLease(ctx, req.GetLeaseId()); err != nil && !errors.Is(err, store.ErrNotFound) {
 		return nil, status.Errorf(codes.Internal, "delete lease: %v", err)
 	}

@@ -563,7 +563,7 @@ func TestClaimVM_ReplayVMDeleting(t *testing.T) {
 	}
 }
 
-// racingCreateLeaseStore wraps a store.Store and, on the first CreateLease
+// racingCreateLeaseStore wraps a store.Store and, on the first LeaseVM
 // with a request_id, first claims another VM and commits a lease for it
 // with the same request_id. This reproduces two ClaimVMs with one
 // request_id that both passed the lookup, with the other one winning.
@@ -574,11 +574,11 @@ type racingCreateLeaseStore struct {
 	winnerLease *poolmgrv1alpha1.LeaseRecord
 }
 
-func (s *racingCreateLeaseStore) CreateLease(ctx context.Context, l *poolmgrv1alpha1.LeaseRecord) error {
+func (s *racingCreateLeaseStore) LeaseVM(ctx context.Context, v *poolmgrv1alpha1.VMRecord, l *poolmgrv1alpha1.LeaseRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if l.GetRequestId() == "" || s.winnerLease != nil {
-		return s.Store.CreateLease(ctx, l)
+		return s.Store.LeaseVM(ctx, v, l)
 	}
 
 	vm, err := s.ClaimAvailableVM(ctx, l.GetPoolName(), l.GetPoolNamespace())
@@ -592,11 +592,11 @@ func (s *racingCreateLeaseStore) CreateLease(ctx context.Context, l *poolmgrv1al
 	if err := s.UpdateVM(ctx, vm); err != nil {
 		return fmt.Errorf("racer: update vm: %w", err)
 	}
-	if err := s.Store.CreateLease(ctx, winner); err != nil {
+	if err := s.CreateLease(ctx, winner); err != nil {
 		return fmt.Errorf("racer: create lease: %w", err)
 	}
 	s.winnerLease = winner
-	return s.Store.CreateLease(ctx, l)
+	return s.Store.LeaseVM(ctx, v, l)
 }
 
 func TestClaimVM_ConcurrentDuplicateRequestID(t *testing.T) {
@@ -1003,5 +1003,357 @@ func TestListLeases_StoreError(t *testing.T) {
 	_, err := s.ListLeases(ctx, &poolmgrv1alpha1.ListLeasesRequest{})
 	if status.Code(err) != codes.Internal {
 		t.Fatalf("expected Internal, got %v", err)
+	}
+}
+
+// forceDeletePool commits the tombstone of a forced DeletePool for poolName
+// (in "default"): the pool row and its leases go, its VMs turn DELETING.
+func forceDeletePool(t *testing.T, st store.Store, poolName string) {
+	t.Helper()
+	if _, err := st.DeletePoolAndMarkVMs(context.Background(), poolName, "default", true); err != nil {
+		t.Errorf("DeletePoolAndMarkVMs(%s): %v", poolName, err)
+	}
+}
+
+// assertClaimLeftNothing fails the test if a claim on poolName that lost
+// its VM to a pool delete left a lease, an event or a notification behind.
+func assertClaimLeftNothing(t *testing.T, st store.Store, poolName string, notifier *spyNotifier) {
+	t.Helper()
+	ctx := context.Background()
+	leases, err := st.ListLeases(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListLeases: %v", err)
+	}
+	if len(leases) != 0 {
+		t.Fatalf("expected no lease, got %+v", leases)
+	}
+	events, err := st.ListEventsSince(ctx, poolName, "default", 0, 100)
+	if err != nil {
+		t.Fatalf("ListEventsSince: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected no events, got %+v", events)
+	}
+	if len(notifier.claimed) != 0 || len(notifier.deleted) != 0 {
+		t.Fatalf("expected no notifications, got claimed=%v deleted=%v", notifier.claimed, notifier.deleted)
+	}
+}
+
+// TestClaimVM_PoolForceDeletedDuringHook reproduces a forced DeletePool
+// committing its tombstone while a claim's pre-lease hook runs, with the
+// VM's flintlock delete still pending: the claim must fail and leave the VM
+// DELETING rather than flip it back to LEASED.
+func TestClaimVM_PoolForceDeletedDuringHook(t *testing.T) {
+	st := openTestStore(t)
+	exec := &fakeMicroVMExec{
+		respond: func(*microvmexecv1alpha1.ExecStart) (int32, string) {
+			forceDeletePool(t, st, "pool-a")
+			return 0, ""
+		},
+	}
+	flint := startFakeFlintlock(t, &fakeMicroVM{}, exec)
+	setupPoolWithVMs(t, st, samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, []string{"do-thing"}), "vm-1")
+
+	notifier := &spyNotifier{}
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, notifier, nil)
+	_, err := s.ClaimVM(context.Background(), claimRequest("pool-a", "req-1"))
+	if status.Code(err) != codes.Aborted {
+		t.Fatalf("expected Aborted, got %v", err)
+	}
+
+	assertVMPhase(t, st, "vm-1", poolmgrv1alpha1.VMPhase_DELETING)
+	assertClaimLeftNothing(t, st, "pool-a", notifier)
+}
+
+// TestClaimVM_PoolForceDeletedDuringHook_VMGone is the same race with the
+// pool delete's flintlock delete already finished, so the VM row is gone:
+// the claim must not create a lease for it.
+func TestClaimVM_PoolForceDeletedDuringHook_VMGone(t *testing.T) {
+	st := openTestStore(t)
+	exec := &fakeMicroVMExec{
+		respond: func(*microvmexecv1alpha1.ExecStart) (int32, string) {
+			forceDeletePool(t, st, "pool-a")
+			if err := st.DeleteVM(context.Background(), "vm-1"); err != nil {
+				t.Errorf("DeleteVM: %v", err)
+			}
+			return 0, ""
+		},
+	}
+	flint := startFakeFlintlock(t, &fakeMicroVM{}, exec)
+	setupPoolWithVMs(t, st, samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, []string{"do-thing"}), "vm-1")
+
+	notifier := &spyNotifier{}
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, notifier, nil)
+	_, err := s.ClaimVM(context.Background(), claimRequest("pool-a", "req-1"))
+	if status.Code(err) != codes.Aborted {
+		t.Fatalf("expected Aborted, got %v", err)
+	}
+
+	if _, err := st.GetVM(context.Background(), "vm-1"); err != store.ErrNotFound {
+		t.Fatalf("expected the VM row to stay deleted, GetVM error = %v", err)
+	}
+	assertClaimLeftNothing(t, st, "pool-a", notifier)
+}
+
+// deletePoolAfterClaimStore wraps a store.Store and commits a forced pool
+// delete right after ClaimAvailableVM succeeds, before the claim's first
+// write to the VM.
+type deletePoolAfterClaimStore struct {
+	store.Store
+	t *testing.T
+}
+
+func (s deletePoolAfterClaimStore) ClaimAvailableVM(ctx context.Context, poolName, poolNamespace string) (*poolmgrv1alpha1.VMRecord, error) {
+	vm, err := s.Store.ClaimAvailableVM(ctx, poolName, poolNamespace)
+	if err == nil {
+		forceDeletePool(s.t, s.Store, poolName)
+	}
+	return vm, err
+}
+
+func TestClaimVM_PoolForceDeletedBeforeHook(t *testing.T) {
+	st := openTestStore(t)
+	var hookRuns atomic.Int32
+	exec := &fakeMicroVMExec{
+		respond: func(*microvmexecv1alpha1.ExecStart) (int32, string) {
+			hookRuns.Add(1)
+			return 0, ""
+		},
+	}
+	flint := startFakeFlintlock(t, &fakeMicroVM{}, exec)
+	setupPoolWithVMs(t, st, samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, []string{"do-thing"}), "vm-1")
+
+	notifier := &spyNotifier{}
+	s := api.NewLeaseServer(deletePoolAfterClaimStore{Store: st, t: t}, flint, api.HookExecConfig{}, notifier, nil)
+	_, err := s.ClaimVM(context.Background(), claimRequest("pool-a", ""))
+	if status.Code(err) != codes.Aborted {
+		t.Fatalf("expected Aborted, got %v", err)
+	}
+
+	if n := hookRuns.Load(); n != 0 {
+		t.Fatalf("expected no pre-lease hook to run on a deleted VM, got %d", n)
+	}
+	assertVMPhase(t, st, "vm-1", poolmgrv1alpha1.VMPhase_DELETING)
+	assertClaimLeftNothing(t, st, "pool-a", notifier)
+}
+
+// TestClaimVM_HookFailsAfterPoolForceDeleted covers the likeliest shape of
+// the race: the pool delete takes the microVM away mid-hook, so the hook
+// fails. Under QUARANTINE the VM must stay DELETING for the Sweeper, not be
+// parked QUARANTINED in a pool that no longer exists.
+func TestClaimVM_HookFailsAfterPoolForceDeleted(t *testing.T) {
+	st := openTestStore(t)
+	exec := &fakeMicroVMExec{
+		respond: func(*microvmexecv1alpha1.ExecStart) (int32, string) {
+			forceDeletePool(t, st, "pool-a")
+			return 1, ""
+		},
+	}
+	flint := startFakeFlintlock(t, &fakeMicroVM{}, exec)
+	setupPoolWithVMs(t, st, samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, []string{"do-thing"}), "vm-1")
+
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil, nil)
+	if _, err := s.ClaimVM(context.Background(), claimRequest("pool-a", "")); err == nil {
+		t.Fatalf("expected ClaimVM to fail")
+	}
+
+	assertVMPhase(t, st, "vm-1", poolmgrv1alpha1.VMPhase_DELETING)
+}
+
+// deletePoolOnLeaseStore wraps a store.Store and makes LeaseVM lose a
+// request_id race (as racingCreateLeaseStore arranges for real) after a
+// forced pool delete has taken the claim's VM, so yieldClaim runs against a
+// DELETING VM.
+type deletePoolOnLeaseStore struct {
+	store.Store
+	t *testing.T
+}
+
+func (s deletePoolOnLeaseStore) LeaseVM(_ context.Context, v *poolmgrv1alpha1.VMRecord, _ *poolmgrv1alpha1.LeaseRecord) error {
+	forceDeletePool(s.t, s.Store, v.GetPoolName())
+	return store.ErrDuplicateRequestID
+}
+
+func TestClaimVM_YieldAfterPoolForceDeleted(t *testing.T) {
+	st := openTestStore(t)
+	flint := startFakeFlintlock(t, &fakeMicroVM{}, &fakeMicroVMExec{})
+	setupPoolWithVMs(t, st, samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil), "vm-1")
+
+	notifier := &spyNotifier{}
+	s := api.NewLeaseServer(deletePoolOnLeaseStore{Store: st, t: t}, flint, api.HookExecConfig{}, notifier, nil)
+	_, err := s.ClaimVM(context.Background(), claimRequest("pool-a", "req-1"))
+	if status.Code(err) != codes.Aborted {
+		t.Fatalf("expected Aborted, got %v", err)
+	}
+
+	assertVMPhase(t, st, "vm-1", poolmgrv1alpha1.VMPhase_DELETING)
+	assertClaimLeftNothing(t, st, "pool-a", notifier)
+}
+
+// claimForRelease sets up pool-a with vm-1, claims it through s, and returns
+// the lease id.
+func claimForRelease(t *testing.T, st store.Store, s *api.LeaseServer) string {
+	t.Helper()
+	setupPoolWithVMs(t, st, samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil), "vm-1")
+	resp, err := s.ClaimVM(context.Background(), claimRequest("pool-a", ""))
+	if err != nil {
+		t.Fatalf("ClaimVM: %v", err)
+	}
+	return resp.GetLeaseId()
+}
+
+// TestReleaseVM_PoolDeleteRemovesVMFirst reproduces a DeletePool finishing
+// the VM's deletion while ReleaseVM's own flintlock delete is in flight:
+// the cleanup happened, so the release must succeed.
+func TestReleaseVM_PoolDeleteRemovesVMFirst(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	vm := &fakeMicroVM{}
+	flint := startFakeFlintlock(t, vm, &fakeMicroVMExec{})
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil, nil)
+	leaseID := claimForRelease(t, st, s)
+
+	vm.mu.Lock()
+	vm.onDelete = func(uid string) {
+		if _, err := st.DeletePoolAndMarkVMs(ctx, "pool-a", "default", false); err != nil {
+			t.Errorf("DeletePoolAndMarkVMs: %v", err)
+		}
+		if err := st.DeleteVM(ctx, uid); err != nil {
+			t.Errorf("DeleteVM: %v", err)
+		}
+	}
+	vm.mu.Unlock()
+
+	if _, err := s.ReleaseVM(ctx, &poolmgrv1alpha1.ReleaseVMRequest{LeaseId: leaseID}); err != nil {
+		t.Fatalf("ReleaseVM: %v", err)
+	}
+	if _, err := st.GetLease(ctx, leaseID); err != store.ErrNotFound {
+		t.Fatalf("expected lease to be deleted, GetLease error = %v", err)
+	}
+}
+
+// TestReleaseVM_PoolDeletedAfterVMDelete reproduces a DeletePool committing
+// its tombstone while ReleaseVM's flintlock delete is in flight, leaving the
+// VM row for ReleaseVM to remove: the pool is gone by the time ReleaseVM
+// looks it up, and the release must still succeed.
+func TestReleaseVM_PoolDeletedAfterVMDelete(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	vm := &fakeMicroVM{}
+	flint := startFakeFlintlock(t, vm, &fakeMicroVMExec{})
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, nil, nil)
+	leaseID := claimForRelease(t, st, s)
+
+	vm.mu.Lock()
+	vm.onDelete = func(string) {
+		if _, err := st.DeletePoolAndMarkVMs(ctx, "pool-a", "default", false); err != nil {
+			t.Errorf("DeletePoolAndMarkVMs: %v", err)
+		}
+	}
+	vm.mu.Unlock()
+
+	if _, err := s.ReleaseVM(ctx, &poolmgrv1alpha1.ReleaseVMRequest{LeaseId: leaseID}); err != nil {
+		t.Fatalf("ReleaseVM: %v", err)
+	}
+	if _, err := st.GetVM(ctx, "vm-1"); err != store.ErrNotFound {
+		t.Fatalf("expected VM record to be deleted, GetVM error = %v", err)
+	}
+	if _, err := st.GetLease(ctx, leaseID); err != store.ErrNotFound {
+		t.Fatalf("expected lease to be deleted, GetLease error = %v", err)
+	}
+
+	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
+	if err != nil {
+		t.Fatalf("ListEventsSince: %v", err)
+	}
+	if len(events) != 1 || events[0].GetType() != poolmgrv1alpha1.EventType_VM_CLAIMED {
+		t.Fatalf("expected only the VM_CLAIMED event, got %+v", events)
+	}
+}
+
+// TestReleaseVM_SweeperRemovesVMFirst reproduces the Sweeper's pending-
+// deletion retry deleting the VM row while ReleaseVM's own flintlock delete
+// is in flight, in a pool that still exists. The Sweeper goes on to finish
+// the deletion and tells a release from an expiry by the lease row, so
+// ReleaseVM must succeed without taking that row, or the notification, from
+// it.
+func TestReleaseVM_SweeperRemovesVMFirst(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	vm := &fakeMicroVM{}
+	flint := startFakeFlintlock(t, vm, &fakeMicroVMExec{})
+	notifier := &spyNotifier{}
+	s := api.NewLeaseServer(st, flint, api.HookExecConfig{}, notifier, nil)
+	leaseID := claimForRelease(t, st, s)
+
+	vm.mu.Lock()
+	vm.onDelete = func(uid string) {
+		if err := st.DeleteVM(ctx, uid); err != nil {
+			t.Errorf("DeleteVM: %v", err)
+		}
+	}
+	vm.mu.Unlock()
+
+	if _, err := s.ReleaseVM(ctx, &poolmgrv1alpha1.ReleaseVMRequest{LeaseId: leaseID}); err != nil {
+		t.Fatalf("ReleaseVM: %v", err)
+	}
+	if _, err := st.GetLease(ctx, leaseID); err != nil {
+		t.Fatalf("expected the lease row to be left for the Sweeper, GetLease error = %v", err)
+	}
+	if len(notifier.deleted) != 0 {
+		t.Fatalf("expected the notification to be left to the Sweeper, got %v", notifier.deleted)
+	}
+}
+
+// deletePoolAfterVMDeleteStore wraps a store.Store and commits a pool delete
+// right after a VM row is removed, the narrowest point at which a DeletePool
+// can follow a release: the pool's delete no longer sees the VM.
+type deletePoolAfterVMDeleteStore struct {
+	store.Store
+	t *testing.T
+}
+
+func (s deletePoolAfterVMDeleteStore) DeleteVMCheckingPool(ctx context.Context, uid string) (bool, error) {
+	exists, err := s.Store.DeleteVMCheckingPool(ctx, uid)
+	if err == nil {
+		if _, derr := s.DeletePoolAndMarkVMs(ctx, "pool-a", "default", false); derr != nil {
+			s.t.Errorf("DeletePoolAndMarkVMs: %v", derr)
+		}
+	}
+	return exists, err
+}
+
+// TestReleaseVM_PoolDeletedRightAfterVMRowRemoved reproduces a DeletePool
+// committing just after ReleaseVM removed the VM row. The pool's delete
+// never saw the VM, so it emits nothing for it: the release must still
+// record the deletion, although the pool and the lease row are gone by then.
+func TestReleaseVM_PoolDeletedRightAfterVMRowRemoved(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	flint := startFakeFlintlock(t, &fakeMicroVM{}, &fakeMicroVMExec{})
+	notifier := &spyNotifier{}
+	reg := metrics.NewRegistry()
+	s := api.NewLeaseServer(deletePoolAfterVMDeleteStore{Store: st, t: t}, flint, api.HookExecConfig{}, notifier, reg)
+	leaseID := claimForRelease(t, st, s)
+
+	if _, err := s.ReleaseVM(ctx, &poolmgrv1alpha1.ReleaseVMRequest{LeaseId: leaseID}); err != nil {
+		t.Fatalf("ReleaseVM: %v", err)
+	}
+
+	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
+	if err != nil {
+		t.Fatalf("ListEventsSince: %v", err)
+	}
+	if len(events) != 2 || events[0].GetType() != poolmgrv1alpha1.EventType_VM_CLAIMED || events[1].GetType() != poolmgrv1alpha1.EventType_VM_DELETED_ON_RELEASE {
+		t.Fatalf("expected VM_CLAIMED then VM_DELETED_ON_RELEASE, got %+v", events)
+	}
+	if len(notifier.deleted) != 1 {
+		t.Fatalf("expected NotifyVMDeleted once, got %v", notifier.deleted)
+	}
+	if body := scrapeMetrics(t, reg); !strings.Contains(body, `poolmgr_vm_releases_total{pool_name="pool-a",pool_namespace="default",reason="api"} 1`) {
+		t.Fatalf("expected 1 api release recorded, got:\n%s", body)
+	}
+	if _, err := st.GetLease(ctx, leaseID); err != store.ErrNotFound {
+		t.Fatalf("expected lease to be deleted, GetLease error = %v", err)
 	}
 }
