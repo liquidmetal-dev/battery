@@ -28,8 +28,9 @@ const poolDeleteCleanupTimeout = 30 * time.Second
 type PoolLifecycle interface {
 	StartReconciler(spec *poolmgrv1alpha1.PoolSpec) error
 	StopReconciler(name, namespace string)
-	// StopReconcilerAndWait stops the pool's reconciler and waits for it to
-	// exit, so nothing is still provisioning for the pool on a nil return.
+	// StopReconcilerAndWait stops the pool's reconciler and waits for it,
+	// and any reconciler stopped earlier for the pool, to exit, so nothing is
+	// still provisioning for the pool on a nil return.
 	StopReconcilerAndWait(ctx context.Context, name, namespace string) error
 }
 
@@ -323,6 +324,12 @@ func (s *PoolAdminServer) DeletePool(ctx context.Context, req *poolmgrv1alpha1.D
 	case errors.Is(err, store.ErrNotFound):
 		log.WarnContext(ctx, "pooladmin: DeletePool failed: pool not found")
 		return nil, status.Errorf(codes.NotFound, "pool %s/%s not found", ns, name)
+	case err != nil && ctx.Err() != nil:
+		// The client went away or its deadline passed before the
+		// transaction committed; nothing was changed.
+		log.WarnContext(ctx, "pooladmin: DeletePool abandoned by caller", "error", err)
+		s.restartReconciler(ctx, log, spec)
+		return nil, status.FromContextError(ctx.Err()).Err()
 	case err != nil:
 		log.ErrorContext(ctx, "pooladmin: DeletePool: store delete failed", "error", err)
 		s.restartReconciler(ctx, log, spec)

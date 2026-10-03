@@ -749,16 +749,21 @@ func TestDeletePool_NilFlintlockLeavesVMsDeleting(t *testing.T) {
 
 // tombstoneHookStore wraps a store.Store to intercept DeletePoolAndMarkVMs.
 // If refuse is set the call returns that error without touching the store;
-// otherwise the real call runs and after is invoked once it has succeeded.
+// otherwise before (if set) runs, then the real call, and after is invoked
+// once it has succeeded.
 type tombstoneHookStore struct {
 	store.Store
 	refuse error
+	before func()
 	after  func()
 }
 
 func (h *tombstoneHookStore) DeletePoolAndMarkVMs(ctx context.Context, name, namespace string, force bool) ([]*poolmgrv1alpha1.VMRecord, error) {
 	if h.refuse != nil {
 		return nil, h.refuse
+	}
+	if h.before != nil {
+		h.before()
 	}
 	vms, err := h.Store.DeletePoolAndMarkVMs(ctx, name, namespace, force)
 	if err == nil && h.after != nil {
@@ -911,5 +916,36 @@ func TestDeletePool_HungHostDoesNotStarveOtherVMs(t *testing.T) {
 	}
 	if remaining, err := st.ListVMsByPool(ctx, "pool-a", "default", nil); err != nil || len(remaining) != 0 {
 		t.Errorf("VM rows left = %+v, err %v, want none", remaining, err)
+	}
+}
+
+// TestDeletePool_CancelledDuringTombstone_ReportsCancelled: a client that
+// goes away before the tombstone commits gets CANCELLED, not INTERNAL, and
+// the pool is left as it was with its reconciler running again.
+func TestDeletePool_CancelledDuringTombstone_ReportsCancelled(t *testing.T) {
+	st := openTestStore(t)
+	lifecycle := &fakePoolLifecycle{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hooked := &tombstoneHookStore{Store: st, before: cancel}
+	s := api.NewPoolAdminServer(hooked, nil, lifecycle)
+
+	spec := samplePool("pool-a", poolmgrv1alpha1.HookFailurePolicy_QUARANTINE, nil)
+	if _, err := s.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+
+	_, err := s.DeletePool(ctx, &poolmgrv1alpha1.DeletePoolRequest{Ref: poolARef})
+	if status.Code(err) != codes.Canceled {
+		t.Fatalf("DeletePool() error = %v, want Canceled", err)
+	}
+	if _, err := st.GetPool(context.Background(), "pool-a", "default"); err != nil {
+		t.Errorf("GetPool() error = %v, want the pool still present", err)
+	}
+
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
+	if len(lifecycle.started) != 2 {
+		t.Errorf("started = %v, want 2 entries (create, restart after the cancelled delete)", lifecycle.started)
 	}
 }
