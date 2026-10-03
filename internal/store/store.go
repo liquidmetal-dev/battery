@@ -61,6 +61,13 @@ type Store interface {
 	// ErrVMDeleting. Returns ErrNotFound if there is no such row.
 	UpdateVM(ctx context.Context, v *poolmgrv1alpha1.VMRecord) error
 	DeleteVM(ctx context.Context, uid string) error
+	// DeleteVMCheckingPool deletes the VM row as DeleteVM does and, in the same
+	// transaction, reports whether the VM's pool still exists. A caller that gets true
+	// removed the row before any DeletePoolAndMarkVMs for that pool committed, so that
+	// call never saw the VM and the caller must account for the deletion itself; one
+	// that gets false must leave that to the pool's delete, which marked the VM first.
+	// Returns ErrNotFound if there is no such row.
+	DeleteVMCheckingPool(ctx context.Context, uid string) (poolExists bool, err error)
 	// ClaimAvailableVM atomically selects one AVAILABLE VM in the pool identified by
 	// (poolName, poolNamespace) and marks it LEASED, returning the updated record.
 	// Returns ErrNoAvailableVM if no VM in the pool is currently AVAILABLE.

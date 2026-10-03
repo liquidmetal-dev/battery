@@ -435,6 +435,34 @@ func (s *sqliteStore) DeleteVM(ctx context.Context, uid string) error {
 	return checkRowsAffected(res)
 }
 
+func (s *sqliteStore) DeleteVMCheckingPool(ctx context.Context, uid string) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("store: begin delete vm tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var poolName, poolNamespace string
+	err = tx.QueryRowContext(ctx, `DELETE FROM vms WHERE uid = ? RETURNING pool_name, pool_namespace`, uid).Scan(&poolName, &poolNamespace)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrNotFound
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: delete vm: %w", err)
+	}
+
+	var poolExists bool
+	err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pools WHERE name = ? AND namespace = ?)`, poolName, poolNamespace).Scan(&poolExists)
+	if err != nil {
+		return false, fmt.Errorf("store: query pool: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("store: commit delete vm tx: %w", err)
+	}
+	return poolExists, nil
+}
+
 func (s *sqliteStore) ClaimAvailableVM(ctx context.Context, poolName, poolNamespace string) (*poolmgrv1alpha1.VMRecord, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

@@ -423,32 +423,42 @@ type DeletionNotifier interface {
 // other flintlock/host error leaves vm in the DELETING phase for a later
 // retry (e.g. Sweeper's pending-deletion scan) and returns that error.
 func EnsureVMDeleted(ctx context.Context, st store.Store, flint *flintlockclient.Pool, vm *poolmgrv1alpha1.VMRecord) error {
+	_, err := EnsureVMDeletedCheckingPool(ctx, st, flint, vm)
+	return err
+}
+
+// EnsureVMDeletedCheckingPool is EnsureVMDeleted that also reports, on
+// success, whether vm's pool still existed at the moment its store row was
+// removed (see store.DeleteVMCheckingPool). ReleaseVM uses that to tell
+// whether it or a concurrent DeletePool accounts for the deletion.
+func EnsureVMDeletedCheckingPool(ctx context.Context, st store.Store, flint *flintlockclient.Pool, vm *poolmgrv1alpha1.VMRecord) (poolExists bool, err error) {
 	log := slog.Default().With("pool", vm.GetPoolName(), "namespace", vm.GetPoolNamespace(), "microvm_uid", vm.GetUid(), "flintlock_host", vm.GetFlintlockHost())
 
 	if vm.GetPhase() != poolmgrv1alpha1.VMPhase_DELETING {
 		vm.Phase = poolmgrv1alpha1.VMPhase_DELETING
 		vm.UpdatedAt = timestamppb.Now()
 		if err := st.UpdateVM(ctx, vm); err != nil {
-			return fmt.Errorf("reconciler: mark vm deleting: %w", err)
+			return false, fmt.Errorf("reconciler: mark vm deleting: %w", err)
 		}
 	}
 
 	client, err := flint.Client(vm.GetFlintlockHost())
 	if err != nil {
-		return fmt.Errorf("reconciler: ensure vm deleted: %w", err)
+		return false, fmt.Errorf("reconciler: ensure vm deleted: %w", err)
 	}
 
 	log.InfoContext(ctx, "reconciler: deleting microvm")
 	if _, err := client.DeleteMicroVM(ctx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: vm.GetUid()}); err != nil && status.Code(err) != codes.NotFound {
 		log.ErrorContext(ctx, "reconciler: DeleteMicroVM failed", "error", err)
-		return fmt.Errorf("reconciler: DeleteMicroVM: %w", err)
+		return false, fmt.Errorf("reconciler: DeleteMicroVM: %w", err)
 	}
 
-	if err := st.DeleteVM(ctx, vm.GetUid()); err != nil {
-		return fmt.Errorf("reconciler: delete vm record: %w", err)
+	poolExists, err = st.DeleteVMCheckingPool(ctx, vm.GetUid())
+	if err != nil {
+		return false, fmt.Errorf("reconciler: delete vm record: %w", err)
 	}
 	log.InfoContext(ctx, "reconciler: microvm deleted")
-	return nil
+	return poolExists, nil
 }
 
 // FinishVMDeletion completes the bookkeeping after EnsureVMDeleted has
@@ -469,18 +479,32 @@ func EnsureVMDeleted(ctx context.Context, st store.Store, flint *flintlockclient
 // DeleteLeaseIfExpired durably ends the lease - independent of how long
 // this function's caller took to actually finish deleting the VM.
 func FinishVMDeletion(ctx context.Context, st store.Store, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord, notifier DeletionNotifier, m *metrics.Registry) {
-	eventType := poolmgrv1alpha1.EventType_VM_DELETED_DUE_TO_EXPIRY
 	if leaseID := vm.GetLeaseId(); leaseID != "" {
 		if lease, err := st.GetLease(ctx, leaseID); err == nil {
-			eventType = poolmgrv1alpha1.EventType_VM_DELETED_ON_RELEASE
-			if m != nil {
-				m.RecordVMRelease(pool.GetName(), pool.GetNamespace(), "api")
-				m.ObserveLeaseDuration(pool.GetName(), pool.GetNamespace(), time.Since(lease.GetClaimedAt().AsTime()))
-			}
-			_ = st.DeleteLease(ctx, leaseID)
+			FinishVMRelease(ctx, st, pool, vm, lease, notifier, m)
+			return
 		}
 	}
-	EmitEvent(ctx, st, pool, vm.GetUid(), eventType)
+	EmitEvent(ctx, st, pool, vm.GetUid(), poolmgrv1alpha1.EventType_VM_DELETED_DUE_TO_EXPIRY)
+	if notifier != nil {
+		notifier.NotifyVMDeleted(pool.GetName(), pool.GetNamespace())
+	}
+}
+
+// FinishVMRelease is FinishVMDeletion for a deletion known to end lease by
+// release: it records the release metrics (m, nil-safe), deletes lease's row
+// if it is still there, emits VM_DELETED_ON_RELEASE and notifies notifier
+// (nil-safe). ReleaseVM calls it directly with the lease it already holds,
+// because a DeletePool committing after the VM's row was removed takes the
+// lease row with it, and FinishVMDeletion would then infer an expiry. Only
+// pool's name and namespace are used, so pool need not exist any more.
+func FinishVMRelease(ctx context.Context, st store.Store, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord, lease *poolmgrv1alpha1.LeaseRecord, notifier DeletionNotifier, m *metrics.Registry) {
+	if m != nil {
+		m.RecordVMRelease(pool.GetName(), pool.GetNamespace(), "api")
+		m.ObserveLeaseDuration(pool.GetName(), pool.GetNamespace(), time.Since(lease.GetClaimedAt().AsTime()))
+	}
+	_ = st.DeleteLease(ctx, lease.GetLeaseId())
+	EmitEvent(ctx, st, pool, vm.GetUid(), poolmgrv1alpha1.EventType_VM_DELETED_ON_RELEASE)
 	if notifier != nil {
 		notifier.NotifyVMDeleted(pool.GetName(), pool.GetNamespace())
 	}

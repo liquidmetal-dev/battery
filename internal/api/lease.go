@@ -414,30 +414,36 @@ func (s *LeaseServer) ReleaseVM(ctx context.Context, req *poolmgrv1alpha1.Releas
 	}
 
 	if vm != nil {
-		err := reconciler.EnsureVMDeleted(ctx, s.store, s.flint, vm)
-		// ErrNotFound means someone else removed the VM row first: the
-		// delete of this VM's pool, or the Sweeper's pending-deletion retry.
-		rowTaken := errors.Is(err, store.ErrNotFound)
-		if err != nil && !rowTaken {
-			return nil, status.Errorf(codes.Unavailable, "vm cleanup pending, retry later: %v", err)
-		}
-
-		pool, perr := s.store.GetPool(ctx, lease.GetPoolName(), lease.GetPoolNamespace())
+		poolExists, err := reconciler.EnsureVMDeletedCheckingPool(ctx, s.store, s.flint, vm)
 		switch {
-		case errors.Is(perr, store.ErrNotFound):
-			// The pool was deleted: DeletePool emitted this VM's event and
-			// removed the lease. Fall through.
-		case perr != nil:
-			return nil, status.Errorf(codes.Internal, "get pool: %v", perr)
-		case rowTaken:
-			// The pool is still there, so the Sweeper took the row and is
-			// about to call FinishVMDeletion. Leave it the lease row, which
-			// is how it tells this release from an expiry, and the
-			// notification.
+		case errors.Is(err, store.ErrNotFound):
+			// Someone else removed the VM row first: the Sweeper's
+			// pending-deletion retry, or the delete of this VM's pool.
+			_, perr := s.store.GetPool(ctx, lease.GetPoolName(), lease.GetPoolNamespace())
+			if perr == nil {
+				// The pool is still there, so it was the Sweeper, which is
+				// about to call FinishVMDeletion. Leave it the lease row,
+				// which is how it tells this release from an expiry, and
+				// the notification.
+				return &emptypb.Empty{}, nil
+			}
+			if !errors.Is(perr, store.ErrNotFound) {
+				return nil, status.Errorf(codes.Internal, "get pool: %v", perr)
+			}
+			// The pool's delete accounted for the VM. Fall through.
+		case err != nil:
+			return nil, status.Errorf(codes.Unavailable, "vm cleanup pending, retry later: %v", err)
+		case poolExists:
+			// This release removed the VM row while its pool still existed,
+			// so no DeletePool saw the VM and the deletion is this
+			// release's to record - even if the pool is deleted from here
+			// on, which is why the pool isn't looked up again.
+			pool := &poolmgrv1alpha1.PoolSpec{Name: lease.GetPoolName(), Namespace: lease.GetPoolNamespace()}
+			reconciler.FinishVMRelease(ctx, s.store, pool, vm, lease, s.notifier, s.metrics)
 			return &emptypb.Empty{}, nil
 		default:
-			reconciler.FinishVMDeletion(ctx, s.store, pool, vm, s.notifier, s.metrics)
-			return &emptypb.Empty{}, nil
+			// The pool's delete committed before the VM row was removed:
+			// it emitted this VM's event and removed the lease. Fall through.
 		}
 	}
 

@@ -1990,3 +1990,54 @@ func TestLeaseVMDuplicateRequestIDLeavesVMUntouched(t *testing.T) {
 		t.Errorf("GetLease(lease-1) error = %v, want ErrNotFound", err)
 	}
 }
+
+func TestDeleteVMCheckingPool(t *testing.T) {
+	tests := []struct {
+		name       string
+		createPool bool
+		wantExists bool
+	}{
+		{name: "pool exists", createPool: true, wantExists: true},
+		{name: "pool deleted", createPool: false, wantExists: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := openTestStore(t)
+			ctx := context.Background()
+
+			if tt.createPool {
+				if err := s.CreatePool(ctx, samplePoolSpec("pool-a")); err != nil {
+					t.Fatalf("CreatePool() error = %v", err)
+				}
+			}
+			// A pool of the same name in another namespace must not count.
+			other := samplePoolSpec("pool-a")
+			other.Namespace = "other"
+			if err := s.CreatePool(ctx, other); err != nil {
+				t.Fatalf("CreatePool(other) error = %v", err)
+			}
+			if err := s.CreateVM(ctx, sampleVMRecord("vm-1", "pool-a", "default", poolmgrv1alpha1.VMPhase_DELETING)); err != nil {
+				t.Fatalf("CreateVM() error = %v", err)
+			}
+
+			exists, err := s.DeleteVMCheckingPool(ctx, "vm-1")
+			if err != nil {
+				t.Fatalf("DeleteVMCheckingPool() error = %v", err)
+			}
+			if exists != tt.wantExists {
+				t.Errorf("DeleteVMCheckingPool() poolExists = %v, want %v", exists, tt.wantExists)
+			}
+			if _, err := s.GetVM(ctx, "vm-1"); err != ErrNotFound {
+				t.Errorf("GetVM() error = %v, want ErrNotFound", err)
+			}
+		})
+	}
+}
+
+func TestDeleteVMCheckingPoolNotFound(t *testing.T) {
+	s := openTestStore(t)
+
+	if _, err := s.DeleteVMCheckingPool(context.Background(), "missing"); err != ErrNotFound {
+		t.Errorf("DeleteVMCheckingPool() error = %v, want ErrNotFound", err)
+	}
+}

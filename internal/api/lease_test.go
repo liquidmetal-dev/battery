@@ -1304,3 +1304,56 @@ func TestReleaseVM_SweeperRemovesVMFirst(t *testing.T) {
 		t.Fatalf("expected the notification to be left to the Sweeper, got %v", notifier.deleted)
 	}
 }
+
+// deletePoolAfterVMDeleteStore wraps a store.Store and commits a pool delete
+// right after a VM row is removed, the narrowest point at which a DeletePool
+// can follow a release: the pool's delete no longer sees the VM.
+type deletePoolAfterVMDeleteStore struct {
+	store.Store
+	t *testing.T
+}
+
+func (s deletePoolAfterVMDeleteStore) DeleteVMCheckingPool(ctx context.Context, uid string) (bool, error) {
+	exists, err := s.Store.DeleteVMCheckingPool(ctx, uid)
+	if err == nil {
+		if _, derr := s.DeletePoolAndMarkVMs(ctx, "pool-a", "default", false); derr != nil {
+			s.t.Errorf("DeletePoolAndMarkVMs: %v", derr)
+		}
+	}
+	return exists, err
+}
+
+// TestReleaseVM_PoolDeletedRightAfterVMRowRemoved reproduces a DeletePool
+// committing just after ReleaseVM removed the VM row. The pool's delete
+// never saw the VM, so it emits nothing for it: the release must still
+// record the deletion, although the pool and the lease row are gone by then.
+func TestReleaseVM_PoolDeletedRightAfterVMRowRemoved(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	flint := startFakeFlintlock(t, &fakeMicroVM{}, &fakeMicroVMExec{})
+	notifier := &spyNotifier{}
+	reg := metrics.NewRegistry()
+	s := api.NewLeaseServer(deletePoolAfterVMDeleteStore{Store: st, t: t}, flint, api.HookExecConfig{}, notifier, reg)
+	leaseID := claimForRelease(t, st, s)
+
+	if _, err := s.ReleaseVM(ctx, &poolmgrv1alpha1.ReleaseVMRequest{LeaseId: leaseID}); err != nil {
+		t.Fatalf("ReleaseVM: %v", err)
+	}
+
+	events, err := st.ListEventsSince(ctx, "pool-a", "default", 0, 100)
+	if err != nil {
+		t.Fatalf("ListEventsSince: %v", err)
+	}
+	if len(events) != 2 || events[0].GetType() != poolmgrv1alpha1.EventType_VM_CLAIMED || events[1].GetType() != poolmgrv1alpha1.EventType_VM_DELETED_ON_RELEASE {
+		t.Fatalf("expected VM_CLAIMED then VM_DELETED_ON_RELEASE, got %+v", events)
+	}
+	if len(notifier.deleted) != 1 {
+		t.Fatalf("expected NotifyVMDeleted once, got %v", notifier.deleted)
+	}
+	if body := scrapeMetrics(t, reg); !strings.Contains(body, `poolmgr_vm_releases_total{pool_name="pool-a",pool_namespace="default",reason="api"} 1`) {
+		t.Fatalf("expected 1 api release recorded, got:\n%s", body)
+	}
+	if _, err := st.GetLease(ctx, leaseID); err != store.ErrNotFound {
+		t.Fatalf("expected lease to be deleted, GetLease error = %v", err)
+	}
+}
