@@ -92,7 +92,8 @@ type vmCounts struct {
 	quarantined  int
 }
 
-// countVMs mirrors internal/reconciler.CountVMs's phase breakdown.
+// countVMs mirrors internal/reconciler.CountVMs's phase breakdown, with its
+// Claiming and Leased counts both reported as leased.
 func countVMs(ctx context.Context, st store.Store, poolName, poolNamespace string) (vmCounts, error) {
 	vms, err := st.ListVMsByPool(ctx, poolName, poolNamespace, nil)
 	if err != nil {

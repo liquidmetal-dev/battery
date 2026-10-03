@@ -221,8 +221,8 @@ See the [idempotent claims ADR](../adr/2026-09-24-idempotent-claims.md).
    pool's `pre_lease_commands` via the guest-agent client (state → `PRE_LEASE_HOOK_RUNNING`),
    then transitions to `LEASED`, creates a `Lease` row, emits `VMClaimed`, decrements
    available count.
-   - If `IMMEDIATE_ON_LEASE` strategy: reconciler is nudged immediately to provision one
-     replacement VM.
+   - If `IMMEDIATE_ON_LEASE` strategy: reconciler is nudged immediately to top the warm set
+     back up to `size`.
 2. Consumer periodically calls `Heartbeat(lease_id)`; updates `last_heartbeat_at`/`expires_at`.
 3. Release happens via:
    - explicit `ReleaseVM(lease_id)` call, or
@@ -230,22 +230,40 @@ See the [idempotent claims ADR](../adr/2026-09-24-idempotent-claims.md).
    Either path: emit `VMExpiringSoon` (sweeper path, fired once, before the deadline — window
    configurable) → then on actual expiry/release, delete the VM via flintlock, emit
    `VMDeletedOnRelease`/`VMDeletedOnExpiry`, delete the `Lease` row.
-   - If `REPLACE_ON_DELETE` strategy: reconciler provisions a replacement immediately.
+   - If `REPLACE_ON_DELETE` strategy: reconciler is nudged immediately to top the pool back
+     up to `size` VMs in total.
 
 ## Replenishment Strategies
 
-- `IMMEDIATE_ON_LEASE`: on every successful claim, immediately start provisioning one new VM.
+- `IMMEDIATE_ON_LEASE`: keep `size` available VMs, leased VMs being extra. Every successful
+  claim immediately triggers a top-up.
 - `MIN_SIZE_THRESHOLD`: reconciler loop checks available count against `min_size`; when below,
   provisions up to `size`.
-- `REPLACE_ON_DELETE`: on every VM deletion (expiry, release-triggered, or hook failure), start
-  provisioning exactly one replacement.
+- `REPLACE_ON_DELETE`: keep `size` VMs in total, leased included. Every VM deletion (expiry,
+  release-triggered, or hook failure) immediately triggers a top-up.
 
-The two event-driven strategies (`IMMEDIATE_ON_LEASE`, `REPLACE_ON_DELETE`) would otherwise never
-fill a fresh, empty pool: nothing can be claimed or deleted, so nothing triggers replenishment.
-Each time a pool's reconciler starts (manager startup, `CreatePool`, `UpdatePool`) it therefore
-tops the pool up to `size` once — `size` available VMs for `IMMEDIATE_ON_LEASE` (leased VMs are
-extra), `size` VMs in total for `REPLACE_ON_DELETE`. `MIN_SIZE_THRESHOLD` needs no seed; its tick
-already does this.
+All three strategies are level-triggered: when a pool's reconciler starts (manager startup,
+`CreatePool`, `UpdatePool`) and on every tick, it counts the pool's VMs and provisions the whole
+shortfall against the strategy's target, rather than a fixed number per event. This is what fills
+a fresh, empty pool, where nothing can be claimed or deleted yet, and what recovers a pool after
+a provision fails or every host was cordoned: the next tick finds the pool still short and tries
+again.
+
+The two event-driven strategies also run that same top-up on a notification, a claim for
+`IMMEDIATE_ON_LEASE` and a delete for `REPLACE_ON_DELETE`, so it happens sooner than the next
+tick. Several notifications coalescing into one therefore lose nothing. `MIN_SIZE_THRESHOLD`
+ignores notifications and acts only at start and on ticks.
+
+A VM whose claim is still in progress (its pre-lease hook is running, or its lease isn't
+committed yet) counts toward every strategy's total, including the warm set of
+`IMMEDIATE_ON_LEASE`: it is replaced only once the lease commits, since until then the claim can
+still hand the VM back. A claim can't stay in progress across a restart: on startup, before any
+reconciler runs, the manager marks every VM that is claimed with no lease for deletion, so a
+claim abandoned by a crash doesn't hold a place in the pool forever.
+
+A VM in `DELETING` counts toward no strategy's total, so a `REPLACE_ON_DELETE` tick can start the
+replacement before the old VM's deletion completes. A failing provision is retried on every tick
+with no backoff.
 
 All strategies share the same provisioning pipeline: `CreateMicroVM` (flintlock) → poll
 `GetMicroVM` until `CREATED` with a non-empty `vsock_path` → guest-agent `WaitReady` → run

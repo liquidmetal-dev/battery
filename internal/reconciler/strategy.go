@@ -24,31 +24,36 @@ var ErrMinSizeRequired = errors.New("reconciler: MIN_SIZE_THRESHOLD requires a p
 // VMCounts summarizes a pool's current VM population by phase, as needed by
 // a Strategy to decide how many new VMs to provision. Quarantined VMs are
 // tracked separately because they never count toward Available.
+//
+// Claiming is VMs a ClaimVM has reserved but not yet committed a lease for;
+// Leased is only those whose lease row exists. They are kept apart because
+// a pending claim can still hand its VM back to AVAILABLE, so a strategy
+// that doesn't count leased VMs toward its target must still count these.
 type VMCounts struct {
 	Available    int
+	Claiming     int
 	Leased       int
 	Provisioning int
 	Quarantined  int
 }
 
 // Strategy decides how many new VMs a pool's reconciler should start
-// provisioning: once when the reconciler starts, on a periodic tick, or in
+// provisioning: when the reconciler starts and on every periodic tick, or in
 // response to a claim/delete event. Each pool uses exactly one Strategy,
-// selected by its ReplenishmentStrategyType; the other hooks return 0 for a
-// strategy that doesn't act on that trigger.
+// selected by its ReplenishmentStrategyType. Every hook is level-triggered:
+// it returns the pool's current shortfall given counts, never a fixed
+// per-event amount, so a provision that failed or an event that was
+// coalesced away is made up by whichever hook runs next. A hook returns 0
+// for a trigger its strategy doesn't act on.
 type Strategy interface {
-	// InitialNewVMs is evaluated once when a reconciler starts, before any
-	// tick or event, so an event-driven pool that has never been filled
-	// (or lost VMs while no reconciler ran) isn't left unable to serve the
-	// claim/delete that would trigger its replenishment.
-	InitialNewVMs(pool *poolmgrv1alpha1.PoolSpec, counts VMCounts) int
-	// DesiredNewVMs is evaluated on every reconcile tick.
+	// DesiredNewVMs is evaluated when a reconciler starts and on every
+	// reconcile tick.
 	DesiredNewVMs(pool *poolmgrv1alpha1.PoolSpec, counts VMCounts) int
-	// OnVMClaimed is called once per successful claim.
-	OnVMClaimed(pool *poolmgrv1alpha1.PoolSpec) int
-	// OnVMDeleted is called once per VM deletion (expiry, release, or a
+	// OnVMClaimed is evaluated after a successful claim.
+	OnVMClaimed(pool *poolmgrv1alpha1.PoolSpec, counts VMCounts) int
+	// OnVMDeleted is evaluated after a VM deletion (expiry, release, or a
 	// DELETE_AND_REPLACE hook failure).
-	OnVMDeleted(pool *poolmgrv1alpha1.PoolSpec) int
+	OnVMDeleted(pool *poolmgrv1alpha1.PoolSpec, counts VMCounts) int
 }
 
 // NewStrategy returns the Strategy implementation for spec.Type.
@@ -71,20 +76,27 @@ func NewStrategy(spec *poolmgrv1alpha1.ReplenishmentStrategy) (Strategy, error) 
 	}
 }
 
-// immediateOnLease starts provisioning one new VM on every successful
-// claim; it doesn't act on ticks or deletions. On start it tops the pool up
-// to size warm VMs: leased VMs don't count, since each claim adds a VM on
-// top of the warm set rather than drawing it down. Without this a fresh
-// pool has nothing to claim, so it would never replenish.
+// immediateOnLease keeps size warm VMs: leased VMs don't count, since each
+// claim adds a VM on top of the warm set rather than drawing it down. A VM
+// whose claim is still pending does count: it is only replaced once its
+// lease commits, or it would become a surplus VM if the claim handed it
+// back. A claim triggers the top-up immediately; the tick repeats it, so a
+// fresh pool (nothing to claim yet) fills and a failed provision is retried.
 type immediateOnLease struct{}
 
-func (immediateOnLease) InitialNewVMs(pool *poolmgrv1alpha1.PoolSpec, counts VMCounts) int {
-	return max(0, int(pool.GetSize())-(counts.Available+counts.Provisioning))
+func (immediateOnLease) shortfall(pool *poolmgrv1alpha1.PoolSpec, counts VMCounts) int {
+	return max(0, int(pool.GetSize())-(counts.Available+counts.Claiming+counts.Provisioning))
 }
 
-func (immediateOnLease) DesiredNewVMs(*poolmgrv1alpha1.PoolSpec, VMCounts) int { return 0 }
-func (immediateOnLease) OnVMClaimed(*poolmgrv1alpha1.PoolSpec) int             { return 1 }
-func (immediateOnLease) OnVMDeleted(*poolmgrv1alpha1.PoolSpec) int             { return 0 }
+func (s immediateOnLease) DesiredNewVMs(pool *poolmgrv1alpha1.PoolSpec, counts VMCounts) int {
+	return s.shortfall(pool, counts)
+}
+
+func (s immediateOnLease) OnVMClaimed(pool *poolmgrv1alpha1.PoolSpec, counts VMCounts) int {
+	return s.shortfall(pool, counts)
+}
+
+func (immediateOnLease) OnVMDeleted(*poolmgrv1alpha1.PoolSpec, VMCounts) int { return 0 }
 
 // minSizeThreshold tops the pool back up to its target size whenever the
 // available count drops below min_size. It doesn't act on claim/delete
@@ -92,16 +104,13 @@ func (immediateOnLease) OnVMDeleted(*poolmgrv1alpha1.PoolSpec) int             {
 // the next tick picks up.
 type minSizeThreshold struct{}
 
-// InitialNewVMs is a no-op: the first tick already tops the pool up.
-func (minSizeThreshold) InitialNewVMs(*poolmgrv1alpha1.PoolSpec, VMCounts) int { return 0 }
-
 func (minSizeThreshold) DesiredNewVMs(pool *poolmgrv1alpha1.PoolSpec, counts VMCounts) int {
 	minSize := pool.GetReplenishmentStrategy().GetMinSize()
 	if int32(counts.Available) >= minSize {
 		return 0
 	}
 
-	inFlight := counts.Available + counts.Leased + counts.Provisioning
+	inFlight := counts.Available + counts.Claiming + counts.Leased + counts.Provisioning
 	need := int(pool.GetSize()) - inFlight
 	if need < 0 {
 		return 0
@@ -109,19 +118,25 @@ func (minSizeThreshold) DesiredNewVMs(pool *poolmgrv1alpha1.PoolSpec, counts VMC
 	return need
 }
 
-func (minSizeThreshold) OnVMClaimed(*poolmgrv1alpha1.PoolSpec) int { return 0 }
-func (minSizeThreshold) OnVMDeleted(*poolmgrv1alpha1.PoolSpec) int { return 0 }
+func (minSizeThreshold) OnVMClaimed(*poolmgrv1alpha1.PoolSpec, VMCounts) int { return 0 }
+func (minSizeThreshold) OnVMDeleted(*poolmgrv1alpha1.PoolSpec, VMCounts) int { return 0 }
 
-// replaceOnDelete starts provisioning exactly one replacement on every VM
-// deletion; it doesn't act on ticks or claims. On start it tops the pool up
-// to size VMs in total (leased included), since a fresh pool has nothing to
-// delete and so would never replenish.
+// replaceOnDelete keeps size VMs in total (leased included), so a claim
+// doesn't replenish but a deletion does. A deletion triggers the top-up
+// immediately; the tick repeats it, so a fresh pool (nothing to delete yet)
+// fills and a failed provision is retried.
 type replaceOnDelete struct{}
 
-func (replaceOnDelete) InitialNewVMs(pool *poolmgrv1alpha1.PoolSpec, counts VMCounts) int {
-	return max(0, int(pool.GetSize())-(counts.Available+counts.Leased+counts.Provisioning))
+func (replaceOnDelete) shortfall(pool *poolmgrv1alpha1.PoolSpec, counts VMCounts) int {
+	return max(0, int(pool.GetSize())-(counts.Available+counts.Claiming+counts.Leased+counts.Provisioning))
 }
 
-func (replaceOnDelete) DesiredNewVMs(*poolmgrv1alpha1.PoolSpec, VMCounts) int { return 0 }
-func (replaceOnDelete) OnVMClaimed(*poolmgrv1alpha1.PoolSpec) int             { return 0 }
-func (replaceOnDelete) OnVMDeleted(*poolmgrv1alpha1.PoolSpec) int             { return 1 }
+func (s replaceOnDelete) DesiredNewVMs(pool *poolmgrv1alpha1.PoolSpec, counts VMCounts) int {
+	return s.shortfall(pool, counts)
+}
+
+func (replaceOnDelete) OnVMClaimed(*poolmgrv1alpha1.PoolSpec, VMCounts) int { return 0 }
+
+func (s replaceOnDelete) OnVMDeleted(pool *poolmgrv1alpha1.PoolSpec, counts VMCounts) int {
+	return s.shortfall(pool, counts)
+}

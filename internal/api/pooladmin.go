@@ -474,7 +474,7 @@ func (s *PoolAdminServer) getPool(ctx context.Context, name, namespace string) (
 func countsToStatus(c reconciler.VMCounts) *poolmgrv1alpha1.PoolStatus {
 	return &poolmgrv1alpha1.PoolStatus{
 		AvailableCount:    int32(c.Available),
-		LeasedCount:       int32(c.Leased),
+		LeasedCount:       int32(c.Claiming + c.Leased),
 		ProvisioningCount: int32(c.Provisioning),
 		QuarantinedCount:  int32(c.Quarantined),
 	}

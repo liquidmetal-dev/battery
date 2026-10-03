@@ -88,6 +88,15 @@ func main() {
 	if err := clearStalePlacements(ctx, st); err != nil {
 		fatal("poolmgrd: clear stale placements", err)
 	}
+	// Must run before any reconciler, the sweeper or the API server starts:
+	// see reconciler.RecoverAbandonedClaims.
+	recovered, err := reconciler.RecoverAbandonedClaims(ctx, st)
+	if err != nil {
+		fatal("poolmgrd: recover abandoned claims", err)
+	}
+	if recovered > 0 {
+		slog.Warn("poolmgrd: marked microvms left claimed with no lease for deletion", "count", recovered)
+	}
 
 	flint, err := flintlockclient.New(cfg)
 	if err != nil {

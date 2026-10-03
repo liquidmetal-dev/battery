@@ -55,39 +55,51 @@ func TestNewStrategy_MinSizeRequired(t *testing.T) {
 	}
 }
 
-func TestImmediateOnLease(t *testing.T) {
-	pool := poolWithStrategy(poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE, 5, 2)
-	s, err := reconciler.NewStrategy(pool.GetReplenishmentStrategy())
-	if err != nil {
-		t.Fatalf("NewStrategy: %v", err)
+func TestEventDrivenStrategies(t *testing.T) {
+	const (
+		immediate = poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE
+		replace   = poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE
+	)
+	tests := []struct {
+		name        string
+		strategy    poolmgrv1alpha1.ReplenishmentStrategyType
+		counts      reconciler.VMCounts
+		wantDesired int
+		wantClaimed int
+		wantDeleted int
+	}{
+		{"immediate: empty pool fills to size", immediate, reconciler.VMCounts{}, 5, 5, 0},
+		{"immediate: leased VMs don't count", immediate, reconciler.VMCounts{Available: 2, Leased: 2, Provisioning: 1}, 2, 2, 0},
+		{"immediate: pending claims count as warm", immediate, reconciler.VMCounts{Available: 3, Claiming: 2}, 0, 0, 0},
+		{"immediate: committed leases don't count as warm", immediate, reconciler.VMCounts{Available: 3, Leased: 2}, 2, 2, 0},
+		{"immediate: at size", immediate, reconciler.VMCounts{Available: 5}, 0, 0, 0},
+		{"immediate: over size", immediate, reconciler.VMCounts{Available: 4, Provisioning: 3}, 0, 0, 0},
+		{"immediate: quarantined VMs don't count", immediate, reconciler.VMCounts{Available: 1, Quarantined: 3}, 4, 4, 0},
+		{"replace: empty pool fills to size", replace, reconciler.VMCounts{}, 5, 0, 5},
+		{"replace: leased VMs count", replace, reconciler.VMCounts{Available: 2, Leased: 2, Provisioning: 1}, 0, 0, 0},
+		{"replace: pending claims count", replace, reconciler.VMCounts{Available: 2, Claiming: 2, Provisioning: 1}, 0, 0, 0},
+		{"replace: one short", replace, reconciler.VMCounts{Available: 2, Leased: 2}, 1, 0, 1},
+		{"replace: over size", replace, reconciler.VMCounts{Available: 4, Leased: 3}, 0, 0, 0},
+		{"replace: quarantined VMs don't count", replace, reconciler.VMCounts{Leased: 1, Quarantined: 3}, 4, 0, 4},
 	}
 
-	if got := s.DesiredNewVMs(pool, reconciler.VMCounts{}); got != 0 {
-		t.Errorf("DesiredNewVMs() = %d, want 0", got)
-	}
-	if got := s.OnVMClaimed(pool); got != 1 {
-		t.Errorf("OnVMClaimed() = %d, want 1", got)
-	}
-	if got := s.OnVMDeleted(pool); got != 0 {
-		t.Errorf("OnVMDeleted() = %d, want 0", got)
-	}
-}
-
-func TestReplaceOnDelete(t *testing.T) {
-	pool := poolWithStrategy(poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE, 5, 2)
-	s, err := reconciler.NewStrategy(pool.GetReplenishmentStrategy())
-	if err != nil {
-		t.Fatalf("NewStrategy: %v", err)
-	}
-
-	if got := s.DesiredNewVMs(pool, reconciler.VMCounts{}); got != 0 {
-		t.Errorf("DesiredNewVMs() = %d, want 0", got)
-	}
-	if got := s.OnVMClaimed(pool); got != 0 {
-		t.Errorf("OnVMClaimed() = %d, want 0", got)
-	}
-	if got := s.OnVMDeleted(pool); got != 1 {
-		t.Errorf("OnVMDeleted() = %d, want 1", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pool := poolWithStrategy(tt.strategy, 5, 2)
+			s, err := reconciler.NewStrategy(pool.GetReplenishmentStrategy())
+			if err != nil {
+				t.Fatalf("NewStrategy: %v", err)
+			}
+			if got := s.DesiredNewVMs(pool, tt.counts); got != tt.wantDesired {
+				t.Errorf("DesiredNewVMs() = %d, want %d", got, tt.wantDesired)
+			}
+			if got := s.OnVMClaimed(pool, tt.counts); got != tt.wantClaimed {
+				t.Errorf("OnVMClaimed() = %d, want %d", got, tt.wantClaimed)
+			}
+			if got := s.OnVMDeleted(pool, tt.counts); got != tt.wantDeleted {
+				t.Errorf("OnVMDeleted() = %d, want %d", got, tt.wantDeleted)
+			}
+		})
 	}
 }
 
@@ -128,6 +140,13 @@ func TestMinSizeThreshold_DesiredNewVMs(t *testing.T) {
 			want:    1,
 		},
 		{
+			name:    "pending claims count toward in-flight total",
+			size:    5,
+			minSize: 4,
+			counts:  reconciler.VMCounts{Available: 1, Claiming: 2, Provisioning: 1},
+			want:    1,
+		},
+		{
 			name:    "already at or above target size provisions nothing",
 			size:    3,
 			minSize: 4,
@@ -163,47 +182,10 @@ func TestMinSizeThreshold_EventsAreNoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStrategy: %v", err)
 	}
-	if got := s.OnVMClaimed(pool); got != 0 {
+	if got := s.OnVMClaimed(pool, reconciler.VMCounts{}); got != 0 {
 		t.Errorf("OnVMClaimed() = %d, want 0", got)
 	}
-	if got := s.OnVMDeleted(pool); got != 0 {
+	if got := s.OnVMDeleted(pool, reconciler.VMCounts{}); got != 0 {
 		t.Errorf("OnVMDeleted() = %d, want 0", got)
-	}
-}
-
-func TestInitialNewVMs(t *testing.T) {
-	const (
-		immediate = poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE
-		replace   = poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE
-		minSize   = poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD
-	)
-	tests := []struct {
-		name     string
-		strategy poolmgrv1alpha1.ReplenishmentStrategyType
-		counts   reconciler.VMCounts
-		want     int
-	}{
-		{"immediate: empty pool fills to size", immediate, reconciler.VMCounts{}, 5},
-		{"replace: empty pool fills to size", replace, reconciler.VMCounts{}, 5},
-		{"min size: tick handles it", minSize, reconciler.VMCounts{}, 0},
-		{"immediate: leased VMs don't count", immediate, reconciler.VMCounts{Available: 2, Leased: 2, Provisioning: 1}, 2},
-		{"replace: leased VMs count", replace, reconciler.VMCounts{Available: 2, Leased: 2, Provisioning: 1}, 0},
-		{"immediate: at size", immediate, reconciler.VMCounts{Available: 5}, 0},
-		{"replace: over size", replace, reconciler.VMCounts{Available: 4, Leased: 3}, 0},
-		{"immediate: quarantined VMs don't count", immediate, reconciler.VMCounts{Available: 1, Quarantined: 3}, 4},
-		{"replace: quarantined VMs don't count", replace, reconciler.VMCounts{Leased: 1, Quarantined: 3}, 4},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			pool := poolWithStrategy(tt.strategy, 5, 2)
-			s, err := reconciler.NewStrategy(pool.GetReplenishmentStrategy())
-			if err != nil {
-				t.Fatalf("NewStrategy: %v", err)
-			}
-			if got := s.InitialNewVMs(pool, tt.counts); got != tt.want {
-				t.Errorf("InitialNewVMs() = %d, want %d", got, tt.want)
-			}
-		})
 	}
 }

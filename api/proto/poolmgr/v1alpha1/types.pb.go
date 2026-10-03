@@ -32,12 +32,16 @@ const (
 	// a pool spec, so the server can reject a request that omits the field instead of silently
 	// defaulting to a real strategy.
 	ReplenishmentStrategyType_REPLENISHMENT_STRATEGY_TYPE_UNSPECIFIED ReplenishmentStrategyType = 0
-	// IMMEDIATE_ON_LEASE starts provisioning one new VM on every successful claim.
+	// IMMEDIATE_ON_LEASE keeps the pool's target size of warm VMs on top of any leased ones:
+	// every successful claim immediately starts provisioning a replacement. Any shortfall
+	// left over (e.g. a failed provision) is made up on the reconciler's next tick.
 	ReplenishmentStrategyType_IMMEDIATE_ON_LEASE ReplenishmentStrategyType = 1
 	// MIN_SIZE_THRESHOLD provisions up to the pool's target size whenever the available
 	// count drops below min_size.
 	ReplenishmentStrategyType_MIN_SIZE_THRESHOLD ReplenishmentStrategyType = 2
-	// REPLACE_ON_DELETE provisions exactly one replacement on every VM deletion.
+	// REPLACE_ON_DELETE keeps the pool's target size of VMs in total, leased included: every
+	// VM deletion immediately starts provisioning a replacement. Any shortfall left over
+	// (e.g. a failed provision) is made up on the reconciler's next tick.
 	ReplenishmentStrategyType_REPLACE_ON_DELETE ReplenishmentStrategyType = 3
 )
 

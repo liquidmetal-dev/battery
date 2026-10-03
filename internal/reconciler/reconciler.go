@@ -10,6 +10,7 @@ import (
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	flintlocktypes "github.com/liquidmetal-dev/flintlock/api/types"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/liquidmetal-dev/battery/internal/flintlockclient"
 	"github.com/liquidmetal-dev/battery/internal/metrics"
@@ -22,13 +23,15 @@ const DefaultTickInterval = 10 * time.Second
 
 // notifyBuffer is the size of the claimed/deleted notification channels.
 // Notifications are coalescing signals, not a queue of individual events:
-// a full buffer means a reconcile is already pending, so further
-// notifications before it runs are redundant.
+// a full buffer means a reconcile is already pending, and since that
+// reconcile provisions the pool's whole shortfall rather than one VM per
+// notification, further notifications before it runs are redundant.
 const notifyBuffer = 1
 
 // Reconciler runs the control loop for a single pool: once at start, on
-// every tick, and on every claim/delete notification, it asks the pool's
-// Strategy how many new VMs are needed and provisions them.
+// every tick, and on every claim/delete notification, it counts the pool's
+// VMs, asks the pool's Strategy how many new ones are needed and provisions
+// them.
 type Reconciler struct {
 	pool         *poolmgrv1alpha1.PoolSpec
 	store        store.Store
@@ -39,10 +42,6 @@ type Reconciler struct {
 
 	claimed chan struct{}
 	deleted chan struct{}
-
-	// seeded records whether the start-of-life top-up (see seed) has run.
-	// Only touched by the Run goroutine.
-	seeded bool
 }
 
 // New returns a Reconciler for pool. tickInterval <= 0 uses
@@ -92,9 +91,10 @@ func (r *Reconciler) NotifyVMDeleted() {
 }
 
 // Run drives the control loop until ctx is done, at which point it returns
-// ctx.Err(). It first seeds the pool (see seed), then each tick and each notification independently computes how
-// many VMs to provision and starts that many Provision calls concurrently;
-// one failed Provision is logged and does not stop the others or the loop.
+// ctx.Err(). At start, on each tick and on each notification it reconciles:
+// computes how many VMs to provision and starts that many Provision calls
+// concurrently; one failed Provision is logged and does not stop the others
+// or the loop, and the next reconcile retries it.
 func (r *Reconciler) Run(ctx context.Context) error {
 	ticker := time.NewTicker(r.tickInterval)
 	defer ticker.Stop()
@@ -102,47 +102,34 @@ func (r *Reconciler) Run(ctx context.Context) error {
 	r.log.InfoContext(ctx, "reconciler: started", "tick_interval", r.tickInterval)
 	defer r.log.InfoContext(ctx, "reconciler: stopped")
 
-	r.seed(ctx)
+	// Reconcile straight away rather than waiting out the first tick, so a
+	// fresh pool starts filling as soon as its reconciler does.
+	r.reconcile(ctx, r.strategy.DesiredNewVMs)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if !r.seeded {
-				r.seed(ctx)
-			}
-			counts, err := r.countVMs(ctx)
-			if err != nil {
-				r.log.ErrorContext(ctx, "reconciler: failed to count VMs", "error", err)
-				continue
-			}
-			r.provisionN(ctx, r.strategy.DesiredNewVMs(r.pool, counts))
+			r.reconcile(ctx, r.strategy.DesiredNewVMs)
 		case <-r.claimed:
-			r.provisionN(ctx, r.strategy.OnVMClaimed(r.pool))
+			r.reconcile(ctx, r.strategy.OnVMClaimed)
 		case <-r.deleted:
-			r.provisionN(ctx, r.strategy.OnVMDeleted(r.pool))
+			r.reconcile(ctx, r.strategy.OnVMDeleted)
 		}
 	}
 }
 
-// seed provisions the Strategy's InitialNewVMs once per Reconciler
-// lifetime, so an event-driven pool starting empty isn't deadlocked waiting
-// for a claim/delete that can never happen. If counting VMs fails, seeded
-// stays false and the next tick retries.
-func (r *Reconciler) seed(ctx context.Context) {
+// reconcile counts the pool's VMs and provisions however many desired, one
+// of the Strategy's hooks, asks for. If counting fails nothing is
+// provisioned; the next tick tries again.
+func (r *Reconciler) reconcile(ctx context.Context, desired func(*poolmgrv1alpha1.PoolSpec, VMCounts) int) {
 	counts, err := r.countVMs(ctx)
 	if err != nil {
-		r.log.ErrorContext(ctx, "reconciler: failed to count VMs for seeding", "error", err)
+		r.log.ErrorContext(ctx, "reconciler: failed to count VMs", "error", err)
 		return
 	}
-	r.seeded = true
-
-	n := r.strategy.InitialNewVMs(r.pool, counts)
-	if n > 0 {
-		r.log.InfoContext(ctx, "reconciler: seeding pool", "count", n)
-	}
-	r.provisionN(ctx, n)
+	r.provisionN(ctx, desired(r.pool, counts))
 }
 
 // countVMs summarizes the pool's current VMs into VMCounts.
@@ -159,18 +146,40 @@ func CountVMs(ctx context.Context, st store.Store, poolName, poolNamespace strin
 	if err != nil {
 		return VMCounts{}, fmt.Errorf("reconciler: ListVMsByPool: %w", err)
 	}
+	// Leases are read after the VMs, so a lease committed in between is seen
+	// and its VM counts as leased; read the other way round, a claim that
+	// commits between the two reads would look pending.
+	leases, err := st.ListLeases(ctx, &poolmgrv1alpha1.PoolRef{Name: poolName, Namespace: poolNamespace})
+	if err != nil {
+		return VMCounts{}, fmt.Errorf("reconciler: ListLeases: %w", err)
+	}
+	committed := make(map[string]struct{}, len(leases))
+	for _, lease := range leases {
+		committed[lease.GetLeaseId()] = struct{}{}
+	}
 
 	var counts VMCounts
 	for _, vm := range vms {
 		switch vm.GetPhase() {
 		case poolmgrv1alpha1.VMPhase_AVAILABLE:
 			counts.Available++
-		case poolmgrv1alpha1.VMPhase_LEASED, poolmgrv1alpha1.VMPhase_PRE_LEASE_HOOK_RUNNING:
-			// PRE_LEASE_HOOK_RUNNING is a transient phase before a VM is
-			// handed to a consumer: it's already claimed in all but name,
-			// so it must count toward Leased or MIN_SIZE_THRESHOLD would
-			// see it as neither available nor in-flight and over-provision.
-			counts.Leased++
+		case poolmgrv1alpha1.VMPhase_PRE_LEASE_HOOK_RUNNING:
+			// A transient phase before a VM is handed to a consumer. It
+			// must be counted somewhere, or MIN_SIZE_THRESHOLD would see it
+			// as neither available nor in-flight and over-provision.
+			counts.Claiming++
+		case poolmgrv1alpha1.VMPhase_LEASED:
+			// store.ClaimAvailableVM marks a VM LEASED well before its claim
+			// is final. Only the lease row itself, which store.LeaseVM
+			// writes together with the VM's lease id, proves the claim
+			// committed; without one the claim is still pending and can
+			// hand the VM back. (One left that way by a dead process is
+			// cleared by RecoverAbandonedClaims.)
+			if _, ok := committed[vm.GetLeaseId()]; ok {
+				counts.Leased++
+			} else {
+				counts.Claiming++
+			}
 		case poolmgrv1alpha1.VMPhase_PROVISIONING, poolmgrv1alpha1.VMPhase_CREATE_HOOK_RUNNING:
 			counts.Provisioning++
 		case poolmgrv1alpha1.VMPhase_QUARANTINED:
@@ -199,9 +208,7 @@ func TemplateHasStaticNetwork(template *flintlocktypes.MicroVMSpec) bool {
 //
 // The Strategy can't be trusted for this. VMCounts leaves out DELETING and
 // FAILED VMs and no strategy counts QUARANTINED ones, yet all three may
-// still be running on their host with the template's address; and
-// REPLACE_ON_DELETE asks for a replacement on every deletion, even while a
-// pool that was shrunk to size 1 still has other VMs left. So this counts
+// still be running on their host with the template's address. So this counts
 // records in every phase, which also keeps a pool stored before the API
 // rejected such a spec down to a single VM.
 func (r *Reconciler) capForStaticNetwork(ctx context.Context) int {
@@ -250,4 +257,54 @@ func (r *Reconciler) provisionN(ctx context.Context, n int) {
 		}()
 	}
 	wg.Wait()
+}
+
+// RecoverAbandonedClaims marks DELETING every VM, in any pool, that is
+// claimed with no lease to show for it (PRE_LEASE_HOOK_RUNNING, or LEASED
+// with no lease row), and returns how many it marked. The Sweeper's
+// pending-deletion scan then removes them.
+//
+// It is only safe to call while no ClaimVM and no Sweeper can be running,
+// i.e. at poolmgrd startup before anything is served: only then is such a VM
+// certain to have been left by a previous process, one that died part-way
+// through a claim or between ending a lease and deleting its VM. Nothing
+// else would ever move it on, and since CountVMs counts it as a pending
+// claim, an IMMEDIATE_ON_LEASE pool would go on treating it as warm.
+//
+// The VM is deleted rather than returned to AVAILABLE: its pre-lease hooks
+// may have partly run, or a consumer may already have used it.
+func RecoverAbandonedClaims(ctx context.Context, st store.Store) (int, error) {
+	leases, err := st.ListLeases(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("reconciler: ListLeases: %w", err)
+	}
+	committed := make(map[string]struct{}, len(leases))
+	for _, lease := range leases {
+		committed[lease.GetLeaseId()] = struct{}{}
+	}
+
+	recovered := 0
+	for _, phase := range []poolmgrv1alpha1.VMPhase{
+		poolmgrv1alpha1.VMPhase_PRE_LEASE_HOOK_RUNNING,
+		poolmgrv1alpha1.VMPhase_LEASED,
+	} {
+		vms, err := st.ListVMsByPhase(ctx, phase)
+		if err != nil {
+			return recovered, fmt.Errorf("reconciler: ListVMsByPhase: %w", err)
+		}
+		for _, vm := range vms {
+			if _, ok := committed[vm.GetLeaseId()]; ok {
+				continue
+			}
+			slog.WarnContext(ctx, "reconciler: deleting microvm left claimed with no lease",
+				"pool", vm.GetPoolName(), "namespace", vm.GetPoolNamespace(), "microvm_uid", vm.GetUid(), "phase", vm.GetPhase())
+			vm.Phase = poolmgrv1alpha1.VMPhase_DELETING
+			vm.UpdatedAt = timestamppb.Now()
+			if err := st.UpdateVM(ctx, vm); err != nil {
+				return recovered, fmt.Errorf("reconciler: mark vm %s deleting: %w", vm.GetUid(), err)
+			}
+			recovered++
+		}
+	}
+	return recovered, nil
 }
