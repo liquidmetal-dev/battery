@@ -242,14 +242,22 @@ See the [idempotent claims ADR](../adr/2026-09-24-idempotent-claims.md).
 - `REPLACE_ON_DELETE`: keep `size` VMs in total, leased included. Every VM deletion (expiry,
   release-triggered, or hook failure) immediately triggers a top-up.
 
-All three strategies are level-triggered. Whenever the reconciler runs — when it starts (manager
-startup, `CreatePool`, `UpdatePool`), on every tick, and on a claim or delete notification — it
-counts the pool's VMs and provisions the whole shortfall against the strategy's target, rather
-than a fixed number per event. For the two event-driven strategies (`IMMEDIATE_ON_LEASE`,
-`REPLACE_ON_DELETE`) the notification only makes that happen sooner than the next tick. This is
-what fills a fresh, empty pool, where nothing can be claimed or deleted yet, and what recovers
-a pool after a provision fails, several notifications coalesce into one, or every host was
-cordoned: the next tick finds the pool still short and tries again.
+All three strategies are level-triggered: when a pool's reconciler starts (manager startup,
+`CreatePool`, `UpdatePool`) and on every tick, it counts the pool's VMs and provisions the whole
+shortfall against the strategy's target, rather than a fixed number per event. This is what fills
+a fresh, empty pool, where nothing can be claimed or deleted yet, and what recovers a pool after
+a provision fails or every host was cordoned: the next tick finds the pool still short and tries
+again.
+
+The two event-driven strategies also run that same top-up on a notification, a claim for
+`IMMEDIATE_ON_LEASE` and a delete for `REPLACE_ON_DELETE`, so it happens sooner than the next
+tick. Several notifications coalescing into one therefore lose nothing. `MIN_SIZE_THRESHOLD`
+ignores notifications and acts only at start and on ticks.
+
+A VM whose claim is still in progress (its pre-lease hook is running, or its lease isn't
+committed yet) counts toward every strategy's total, including the warm set of
+`IMMEDIATE_ON_LEASE`: it is replaced only once the lease commits, since until then the claim can
+still hand the VM back.
 
 A VM in `DELETING` counts toward no strategy's total, so a `REPLACE_ON_DELETE` tick can start the
 replacement before the old VM's deletion completes. A failing provision is retried on every tick
