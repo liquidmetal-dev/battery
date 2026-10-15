@@ -39,6 +39,11 @@ type fakeMicroVM struct {
 	// unreachable. Guarded by mu.
 	failDeletesRemaining int
 
+	// hangDeletesRemaining, if > 0, makes DeleteMicroVM block until its
+	// context ends that many times (decrementing each call), to simulate a
+	// stalled flintlockd. Guarded by mu.
+	hangDeletesRemaining int
+
 	// serverVersion is what ServerInfo reports; empty means
 	// flintlockclient.MinFlintlockVersion.
 	serverVersion string
@@ -112,7 +117,18 @@ func (f *fakeMicroVM) GetMicroVM(_ context.Context, req *microvmv1alpha1.GetMicr
 	}, nil
 }
 
-func (f *fakeMicroVM) DeleteMicroVM(_ context.Context, req *microvmv1alpha1.DeleteMicroVMRequest) (*emptypb.Empty, error) {
+func (f *fakeMicroVM) DeleteMicroVM(ctx context.Context, req *microvmv1alpha1.DeleteMicroVMRequest) (*emptypb.Empty, error) {
+	f.mu.Lock()
+	hang := f.hangDeletesRemaining > 0
+	if hang {
+		f.hangDeletesRemaining--
+	}
+	f.mu.Unlock()
+	if hang {
+		<-ctx.Done()
+		return nil, status.FromContextError(ctx.Err()).Err()
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 

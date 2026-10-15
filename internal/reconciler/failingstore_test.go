@@ -22,7 +22,8 @@ type failingStore struct {
 	store.Store
 
 	failCreateVM            bool
-	onCreateVM              func() // if set, called at the start of CreateVM
+	failCreateVMPhase       *poolmgrv1alpha1.VMPhase // if set, CreateVM fails only for records in this phase
+	onCreateVM              func()                   // if set, called at the start of CreateVM
 	failUpdateVMPhase       *poolmgrv1alpha1.VMPhase
 	cordonHostBeforeReserve string
 }
@@ -41,6 +42,9 @@ func (f *failingStore) CreateVM(ctx context.Context, v *poolmgrv1alpha1.VMRecord
 		f.onCreateVM()
 	}
 	if f.failCreateVM {
+		return errInjected
+	}
+	if f.failCreateVMPhase != nil && v.GetPhase() == *f.failCreateVMPhase {
 		return errInjected
 	}
 	return f.Store.CreateVM(ctx, v)

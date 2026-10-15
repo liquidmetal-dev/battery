@@ -43,10 +43,22 @@ var ErrCreateFailed = errors.New("reconciler: microvm create failed")
 // or the guest-agent never becomes reachable.
 var ErrHookFailed = errors.New("reconciler: create hook failed")
 
-// hookFailureCleanupTimeout bounds ApplyHookFailurePolicy's own cleanup
-// work, run on a context detached from cancellation of its caller's ctx -
-// see ApplyHookFailurePolicy's comment for why.
-const hookFailureCleanupTimeout = 30 * time.Second
+// hookFailureCleanupTimeout bounds each step of ApplyHookFailurePolicy's
+// own cleanup work, run on a context detached from cancellation of its
+// caller's ctx - see ApplyHookFailurePolicy's comment for why. A var so
+// tests can shorten it.
+var hookFailureCleanupTimeout = 30 * time.Second
+
+// cleanupStoreTimeout bounds a single store write on a cleanup path (marking
+// a VM DELETING, recording an orphaned microvm, emitting an event). Each such
+// write gets its own deadline, so a flintlock call that hangs until its own
+// deadline can't use up the time the store write needs.
+const cleanupStoreTimeout = 10 * time.Second
+
+// flintlockDeleteTimeout bounds EnsureVMDeleted's DeleteMicroVM call, so an
+// unresponsive flintlockd can't hold up its caller (e.g. the Sweeper, whose
+// context has no deadline) for good. A var so tests can shorten it.
+var flintlockDeleteTimeout = 30 * time.Second
 
 // ProvisionConfig bounds the timing of a single Provision call. Zero-valued
 // fields are replaced with DefaultProvisionConfig's values by
@@ -217,16 +229,10 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 	}
 	if err := p.store.CreateVM(ctx, vm); err != nil {
 		// No VMRecord was persisted, so there's nothing to quarantine and
-		// hook_failure_policy doesn't apply: best-effort delete the
-		// now-orphaned microvm before returning, regardless of policy. As in
-		// ApplyHookFailurePolicy, this runs detached from ctx: a cancelled
-		// ctx (the reconciler stopped because its pool was updated or
-		// deleted) is a likely reason CreateVM failed at all, and the delete
-		// would fail on it too, leaving the microvm running with no record.
+		// hook_failure_policy doesn't apply: delete the now-orphaned microvm
+		// before returning, regardless of policy.
 		log.WarnContext(ctx, "reconciler: CreateVM failed, deleting orphaned microvm", "error", err)
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hookFailureCleanupTimeout)
-		_, _ = client.DeleteMicroVM(cleanupCtx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: uid})
-		cancel()
+		deleteOrphan(ctx, p.store, p.flint, vm, log)
 		return fmt.Errorf("reconciler: provision: CreateVM: %w", err)
 	}
 	// The vms row now stands in for the reservation; release it here rather
@@ -369,9 +375,19 @@ func (p *Provisioner) waitCreated(ctx context.Context, log *slog.Logger, client 
 // forever instead of being quarantined or deleted. Mirrors
 // api.LeaseServer.applyHookFailurePolicy's identical reasoning for the
 // pre-lease-hook path.
+//
+// Each step gets its own deadline, so one that hangs (an unresponsive
+// flintlockd) can't use up the time a later store write needs. The
+// flintlock delete is bounded by hookFailureCleanupTimeout, or by ctx's
+// deadline if that comes first, so a caller can bound it more tightly.
+//
+// DELETE_AND_REPLACE goes through EnsureVMDeleted: the VM is marked DELETING
+// before flintlock is asked to delete it, and a failed delete leaves it
+// DELETING for the Sweeper's pending-deletion scan to retry. A DELETING VM
+// doesn't count toward its pool's size (see CountVMs), so the pool replaces
+// it straight away.
 func ApplyHookFailurePolicy(ctx context.Context, st store.Store, flint *flintlockclient.Pool, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord, hook string, m *metrics.Registry) {
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hookFailureCleanupTimeout)
-	defer cancel()
+	detached := context.WithoutCancel(ctx)
 
 	log := slog.Default().With("pool", pool.GetName(), "namespace", pool.GetNamespace(), "microvm_uid", vm.GetUid(), "flintlock_host", vm.GetFlintlockHost())
 
@@ -381,20 +397,103 @@ func ApplyHookFailurePolicy(ctx context.Context, st store.Store, flint *flintloc
 		vm.Phase = poolmgrv1alpha1.VMPhase_QUARANTINED
 		vm.LeaseId = nil // no lease exists for a hook failure; don't leave a dangling reference
 		vm.UpdatedAt = timestamppb.Now()
-		_ = st.UpdateVM(cleanupCtx, vm)
+		quarantineCtx, cancel := context.WithTimeout(detached, hookFailureCleanupTimeout)
+		_ = st.UpdateVM(quarantineCtx, vm)
+		cancel()
 	default: // DELETE_AND_REPLACE, and the unspecified zero value: fail safe by deleting.
 		log.WarnContext(ctx, "reconciler: deleting microvm after hook failure", "hook", hook)
-		if client, err := flint.Client(vm.GetFlintlockHost()); err == nil {
-			if _, err := client.DeleteMicroVM(cleanupCtx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: vm.GetUid()}); err != nil {
-				log.ErrorContext(ctx, "reconciler: DeleteMicroVM failed", "error", err)
-			}
-		}
-		_ = st.DeleteVM(cleanupCtx, vm.GetUid())
+		deleteAfterHookFailure(ctx, st, flint, vm, log)
 	}
 	if m != nil {
 		m.RecordHookFailure(hook, pool.GetName(), pool.GetNamespace())
 	}
-	EmitEvent(cleanupCtx, st, pool, vm.GetUid(), poolmgrv1alpha1.EventType_VM_HOOK_FAILED)
+	eventCtx, cancel := context.WithTimeout(detached, cleanupStoreTimeout)
+	defer cancel()
+	EmitEvent(eventCtx, st, pool, vm.GetUid(), poolmgrv1alpha1.EventType_VM_HOOK_FAILED)
+}
+
+// deleteAfterHookFailure marks vm DELETING, on a store write with its own
+// deadline, and then deletes it through EnsureVMDeleted. If flintlock
+// doesn't confirm the delete, vm stays DELETING and the Sweeper retries it.
+//
+// If the DELETING mark itself fails, the delete is still tried once, as
+// before; should that fail too, the row keeps its earlier phase and nothing
+// retries it until poolmgrd restarts (see RecoverAbandonedProvisions).
+func deleteAfterHookFailure(ctx context.Context, st store.Store, flint *flintlockclient.Pool, vm *poolmgrv1alpha1.VMRecord, log *slog.Logger) {
+	detached := context.WithoutCancel(ctx)
+
+	vm.Phase = poolmgrv1alpha1.VMPhase_DELETING
+	vm.LeaseId = nil // as for QUARANTINE: no lease exists for a hook failure
+	vm.UpdatedAt = timestamppb.Now()
+	markCtx, cancel := context.WithTimeout(detached, cleanupStoreTimeout)
+	markErr := st.UpdateVM(markCtx, vm)
+	cancel()
+	if markErr != nil && !errors.Is(markErr, store.ErrNotFound) {
+		log.ErrorContext(ctx, "reconciler: failed to mark microvm deleting", "error", markErr)
+	}
+
+	deleteCtx, cancel := context.WithTimeout(detached, cleanupDeleteTimeout(ctx))
+	defer cancel()
+	err := EnsureVMDeleted(deleteCtx, st, flint, vm)
+	switch {
+	case err == nil, errors.Is(err, store.ErrNotFound):
+		// Deleted, by this call or by whoever removed the row first (they
+		// only do so once flintlock has confirmed the delete).
+	case markErr == nil:
+		log.WarnContext(ctx, "reconciler: microvm left DELETING for the sweeper to retry", "error", err)
+	default:
+		log.ErrorContext(ctx, "reconciler: failed to delete microvm, and it is not marked for retry", "error", err)
+	}
+}
+
+// deleteOrphan deletes the microvm vm describes, which flintlock created but
+// whose CreateVM store write failed. It runs detached from ctx: a cancelled
+// ctx (the reconciler stopped because its pool was updated or deleted) is a
+// likely reason CreateVM failed at all, and the delete would fail on it too.
+//
+// It first records vm as DELETING, on a fresh deadline, so that a failed
+// flintlock delete is retried by the Sweeper, as for any other DELETING VM.
+// If the store refuses that write too, no record of the microvm can be
+// kept: the delete is tried once, and a failure is logged as a leak.
+func deleteOrphan(ctx context.Context, st store.Store, flint *flintlockclient.Pool, vm *poolmgrv1alpha1.VMRecord, log *slog.Logger) {
+	detached := context.WithoutCancel(ctx)
+
+	vm.Phase = poolmgrv1alpha1.VMPhase_DELETING
+	vm.UpdatedAt = timestamppb.Now()
+	recordCtx, cancel := context.WithTimeout(detached, cleanupStoreTimeout)
+	recordErr := st.CreateVM(recordCtx, vm)
+	cancel()
+
+	deleteCtx, cancel := context.WithTimeout(detached, cleanupDeleteTimeout(ctx))
+	defer cancel()
+
+	if recordErr == nil {
+		if err := EnsureVMDeleted(deleteCtx, st, flint, vm); err != nil && !errors.Is(err, store.ErrNotFound) {
+			log.WarnContext(ctx, "reconciler: orphaned microvm left DELETING for the sweeper to retry", "error", err)
+		}
+		return
+	}
+
+	log.ErrorContext(ctx, "reconciler: failed to record orphaned microvm for deletion", "error", recordErr)
+	client, err := flint.Client(vm.GetFlintlockHost())
+	if err == nil {
+		_, err = client.DeleteMicroVM(deleteCtx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: vm.GetUid()})
+	}
+	if err != nil && status.Code(err) != codes.NotFound {
+		log.ErrorContext(ctx, "reconciler: failed to delete orphaned microvm; it has no record and must be deleted by hand", "error", err)
+	}
+}
+
+// cleanupDeleteTimeout is how long a cleanup path gives its flintlock
+// delete: hookFailureCleanupTimeout, or less if ctx's deadline comes first.
+// The cleanup runs on a context detached from ctx, which drops ctx's
+// deadline, so this carries it over by hand.
+func cleanupDeleteTimeout(ctx context.Context) time.Duration {
+	timeout := hookFailureCleanupTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout = min(timeout, time.Until(deadline))
+	}
+	return timeout
 }
 
 // EmitEvent appends an event for pool/uid to the store's outbox. It never
@@ -418,7 +517,8 @@ type DeletionNotifier interface {
 }
 
 // EnsureVMDeleted marks vm DELETING (durably, if it isn't already) and
-// attempts to delete it via flintlock. Success, or flintlock reporting
+// attempts to delete it via flintlock, waiting at most
+// flintlockDeleteTimeout for the answer. Success, or flintlock reporting
 // NotFound (already gone), removes vm's store row and returns nil. Any
 // other flintlock/host error leaves vm in the DELETING phase for a later
 // retry (e.g. Sweeper's pending-deletion scan) and returns that error.
@@ -448,7 +548,10 @@ func EnsureVMDeletedCheckingPool(ctx context.Context, st store.Store, flint *fli
 	}
 
 	log.InfoContext(ctx, "reconciler: deleting microvm")
-	if _, err := client.DeleteMicroVM(ctx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: vm.GetUid()}); err != nil && status.Code(err) != codes.NotFound {
+	deleteCtx, cancel := context.WithTimeout(ctx, flintlockDeleteTimeout)
+	_, err = client.DeleteMicroVM(deleteCtx, &microvmv1alpha1.DeleteMicroVMRequest{Uid: vm.GetUid()})
+	cancel()
+	if err != nil && status.Code(err) != codes.NotFound {
 		log.ErrorContext(ctx, "reconciler: DeleteMicroVM failed", "error", err)
 		return false, fmt.Errorf("reconciler: DeleteMicroVM: %w", err)
 	}
