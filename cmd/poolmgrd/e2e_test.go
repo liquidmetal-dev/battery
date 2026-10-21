@@ -425,3 +425,52 @@ func TestE2E_HostCordon(t *testing.T) {
 		t.Errorf("ListHosts: host-a not found in %+v", hosts.GetHosts())
 	}
 }
+
+// TestE2E_HostDrain drives HostAdmin.DrainHost against a pool whose only
+// host holds a warm VM and no lease: the drain must delete the VM, leave
+// vm_count at 0 and keep the host from taking a replacement, until
+// HostAdmin.UncordonHost ends the drain and the pool refills (issue #141).
+func TestE2E_HostDrain(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), e2eTestTimeout)
+	defer cancel()
+
+	flint := e2etest.StartFakeFlintlock(t)
+	pm := startE2EPoolmgrd(t, flint)
+
+	spec := e2etest.MinSizeThresholdPoolSpec("e2e-drain-pool", 1, 1)
+	ref := &poolmgrv1alpha1.PoolRef{Name: spec.GetName(), Namespace: spec.GetNamespace()}
+	if _, err := pm.PoolAdmin.CreatePool(ctx, &poolmgrv1alpha1.CreatePoolRequest{Spec: spec}); err != nil {
+		t.Fatalf("CreatePool: %v", err)
+	}
+	recorder := subscribeEvents(ctx, t, pm.Events, ref)
+	waitForAvailable(ctx, t, pm.PoolAdmin, ref, 1)
+
+	host, err := pm.HostAdmin.DrainHost(ctx, &poolmgrv1alpha1.DrainHostRequest{Name: "host-a", Reason: "e2e test"})
+	if err != nil {
+		t.Fatalf("DrainHost: %v", err)
+	}
+	if !host.GetCordoned() || !host.GetDraining() {
+		t.Fatalf("DrainHost: host-a = %+v, want cordoned and draining", host)
+	}
+	waitForEvent(ctx, t, recorder, poolmgrv1alpha1.EventType_VM_DELETED_ON_HOST_DRAIN)
+
+	// DrainHost returns once its deletes are done, and the cordon keeps the
+	// pool from placing a replacement on host-a.
+	hs, err := pm.HostAdmin.GetHost(ctx, &poolmgrv1alpha1.GetHostRequest{Name: "host-a"})
+	if err != nil {
+		t.Fatalf("GetHost: %v", err)
+	}
+	if hs.GetVmCount() != 0 {
+		t.Fatalf("GetHost: host-a vm_count = %d after drain, want 0", hs.GetVmCount())
+	}
+	assertAvailableStaysZero(ctx, t, pm.PoolAdmin, ref, 2*time.Second)
+
+	uncordoned, err := pm.HostAdmin.UncordonHost(ctx, &poolmgrv1alpha1.UncordonHostRequest{Name: "host-a"})
+	if err != nil {
+		t.Fatalf("UncordonHost: %v", err)
+	}
+	if uncordoned.GetCordoned() || uncordoned.GetDraining() {
+		t.Fatalf("UncordonHost: host-a = %+v, want neither cordoned nor draining", uncordoned)
+	}
+	waitForAvailable(ctx, t, pm.PoolAdmin, ref, 1)
+}

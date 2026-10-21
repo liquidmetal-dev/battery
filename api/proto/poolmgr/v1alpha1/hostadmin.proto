@@ -12,7 +12,15 @@ option go_package = "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alph
 // wind down through normal lease expiry or release.
 service HostAdmin {
   rpc CordonHost(CordonHostRequest) returns (Host);
+  // UncordonHost clears a host's cordon and ends any drain, resuming placement.
   rpc UncordonHost(UncordonHostRequest) returns (Host);
+  // DrainHost cordons a host and marks it draining. The manager then deletes every VM on
+  // the host that is not leased: available, provisioning, quarantined and failed. It keeps
+  // doing so while the host is draining, so a VM that becomes unleased later goes too.
+  // Leased VMs end through release or expiry, and vm_count reaches 0 once the last one
+  // has ended. DrainHost is idempotent, and UncordonHost ends the drain. It fails with
+  // NOT_FOUND for an unknown host.
+  rpc DrainHost(DrainHostRequest) returns (Host);
   rpc ListHosts(ListHostsRequest) returns (ListHostsResponse);
 
   // AddHost registers a new host. Unless skip_validation is set, the manager first dials
@@ -37,11 +45,19 @@ message UncordonHostRequest {
   string name = 1;
 }
 
+message DrainHostRequest {
+  string name = 1;
+
+  // Reason is an optional free-text note. When set, it replaces the host's
+  // cordoned_reason. When empty, the host keeps its current reason.
+  string reason = 2;
+}
+
 message ListHostsRequest {}
 
 message AddHostRequest {
-  // Name, address, and tls are read. Cordon fields and timestamps are
-  // ignored: a new host starts uncordoned.
+  // Name, address, and tls are read. Cordon and drain fields and timestamps
+  // are ignored: a new host starts uncordoned and not draining.
   Host host = 1;
 
   // SkipValidation adds the host without dialing it. Use it to register a
@@ -51,7 +67,7 @@ message AddHostRequest {
 
 message UpdateHostRequest {
   // Host is matched by host.name and carries the new address and tls. Cordon
-  // fields are ignored; CordonHost and UncordonHost own them.
+  // and drain fields are ignored; CordonHost, UncordonHost and DrainHost own them.
   Host host = 1;
 
   // SkipValidation updates the host without dialing it.

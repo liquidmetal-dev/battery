@@ -159,6 +159,9 @@ enum EventType {
   POOL_SIZE_BELOW_TARGET = 10;
   // VM_DELETED_ON_POOL_DELETE is emitted for each VM removed because its pool was deleted.
   VM_DELETED_ON_POOL_DELETE = 11;
+  // VM_DELETED_ON_HOST_DRAIN is emitted for each VM removed because its host is draining
+  // (HostAdmin.DrainHost).
+  VM_DELETED_ON_HOST_DRAIN = 12;
 }
 
 // Event is a single row from the pool manager's event outbox.
@@ -213,6 +216,13 @@ message Host {
   google.protobuf.Timestamp updated_at = 6;
 
   HostTLS tls = 7;
+
+  // Draining is true from DrainHost until UncordonHost. A draining host is always
+  // cordoned, and the manager deletes every VM on it that is not leased.
+  bool draining = 8;
+
+  // DrainingAt is when the current drain began. Unset unless the host is draining.
+  google.protobuf.Timestamp draining_at = 9;
 }
 
 // HostTLS carries what config.TLSConfig carried for a host. File paths are

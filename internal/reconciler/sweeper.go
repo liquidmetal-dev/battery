@@ -36,7 +36,8 @@ func (noopSweeperNotifier) NotifyVMDeleted(string, string) {}
 // Sweeper periodically scans leases across all pools (store.ListExpiredLeases
 // has no per-pool filter, and there's no manager yet to run one sweeper per
 // pool against). Each tick it: retries any VM deletions left pending by a
-// previous failure (flintlock unreachable, etc.), deletes leases/VMs past
+// previous failure (flintlock unreachable, etc.), deletes the unleased VMs
+// of draining hosts (see drainHosts), deletes leases/VMs past
 // expiry, and emits VM_EXPIRING_SOON once per distinct expires_at value for
 // leases about to expire within warningWindow.
 //
@@ -111,6 +112,7 @@ func (s *Sweeper) Tick(ctx context.Context, now time.Time) {
 	defer s.mu.Unlock()
 
 	s.retryPendingDeletions(ctx)
+	s.drainHosts(ctx)
 
 	leases, err := s.store.ListExpiredLeases(ctx, now.Add(s.warningWindow))
 	if err != nil {
@@ -151,11 +153,24 @@ func (s *Sweeper) Tick(ctx context.Context, now time.Time) {
 // DELETE_AND_REPLACE, or Provision's cleanup of an orphaned microvm. It
 // also finishes the VMs that RecoverAbandonedClaims and
 // RecoverAbandonedProvisions mark DELETING at startup.
+//
+// A VM with no lease on a draining host is one a drain marked: it had its
+// VM_DELETED_ON_HOST_DRAIN event when it was marked, so it only gets the
+// notification here, not FinishVMDeletion's event.
 func (s *Sweeper) retryPendingDeletions(ctx context.Context) {
 	vms, err := s.store.ListVMsByPhase(ctx, poolmgrv1alpha1.VMPhase_DELETING)
+	if err != nil || len(vms) == 0 {
+		return // best-effort; try again next tick
+	}
+	hosts, err := s.store.ListHosts(ctx)
 	if err != nil {
 		return // best-effort; try again next tick
 	}
+	draining := make(map[string]bool, len(hosts))
+	for _, h := range hosts {
+		draining[h.GetName()] = h.GetDraining()
+	}
+
 	for _, vm := range vms {
 		if err := EnsureVMDeleted(ctx, s.store, s.flint, vm); err != nil {
 			continue // still pending; retry next tick
@@ -164,8 +179,26 @@ func (s *Sweeper) retryPendingDeletions(ctx context.Context) {
 		if err != nil {
 			continue
 		}
+		if vm.GetLeaseId() == "" && draining[vm.GetFlintlockHost()] {
+			s.notifier.NotifyVMDeleted(pool.GetName(), pool.GetNamespace())
+			continue
+		}
 		FinishVMDeletion(ctx, s.store, pool, vm, s.notifier, s.metrics)
 	}
+}
+
+// drainHosts marks DELETING every VM on a draining host that is not leased,
+// and deletes them through DeleteDrainedVMs. HostAdmin.DrainHost does the
+// same once, when it is called. This pass keeps the drain going: it catches
+// a VM whose placement was reserved before the cordon and whose row was
+// written after, a VM a pre-lease hook quarantined, and a VM a yielded claim
+// put back to AVAILABLE.
+func (s *Sweeper) drainHosts(ctx context.Context) {
+	vms, err := s.store.MarkDrainingHostsVMsDeleting(ctx)
+	if err != nil {
+		return // best-effort; try again next tick
+	}
+	DeleteDrainedVMs(ctx, s.store, s.flint, vms, s.notifier)
 }
 
 func (s *Sweeper) warnExpiringSoon(ctx context.Context, l *poolmgrv1alpha1.LeaseRecord) {

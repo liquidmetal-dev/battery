@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -74,6 +75,10 @@ var migrations = []string{
 	ALTER TABLE hosts ADD COLUMN ca_file TEXT NOT NULL DEFAULT '';
 	ALTER TABLE hosts ADD COLUMN cert_file TEXT NOT NULL DEFAULT '';
 	ALTER TABLE hosts ADD COLUMN key_file TEXT NOT NULL DEFAULT '';`,
+	// 3: drain state, for HostAdmin.DrainHost. A pre-existing row is not
+	// draining.
+	`ALTER TABLE hosts ADD COLUMN draining INTEGER NOT NULL DEFAULT 0;
+	ALTER TABLE hosts ADD COLUMN draining_at INTEGER;`,
 }
 
 // migrate brings db from its current PRAGMA user_version up to
@@ -804,13 +809,13 @@ func scanEvents(rows *sql.Rows) ([]*poolmgrv1alpha1.Event, error) {
 // hostColumns lists the hosts table's columns in the order hostRow.scanDest
 // expects them.
 const hostColumns = `name, address, cordoned, cordoned_reason, cordoned_at, updated_at,
-	tls_insecure, ca_file, cert_file, key_file`
+	tls_insecure, ca_file, cert_file, key_file, draining, draining_at`
 
 // scanDest returns pointers to row's fields in hostColumns order.
 func (row *hostRow) scanDest() []any {
 	return []any{
 		&row.name, &row.address, &row.cordoned, &row.cordonedReason, &row.cordonedAt, &row.updatedAt,
-		&row.tlsInsecure, &row.caFile, &row.certFile, &row.keyFile,
+		&row.tlsInsecure, &row.caFile, &row.certFile, &row.keyFile, &row.draining, &row.drainingAt,
 	}
 }
 
@@ -822,9 +827,9 @@ func (s *sqliteStore) CreateHost(ctx context.Context, host *poolmgrv1alpha1.Host
 
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO hosts (`+hostColumns+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.name, row.address, row.cordoned, row.cordonedReason, row.cordonedAt, row.updatedAt,
-		row.tlsInsecure, row.caFile, row.certFile, row.keyFile,
+		row.tlsInsecure, row.caFile, row.certFile, row.keyFile, row.draining, row.drainingAt,
 	)
 	if isHostNameConflict(err) {
 		return ErrHostExists
@@ -978,10 +983,14 @@ func (s *sqliteStore) SetHostCordoned(ctx context.Context, name string, cordoned
 		cordonedAt = sql.NullInt64{Int64: now.UnixNano(), Valid: true}
 	}
 
+	// Uncordoning ends a drain: a draining host must stay cordoned. Cordoning
+	// leaves draining as it is (CASE ... ELSE draining).
 	res, err := s.db.ExecContext(ctx, `
-		UPDATE hosts SET cordoned = ?, cordoned_reason = ?, cordoned_at = ?, updated_at = ?
+		UPDATE hosts SET cordoned = ?, cordoned_reason = ?, cordoned_at = ?, updated_at = ?,
+			draining = CASE WHEN ? THEN draining ELSE 0 END,
+			draining_at = CASE WHEN ? THEN draining_at ELSE NULL END
 		WHERE name = ?`,
-		cordoned, cordonedReason, cordonedAt, now.UnixNano(), name,
+		cordoned, cordonedReason, cordonedAt, now.UnixNano(), cordoned, cordoned, name,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("store: set host cordoned: %w", err)
@@ -991,6 +1000,119 @@ func (s *sqliteStore) SetHostCordoned(ctx context.Context, name string, cordoned
 	}
 
 	return s.GetHost(ctx, name)
+}
+
+func (s *sqliteStore) DrainHost(ctx context.Context, name, reason string) (*poolmgrv1alpha1.Host, []*poolmgrv1alpha1.VMRecord, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("store: begin drain host tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// Setting cordoned in the same transaction as the VM update means a
+	// ReservePlacement either committed first, and its VM is caught by the
+	// Sweeper's drain pass once its row exists, or it runs after and sees the
+	// host cordoned.
+	now := time.Now().UnixNano()
+	var cordonedReason sql.NullString
+	if reason != "" {
+		cordonedReason = sql.NullString{String: reason, Valid: true}
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE hosts SET
+			cordoned_reason = COALESCE(?, cordoned_reason),
+			cordoned_at = CASE WHEN cordoned THEN cordoned_at ELSE ? END,
+			cordoned = 1,
+			draining_at = CASE WHEN draining THEN draining_at ELSE ? END,
+			draining = 1,
+			updated_at = ?
+		WHERE name = ?`,
+		cordonedReason, now, now, now, name,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("store: drain host: %w", err)
+	}
+	if err := checkRowsAffected(res); err != nil {
+		return nil, nil, err
+	}
+
+	vms, err := markUnleasedVMsDeleting(ctx, tx, `flintlock_host = ?`, name)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var row hostRow
+	if err := tx.QueryRowContext(ctx, `SELECT `+hostColumns+` FROM hosts WHERE name = ?`, name).Scan(row.scanDest()...); err != nil {
+		return nil, nil, fmt.Errorf("store: query drained host: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, nil, fmt.Errorf("store: commit drain host tx: %w", err)
+	}
+	return rowToHost(row), vms, nil
+}
+
+func (s *sqliteStore) MarkDrainingHostsVMsDeleting(ctx context.Context) ([]*poolmgrv1alpha1.VMRecord, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("store: begin mark draining tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	vms, err := markUnleasedVMsDeleting(ctx, tx, `flintlock_host IN (SELECT name FROM hosts WHERE draining)`)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: commit mark draining tx: %w", err)
+	}
+	return vms, nil
+}
+
+// markUnleasedVMsDeleting marks DELETING, and clears the lease_id of, every
+// VM that matches where and is not LEASED, PRE_LEASE_HOOK_RUNNING or already
+// DELETING, and returns the VMs it marked, ordered by uid. One UPDATE does
+// the check and the write, so a concurrent ClaimAvailableVM either leases a
+// VM first, and this leaves it alone, or finds it DELETING and skips it.
+func markUnleasedVMsDeleting(ctx context.Context, tx *sql.Tx, where string, args ...any) ([]*poolmgrv1alpha1.VMRecord, error) {
+	args = append([]any{
+		int32(poolmgrv1alpha1.VMPhase_DELETING), time.Now().UnixNano(),
+	}, args...)
+	args = append(args,
+		int32(poolmgrv1alpha1.VMPhase_LEASED),
+		int32(poolmgrv1alpha1.VMPhase_PRE_LEASE_HOOK_RUNNING),
+		int32(poolmgrv1alpha1.VMPhase_DELETING),
+	)
+
+	rows, err := tx.QueryContext(ctx, `
+		UPDATE vms SET phase = ?, lease_id = NULL, updated_at = ?
+		WHERE `+where+` AND phase NOT IN (?, ?, ?)
+		RETURNING uid, pool_name, pool_namespace, flintlock_host, phase, lease_id, created_at, updated_at`,
+		args...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store: mark unleased vms deleting: %w", err)
+	}
+	var vms []*poolmgrv1alpha1.VMRecord
+	for rows.Next() {
+		var row vmRow
+		if err := rows.Scan(&row.uid, &row.poolName, &row.poolNamespace, &row.flintlockHost, &row.phase, &row.leaseID, &row.createdAt, &row.updatedAt); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("store: scan vm: %w", err)
+		}
+		vms = append(vms, rowToVM(row))
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("store: iterate vms: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("store: close vms: %w", err)
+	}
+
+	// RETURNING gives no order guarantee.
+	slices.SortFunc(vms, func(a, b *poolmgrv1alpha1.VMRecord) int { return strings.Compare(a.GetUid(), b.GetUid()) })
+	return vms, nil
 }
 
 func (s *sqliteStore) ReservePlacement(ctx context.Context, id, host, poolName, poolNamespace string) error {

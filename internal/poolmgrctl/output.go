@@ -247,7 +247,7 @@ func printClaimTable(w io.Writer, resp *poolmgrv1alpha1.ClaimVMResponse) error {
 }
 
 // printHost renders a single Host to w in the given format. Used for the
-// Cordon/Uncordon/Add/UpdateHost responses, which carry no VM count -
+// Cordon/Uncordon/Drain/Add/UpdateHost responses, which carry no VM count -
 // unlike printHostStatuses, its table has no VMS column, so it never
 // fabricates a count that wasn't returned by the RPC.
 func printHost(w io.Writer, host *poolmgrv1alpha1.Host, format OutputFormat) error {
@@ -263,10 +263,10 @@ func printHost(w io.Writer, host *poolmgrv1alpha1.Host, format OutputFormat) err
 
 func printHostTable(w io.Writer, host *poolmgrv1alpha1.Host) error {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "NAME\tADDRESS\tTLS\tCORDONED"); err != nil {
+	if _, err := fmt.Fprintln(tw, "NAME\tADDRESS\tTLS\tCORDONED\tDRAINING"); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%t\n", host.GetName(), host.GetAddress(), hostTLSMode(host.GetTls()), host.GetCordoned()); err != nil {
+	if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%t\t%t\n", host.GetName(), host.GetAddress(), hostTLSMode(host.GetTls()), host.GetCordoned(), host.GetDraining()); err != nil {
 		return err
 	}
 	return tw.Flush()
@@ -323,13 +323,13 @@ func printHostStatusesJSON(w io.Writer, hosts []*poolmgrv1alpha1.HostStatus) err
 
 func printHostStatusesTable(w io.Writer, hosts []*poolmgrv1alpha1.HostStatus) error {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "NAME\tADDRESS\tTLS\tCORDONED\tVMS\tVERSION"); err != nil {
+	if _, err := fmt.Fprintln(tw, "NAME\tADDRESS\tTLS\tCORDONED\tDRAINING\tVMS\tVERSION"); err != nil {
 		return err
 	}
 	for _, hs := range hosts {
 		host := hs.GetHost()
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%t\t%d\t%s\n",
-			host.GetName(), host.GetAddress(), hostTLSMode(host.GetTls()), host.GetCordoned(), hs.GetVmCount(),
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%t\t%t\t%d\t%s\n",
+			host.GetName(), host.GetAddress(), hostTLSMode(host.GetTls()), host.GetCordoned(), host.GetDraining(), hs.GetVmCount(),
 			hostVersion(hs.GetFlintlockVersion())); err != nil {
 			return err
 		}
