@@ -310,3 +310,37 @@ func RecoverAbandonedClaims(ctx context.Context, st store.Store) (int, error) {
 	}
 	return recovered, nil
 }
+
+// RecoverAbandonedProvisions marks DELETING every VM, in any pool, that is
+// still PROVISIONING or CREATE_HOOK_RUNNING, and returns how many it marked.
+// The Sweeper's pending-deletion scan then removes them.
+//
+// As for RecoverAbandonedClaims, it is only safe to call at poolmgrd startup,
+// before any Reconciler runs: only then is such a VM certain to have been
+// left by a previous process, one that died part-way through Provision, or
+// whose hook-failure cleanup could not write to the store. Nothing else
+// would ever move it on, and since CountVMs counts it as provisioning, its
+// pool would never replace it.
+func RecoverAbandonedProvisions(ctx context.Context, st store.Store) (int, error) {
+	recovered := 0
+	for _, phase := range []poolmgrv1alpha1.VMPhase{
+		poolmgrv1alpha1.VMPhase_PROVISIONING,
+		poolmgrv1alpha1.VMPhase_CREATE_HOOK_RUNNING,
+	} {
+		vms, err := st.ListVMsByPhase(ctx, phase)
+		if err != nil {
+			return recovered, fmt.Errorf("reconciler: ListVMsByPhase: %w", err)
+		}
+		for _, vm := range vms {
+			slog.WarnContext(ctx, "reconciler: deleting microvm left provisioning",
+				"pool", vm.GetPoolName(), "namespace", vm.GetPoolNamespace(), "microvm_uid", vm.GetUid(), "phase", vm.GetPhase())
+			vm.Phase = poolmgrv1alpha1.VMPhase_DELETING
+			vm.UpdatedAt = timestamppb.Now()
+			if err := st.UpdateVM(ctx, vm); err != nil {
+				return recovered, fmt.Errorf("reconciler: mark vm %s deleting: %w", vm.GetUid(), err)
+			}
+			recovered++
+		}
+	}
+	return recovered, nil
+}

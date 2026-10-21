@@ -93,6 +93,15 @@ func main() {
 	if recovered > 0 {
 		slog.Warn("poolmgrd: marked microvms left claimed with no lease for deletion", "count", recovered)
 	}
+	// Must also run before any reconciler starts: see
+	// reconciler.RecoverAbandonedProvisions.
+	recovered, err = reconciler.RecoverAbandonedProvisions(ctx, st)
+	if err != nil {
+		fatal("poolmgrd: recover abandoned provisions", err)
+	}
+	if recovered > 0 {
+		slog.Warn("poolmgrd: marked microvms left provisioning for deletion", "count", recovered)
+	}
 
 	// The store is the only source of hosts: HostAdmin.AddHost writes them
 	// there, with their TLS settings, and the pool is built from it.
