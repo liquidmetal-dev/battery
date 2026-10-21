@@ -27,7 +27,6 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
-	"github.com/liquidmetal-dev/battery/internal/config"
 	"github.com/liquidmetal-dev/battery/internal/flintlockclient"
 )
 
@@ -125,9 +124,9 @@ func StartFakeFlintlock(t *testing.T) *flintlockclient.Pool {
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 
-	pool, err := flintlockclient.New(&config.Config{Hosts: []config.HostConfig{
-		{Name: "host-a", Address: lis.Addr().String(), TLS: config.TLSConfig{Insecure: true}},
-	}})
+	pool, err := flintlockclient.New([]*poolmgrv1alpha1.Host{
+		{Name: "host-a", Address: lis.Addr().String(), Tls: &poolmgrv1alpha1.HostTLS{Insecure: true}},
+	})
 	if err != nil {
 		t.Fatalf("flintlockclient.New: %v", err)
 	}

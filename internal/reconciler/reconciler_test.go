@@ -45,6 +45,7 @@ func TestReconciler_MinSizeThreshold_TickDrivenTopUp(t *testing.T) {
 	vm := &fakeMicroVM{}
 	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
 	st := openTestStore(t)
+	seedHost(t, st, "host-a")
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 2, []string{"host-a"})
 	pool.ReplenishmentStrategy.MinSize = int32Ptr(2)
@@ -70,6 +71,7 @@ func TestReconciler_MinSizeThreshold_CountsPreLeaseHookRunningAsInFlight(t *test
 	vm := &fakeMicroVM{}
 	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
 	st := openTestStore(t)
+	seedHost(t, st, "host-a")
 	ctx := context.Background()
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 2, []string{"host-a"})
@@ -158,6 +160,7 @@ func TestReconciler_EventDriven_FillsFreshPool(t *testing.T) {
 			vm := &fakeMicroVM{}
 			flint := startFakeFlintlock(t, vm, alwaysReadyExec())
 			st := openTestStore(t)
+			seedHost(t, st, "host-a")
 
 			// A fresh pool with no VMs: nothing can be claimed or deleted,
 			// so it has to fill without waiting for a notification.
@@ -201,6 +204,7 @@ func TestReconciler_EventDriven_RecoversAfterFailedProvision(t *testing.T) {
 			vm := &fakeMicroVM{}
 			flint := startFakeFlintlock(t, vm, exec)
 			st := openTestStore(t)
+			seedHost(t, st, "host-a")
 
 			pool := samplePool("pool-a", strategy, 1, []string{"host-a"})
 			pool.CreateCommands = []string{"setup"}
@@ -233,6 +237,7 @@ func TestReconciler_ImmediateOnLease_ClaimNotificationReplenishes(t *testing.T) 
 	vm := &fakeMicroVM{}
 	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
 	st := openTestStore(t)
+	seedHost(t, st, "host-a")
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE, 2, []string{"host-a"})
 	seedAvailableVMs(t, st, pool, 2)
@@ -264,6 +269,7 @@ func TestReconciler_ReplaceOnDelete_DeleteNotificationReplenishes(t *testing.T) 
 	vm := &fakeMicroVM{}
 	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
 	st := openTestStore(t)
+	seedHost(t, st, "host-a")
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE, 3, []string{"host-a"})
 	seedAvailableVMs(t, st, pool, 3)
@@ -300,6 +306,7 @@ func TestReconciler_ImmediateOnLease_TickAndNotificationDoNotOvershoot(t *testin
 	vm := &fakeMicroVM{}
 	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
 	st := openTestStore(t)
+	seedHost(t, st, "host-a")
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE, 2, []string{"host-a"})
 	seedAvailableVMs(t, st, pool, 2)
@@ -330,6 +337,7 @@ func TestReconciler_ImmediateOnLease_PendingClaimIsNotReplaced(t *testing.T) {
 	vm := &fakeMicroVM{}
 	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
 	st := openTestStore(t)
+	seedHost(t, st, "host-a")
 	ctx := context.Background()
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE, 2, []string{"host-a"})
@@ -436,6 +444,7 @@ func TestReconciler_StaticNetwork_WaitsForEveryVMToGo(t *testing.T) {
 				vm := &fakeMicroVM{}
 				flint := startFakeFlintlock(t, vm, alwaysReadyExec())
 				st := openTestStore(t)
+				seedHost(t, st, "host-a")
 				ctx := context.Background()
 
 				pool := staticPool(strategy)
@@ -479,6 +488,7 @@ func TestReconciler_StaticNetwork_ShrunkPoolReplacesOnlyTheLastVM(t *testing.T) 
 	vm := &fakeMicroVM{}
 	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
 	st := openTestStore(t)
+	seedHost(t, st, "host-a")
 	ctx := context.Background()
 
 	pool := staticPool(poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE)
@@ -519,6 +529,7 @@ func TestReconciler_StaticNetwork_NeverProvisionsMoreThanOne(t *testing.T) {
 	vm := &fakeMicroVM{}
 	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
 	st := openTestStore(t)
+	seedHost(t, st, "host-a")
 
 	pool := staticPool(poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD)
 	pool.Size = 3
@@ -564,6 +575,7 @@ func TestRecoverAbandonedClaims_RestartedPoolRefills(t *testing.T) {
 			vm := &fakeMicroVM{}
 			flint := startFakeFlintlock(t, vm, alwaysReadyExec())
 			st := openTestStore(t)
+			seedHost(t, st, "host-a")
 			ctx := context.Background()
 
 			pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_IMMEDIATE_ON_LEASE, 1, []string{"host-a"})
