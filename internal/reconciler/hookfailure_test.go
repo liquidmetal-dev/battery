@@ -111,6 +111,7 @@ func TestProvision_HookFailureDeleteNotConfirmed_LeftDeletingAndReplaced(t *test
 			fake := tt.fake(t)
 			flint := startFakeFlintlock(t, fake, failFirstSetupExec())
 			st := openTestStore(t)
+			seedHost(t, st, "host-a")
 			ctx := context.Background()
 
 			pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE, 1, []string{"host-a"})
@@ -157,6 +158,7 @@ func TestProvision_OrphanDeleteFails_LeftDeletingForSweeper(t *testing.T) {
 	fake := &fakeMicroVM{failDeletesRemaining: 1}
 	flint := startFakeFlintlock(t, fake, alwaysReadyExec())
 	st := &failingStore{Store: openTestStore(t), failCreateVMPhase: vmPhasePtr(poolmgrv1alpha1.VMPhase_PROVISIONING)}
+	seedHost(t, st, "host-a")
 	ctx := context.Background()
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE, 1, []string{"host-a"})
@@ -188,6 +190,7 @@ func TestRecoverAbandonedProvisions_RestartedPoolRefills(t *testing.T) {
 	fake := &fakeMicroVM{}
 	flint := startFakeFlintlock(t, fake, alwaysReadyExec())
 	st := openTestStore(t)
+	seedHost(t, st, "host-a")
 	ctx := context.Background()
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_REPLACE_ON_DELETE, 3, []string{"host-a"})
