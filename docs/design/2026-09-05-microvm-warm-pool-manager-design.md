@@ -128,7 +128,7 @@ Key grounding facts confirmed directly from the flintlock and guest-agent source
 ### Multi-host fleet & scheduling (v1 scope)
 
 Flintlock hosts are records in the store (name, address, TLS file paths, cordon state), managed
-at runtime through the `HostAdmin` API (`poolmgrctl host add|update|remove|cordon`) rather than
+at runtime through the `HostAdmin` API (`poolmgrctl host add|update|remove|cordon|drain`) rather than
 listed in the config file; see [the host API ADR](../adr/2026-09-24-host-api.md). A fresh
 manager has no hosts until one is added. Resource capacity is not tracked in v1 beyond a simple
 least-loaded-by-VM-count placement across the hosts eligible for a pool. Each pool

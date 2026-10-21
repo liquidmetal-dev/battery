@@ -7,11 +7,11 @@ import (
 )
 
 // newHostCmd returns the "host" parent command, with add/update/remove/get/
-// list/cordon/uncordon wired up as subcommands.
+// list/cordon/uncordon/drain wired up as subcommands.
 func newHostCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "host",
-		Short: "Manage flintlock hosts and their cordon state",
+		Short: "Manage flintlock hosts and their cordon and drain state",
 	}
 
 	cmd.AddCommand(newHostAddCmd())
@@ -20,7 +20,41 @@ func newHostCmd() *cobra.Command {
 	cmd.AddCommand(newHostGetCmd())
 	cmd.AddCommand(newHostCordonCmd())
 	cmd.AddCommand(newHostUncordonCmd())
+	cmd.AddCommand(newHostDrainCmd())
 	cmd.AddCommand(newHostListCmd())
+
+	return cmd
+}
+
+func newHostDrainCmd() *cobra.Command {
+	var reason, output string
+
+	cmd := &cobra.Command{
+		Use:   "drain <name>",
+		Short: "Cordon a host and delete its unleased VMs; leased VMs end by release or expiry, and uncordon ends the drain",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			format, err := parseOutputFormat(output)
+			if err != nil {
+				return err
+			}
+
+			hostAdmin := clientsFromContext(cmd.Context()).hostAdmin
+
+			host, err := hostAdmin.DrainHost(cmd.Context(), &poolmgrv1alpha1.DrainHostRequest{
+				Name:   args[0],
+				Reason: reason,
+			})
+			if err != nil {
+				return wrapGRPCErr(err)
+			}
+
+			return printHost(cmd.OutOrStdout(), host, format)
+		},
+	}
+
+	cmd.Flags().StringVar(&reason, "reason", "", "optional free-text reason recorded as the cordon reason")
+	cmd.Flags().StringVarP(&output, "output", "o", string(OutputTable), "output format: table|json")
 
 	return cmd
 }
@@ -63,7 +97,7 @@ func newHostUncordonCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "uncordon <name>",
-		Short: "Resume new VM placement on a host",
+		Short: "Resume new VM placement on a host, ending any drain",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			format, err := parseOutputFormat(output)
@@ -92,7 +126,7 @@ func newHostListCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List registered hosts, their cordon state, and how many VMs are still counted against each",
+		Short: "List registered hosts, their cordon and drain state, and how many VMs are still counted against each",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			format, err := parseOutputFormat(output)
 			if err != nil {

@@ -175,7 +175,7 @@ func newHostAdminWithPool(t *testing.T, st store.Store) (*api.HostAdminServer, *
 		t.Fatalf("flintlockclient.New() error = %v", err)
 	}
 	t.Cleanup(func() { _ = flint.Close() })
-	return api.NewHostAdminServer(st, flint), flint
+	return api.NewHostAdminServer(st, flint, nil), flint
 }
 
 // versionedMicroVM is a fake flintlock MicroVM service whose ServerInfo

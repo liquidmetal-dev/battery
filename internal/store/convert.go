@@ -259,6 +259,8 @@ type hostRow struct {
 	caFile         string
 	certFile       string
 	keyFile        string
+	draining       bool
+	drainingAt     sql.NullInt64
 }
 
 func hostToRow(h *poolmgrv1alpha1.Host) (hostRow, error) {
@@ -276,12 +278,16 @@ func hostToRow(h *poolmgrv1alpha1.Host) (hostRow, error) {
 		caFile:      h.GetTls().GetCaFile(),
 		certFile:    h.GetTls().GetCertFile(),
 		keyFile:     h.GetTls().GetKeyFile(),
+		draining:    h.GetDraining(),
 	}
 	if h.GetCordonedReason() != "" {
 		row.cordonedReason = sql.NullString{String: h.GetCordonedReason(), Valid: true}
 	}
 	if h.GetCordonedAt() != nil {
 		row.cordonedAt = sql.NullInt64{Int64: h.GetCordonedAt().AsTime().UnixNano(), Valid: true}
+	}
+	if h.GetDrainingAt() != nil {
+		row.drainingAt = sql.NullInt64{Int64: h.GetDrainingAt().AsTime().UnixNano(), Valid: true}
 	}
 	return row, nil
 }
@@ -293,6 +299,7 @@ func rowToHost(row hostRow) *poolmgrv1alpha1.Host {
 		Name:      row.name,
 		Address:   row.address,
 		Cordoned:  row.cordoned,
+		Draining:  row.draining,
 		UpdatedAt: timestamppb.New(time.Unix(0, row.updatedAt)),
 		Tls: &poolmgrv1alpha1.HostTLS{
 			Insecure: row.tlsInsecure,
@@ -306,6 +313,9 @@ func rowToHost(row hostRow) *poolmgrv1alpha1.Host {
 	}
 	if row.cordonedAt.Valid {
 		h.CordonedAt = timestamppb.New(time.Unix(0, row.cordonedAt.Int64))
+	}
+	if row.drainingAt.Valid {
+		h.DrainingAt = timestamppb.New(time.Unix(0, row.drainingAt.Int64))
 	}
 	return h
 }

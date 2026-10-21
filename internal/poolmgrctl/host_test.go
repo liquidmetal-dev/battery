@@ -45,7 +45,7 @@ func bufconnHostAdmin(t *testing.T) (*grpc.ClientConn, store.Store) {
 		t.Fatalf("flintlockclient.New() error = %v", err)
 	}
 	t.Cleanup(func() { _ = flint.Close() })
-	poolmgrv1alpha1.RegisterHostAdminServer(srv, api.NewHostAdminServer(st, flint))
+	poolmgrv1alpha1.RegisterHostAdminServer(srv, api.NewHostAdminServer(st, flint, nil))
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 
@@ -381,5 +381,62 @@ func TestHostGet_UnknownHost(t *testing.T) {
 	_, err := runHostCmd(t, conn, newHostGetCmd(), "missing")
 	if err == nil || !strings.Contains(err.Error(), "not_found") {
 		t.Fatalf("Execute() error = %v, want not_found", err)
+	}
+}
+
+func TestHostDrain_Bufconn(t *testing.T) {
+	conn, st := bufconnHostAdmin(t)
+	seedHost(t, st, "host-a")
+
+	out, err := runHostCmd(t, conn, newHostDrainCmd(), "host-a", "--reason", "scale-down")
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(out, "DRAINING") || !strings.Contains(out, "host-a") {
+		t.Errorf("output = %q, want a DRAINING column and host-a", out)
+	}
+
+	got, err := st.GetHost(context.Background(), "host-a")
+	if err != nil {
+		t.Fatalf("GetHost() error = %v", err)
+	}
+	if !got.GetCordoned() || !got.GetDraining() || got.GetCordonedReason() != "scale-down" {
+		t.Errorf("GetHost() = %+v, want cordoned and draining with reason %q", got, "scale-down")
+	}
+}
+
+func TestHostDrain_UnknownHost(t *testing.T) {
+	conn, _ := bufconnHostAdmin(t)
+
+	_, err := runHostCmd(t, conn, newHostDrainCmd(), "missing")
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not_found") {
+		t.Errorf("error = %q, want it to mention not_found", err.Error())
+	}
+}
+
+func TestHostList_ShowsDraining(t *testing.T) {
+	conn, st := bufconnHostAdmin(t)
+	seedHost(t, st, "host-a")
+	if _, _, err := st.DrainHost(context.Background(), "host-a", ""); err != nil {
+		t.Fatalf("DrainHost() error = %v", err)
+	}
+
+	out, err := runHostCmd(t, conn, newHostListCmd())
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("output = %q, want a header and one row", out)
+	}
+	// The table is aligned, so the row's value starts where its header does.
+	// The TLS column is empty for this host, so splitting on spaces would
+	// not line up.
+	i := strings.Index(lines[0], "DRAINING")
+	if i < 0 || i >= len(lines[1]) || !strings.HasPrefix(lines[1][i:], "true") {
+		t.Errorf("output = %q, want DRAINING true for host-a", out)
 	}
 }

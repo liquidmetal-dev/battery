@@ -244,7 +244,7 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 
 	if err := p.waitCreated(ctx, log, client, uid); err != nil {
 		log.ErrorContext(ctx, "reconciler: microvm did not reach CREATED state", "error", err)
-		ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm, hookCreate, p.metrics)
+		p.applyHookFailurePolicy(ctx, pool, vm)
 		return err
 	}
 	log.InfoContext(ctx, "reconciler: microvm reached CREATED state")
@@ -256,7 +256,7 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 	execClient, err := p.flint.ExecClient(host)
 	if err != nil {
 		err = fmt.Errorf("reconciler: provision: %w", err)
-		ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm, hookCreate, p.metrics)
+		p.applyHookFailurePolicy(ctx, pool, vm)
 		return err
 	}
 
@@ -267,7 +267,7 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 	if err != nil {
 		err = fmt.Errorf("%w: guest-agent not ready: %w", ErrHookFailed, err)
 		log.ErrorContext(ctx, "reconciler: guest agent not ready", "error", err)
-		ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm, hookCreate, p.metrics)
+		p.applyHookFailurePolicy(ctx, pool, vm)
 		return err
 	}
 	log.InfoContext(ctx, "reconciler: guest agent ready")
@@ -279,13 +279,13 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 		if err != nil {
 			err = fmt.Errorf("%w: %q: %w", ErrHookFailed, cmd, err)
 			log.ErrorContext(ctx, "reconciler: create command failed", "command", cmd, "error", err)
-			ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm, hookCreate, p.metrics)
+			p.applyHookFailurePolicy(ctx, pool, vm)
 			return err
 		}
 		if result.ExitCode != 0 {
 			err = fmt.Errorf("%w: %q: exit code %d", ErrHookFailed, cmd, result.ExitCode)
 			log.ErrorContext(ctx, "reconciler: create command exited non-zero", "command", cmd, "exit_code", result.ExitCode)
-			ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm, hookCreate, p.metrics)
+			p.applyHookFailurePolicy(ctx, pool, vm)
 			return err
 		}
 	}
@@ -304,15 +304,37 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 // path) see the current phase. If the persist itself fails, that's still a
 // provisioning failure: apply pool.HookFailurePolicy rather than leaving
 // the microvm running and the VMRecord stuck in its previous phase.
+//
+// The store refuses to move a DELETING VM to any other phase (see
+// store.Store.UpdateVM), so a VM a host drain marked DELETING mid-provision
+// can never come back as AVAILABLE here.
 func (p *Provisioner) updatePhase(ctx context.Context, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord, phase poolmgrv1alpha1.VMPhase) error {
 	vm.Phase = phase
 	vm.UpdatedAt = timestamppb.Now()
 	if err := p.store.UpdateVM(ctx, vm); err != nil {
 		err = fmt.Errorf("reconciler: provision: UpdateVM: %w", err)
-		ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm, hookCreate, p.metrics)
+		p.applyHookFailurePolicy(ctx, pool, vm)
 		return err
 	}
 	return nil
+}
+
+// applyHookFailurePolicy runs ApplyHookFailurePolicy for a create-hook
+// failure, unless vm was deleted or marked DELETING while Provision ran. A
+// host drain does that (DeletePool stops the reconciler before it marks
+// anything), and the drain deletes the VM and emits its event itself. The
+// policy would then quarantine nothing, since the store refuses that write,
+// and VM_HOOK_FAILED would report a hook failure that did not happen.
+func (p *Provisioner) applyHookFailurePolicy(ctx context.Context, pool *poolmgrv1alpha1.PoolSpec, vm *poolmgrv1alpha1.VMRecord) {
+	getCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupStoreTimeout)
+	cur, err := p.store.GetVM(getCtx, vm.GetUid())
+	cancel()
+	if errors.Is(err, store.ErrNotFound) || (err == nil && cur.GetPhase() == poolmgrv1alpha1.VMPhase_DELETING) {
+		slog.InfoContext(ctx, "reconciler: microvm deleted during provisioning, skipping hook failure policy",
+			"pool", pool.GetName(), "namespace", pool.GetNamespace(), "microvm_uid", vm.GetUid(), "flintlock_host", vm.GetFlintlockHost())
+		return
+	}
+	ApplyHookFailurePolicy(ctx, p.store, p.flint, pool, vm, hookCreate, p.metrics)
 }
 
 // waitCreated polls GetMicroVM until the microvm's state is CREATED, or

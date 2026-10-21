@@ -22,6 +22,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	HostAdmin_CordonHost_FullMethodName   = "/poolmgr.v1alpha1.HostAdmin/CordonHost"
 	HostAdmin_UncordonHost_FullMethodName = "/poolmgr.v1alpha1.HostAdmin/UncordonHost"
+	HostAdmin_DrainHost_FullMethodName    = "/poolmgr.v1alpha1.HostAdmin/DrainHost"
 	HostAdmin_ListHosts_FullMethodName    = "/poolmgr.v1alpha1.HostAdmin/ListHosts"
 	HostAdmin_AddHost_FullMethodName      = "/poolmgr.v1alpha1.HostAdmin/AddHost"
 	HostAdmin_UpdateHost_FullMethodName   = "/poolmgr.v1alpha1.HostAdmin/UpdateHost"
@@ -38,7 +39,15 @@ const (
 // wind down through normal lease expiry or release.
 type HostAdminClient interface {
 	CordonHost(ctx context.Context, in *CordonHostRequest, opts ...grpc.CallOption) (*Host, error)
+	// UncordonHost clears a host's cordon and ends any drain, resuming placement.
 	UncordonHost(ctx context.Context, in *UncordonHostRequest, opts ...grpc.CallOption) (*Host, error)
+	// DrainHost cordons a host and marks it draining. The manager then deletes every VM on
+	// the host that is not leased: available, provisioning, quarantined and failed. It keeps
+	// doing so while the host is draining, so a VM that becomes unleased later goes too.
+	// Leased VMs end through release or expiry, and vm_count reaches 0 once the last one
+	// has ended. DrainHost is idempotent, and UncordonHost ends the drain. It fails with
+	// NOT_FOUND for an unknown host.
+	DrainHost(ctx context.Context, in *DrainHostRequest, opts ...grpc.CallOption) (*Host, error)
 	ListHosts(ctx context.Context, in *ListHostsRequest, opts ...grpc.CallOption) (*ListHostsResponse, error)
 	// AddHost registers a new host. Unless skip_validation is set, the manager first dials
 	// it and checks its flintlock version, and stores nothing if either fails.
@@ -73,6 +82,16 @@ func (c *hostAdminClient) UncordonHost(ctx context.Context, in *UncordonHostRequ
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Host)
 	err := c.cc.Invoke(ctx, HostAdmin_UncordonHost_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *hostAdminClient) DrainHost(ctx context.Context, in *DrainHostRequest, opts ...grpc.CallOption) (*Host, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Host)
+	err := c.cc.Invoke(ctx, HostAdmin_DrainHost_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +157,15 @@ func (c *hostAdminClient) GetHost(ctx context.Context, in *GetHostRequest, opts 
 // wind down through normal lease expiry or release.
 type HostAdminServer interface {
 	CordonHost(context.Context, *CordonHostRequest) (*Host, error)
+	// UncordonHost clears a host's cordon and ends any drain, resuming placement.
 	UncordonHost(context.Context, *UncordonHostRequest) (*Host, error)
+	// DrainHost cordons a host and marks it draining. The manager then deletes every VM on
+	// the host that is not leased: available, provisioning, quarantined and failed. It keeps
+	// doing so while the host is draining, so a VM that becomes unleased later goes too.
+	// Leased VMs end through release or expiry, and vm_count reaches 0 once the last one
+	// has ended. DrainHost is idempotent, and UncordonHost ends the drain. It fails with
+	// NOT_FOUND for an unknown host.
+	DrainHost(context.Context, *DrainHostRequest) (*Host, error)
 	ListHosts(context.Context, *ListHostsRequest) (*ListHostsResponse, error)
 	// AddHost registers a new host. Unless skip_validation is set, the manager first dials
 	// it and checks its flintlock version, and stores nothing if either fails.
@@ -163,6 +190,9 @@ func (UnimplementedHostAdminServer) CordonHost(context.Context, *CordonHostReque
 }
 func (UnimplementedHostAdminServer) UncordonHost(context.Context, *UncordonHostRequest) (*Host, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method UncordonHost not implemented")
+}
+func (UnimplementedHostAdminServer) DrainHost(context.Context, *DrainHostRequest) (*Host, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DrainHost not implemented")
 }
 func (UnimplementedHostAdminServer) ListHosts(context.Context, *ListHostsRequest) (*ListHostsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListHosts not implemented")
@@ -231,6 +261,24 @@ func _HostAdmin_UncordonHost_Handler(srv interface{}, ctx context.Context, dec f
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(HostAdminServer).UncordonHost(ctx, req.(*UncordonHostRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _HostAdmin_DrainHost_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DrainHostRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HostAdminServer).DrainHost(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: HostAdmin_DrainHost_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HostAdminServer).DrainHost(ctx, req.(*DrainHostRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -339,6 +387,10 @@ var HostAdmin_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UncordonHost",
 			Handler:    _HostAdmin_UncordonHost_Handler,
+		},
+		{
+			MethodName: "DrainHost",
+			Handler:    _HostAdmin_DrainHost_Handler,
 		},
 		{
 			MethodName: "ListHosts",
