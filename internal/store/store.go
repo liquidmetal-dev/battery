@@ -137,13 +137,13 @@ type Store interface {
 	// ListVMsByPhase returns all VMs (across all pools) currently in phase.
 	ListVMsByPhase(ctx context.Context, phase poolmgrv1alpha1.VMPhase) ([]*poolmgrv1alpha1.VMRecord, error)
 
-	// CreateHost stores host as given, including its cordon fields. Returns ErrHostExists if
-	// a host with the same name is already registered.
+	// CreateHost stores host as given, including its cordon and drain fields. Returns
+	// ErrHostExists if a host with the same name is already registered.
 	CreateHost(ctx context.Context, host *poolmgrv1alpha1.Host) error
 	// UpdateHost replaces the address and TLS settings of the host named host.Name, stamps
-	// its updated_at with the current time, and returns the updated host. Cordon fields and
-	// host.UpdatedAt are ignored: SetHostCordoned owns cordon state. Returns ErrNotFound if
-	// no such host is registered.
+	// its updated_at with the current time, and returns the updated host. Cordon and drain
+	// fields and host.UpdatedAt are ignored: SetHostCordoned and DrainHost own them.
+	// Returns ErrNotFound if no such host is registered.
 	UpdateHost(ctx context.Context, host *poolmgrv1alpha1.Host) (*poolmgrv1alpha1.Host, error)
 	// DeleteHost removes host name's registry row, but only if nothing depends on it: in the
 	// same transaction it checks that no pool spec names the host in flintlock_hosts and
@@ -154,8 +154,20 @@ type Store interface {
 	GetHost(ctx context.Context, name string) (*poolmgrv1alpha1.Host, error)
 	ListHosts(ctx context.Context) ([]*poolmgrv1alpha1.Host, error)
 	// SetHostCordoned sets host name's cordoned state and reason, returning the updated host.
-	// Returns ErrNotFound if no such host is registered.
+	// Uncordoning (cordoned false) also ends any drain. Cordoning leaves the drain state as
+	// it is. Returns ErrNotFound if no such host is registered.
 	SetHostCordoned(ctx context.Context, name string, cordoned bool, reason string) (*poolmgrv1alpha1.Host, error)
+	// DrainHost cordons host name and marks it draining, and in the same transaction marks
+	// DELETING (clearing lease_id) every VM on the host that is not leased: any VM that is
+	// not LEASED, PRE_LEASE_HOOK_RUNNING or already DELETING. A non-empty reason replaces
+	// cordoned_reason. cordoned_at and draining_at keep their values if the host was already
+	// cordoned or draining, so a repeated call changes nothing but VMs. It returns the
+	// updated host and the VMs it marked, ordered by uid. Returns ErrNotFound if no such
+	// host is registered.
+	DrainHost(ctx context.Context, name, reason string) (*poolmgrv1alpha1.Host, []*poolmgrv1alpha1.VMRecord, error)
+	// MarkDrainingHostsVMsDeleting does for every draining host, in one transaction, what
+	// DrainHost does to the VMs of one host. It returns the VMs it marked, ordered by uid.
+	MarkDrainingHostsVMsDeleting(ctx context.Context) ([]*poolmgrv1alpha1.VMRecord, error)
 	// ReservePlacement records that a VM with the given id is about to be created on host
 	// for pool (poolName, poolNamespace), in the same transaction as a check that host is
 	// registered and not cordoned. Returns ErrHostNotRegistered or ErrHostCordoned if not,

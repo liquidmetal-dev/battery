@@ -2209,3 +2209,362 @@ func TestDeleteVMCheckingPoolNotFound(t *testing.T) {
 		t.Errorf("DeleteVMCheckingPool() error = %v, want ErrNotFound", err)
 	}
 }
+
+func TestOpenUpgradesVersionTwoDB(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "poolmgr.db")
+
+	// Build a database as a binary with only migrations 1 and 2 would have:
+	// no drain columns, user_version 2, and a cordoned host row.
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	if _, err := db.Exec(schemaSQL); err != nil {
+		t.Fatalf("apply baseline schema error = %v", err)
+	}
+	for i := range 2 {
+		if _, err := db.Exec(migrations[i]); err != nil {
+			t.Fatalf("apply migration %d error = %v", i+1, err)
+		}
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 2;`); err != nil {
+		t.Fatalf("set user_version error = %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO hosts (name, address, cordoned, cordoned_reason, cordoned_at, updated_at, tls_insecure)
+		VALUES ('host-old', 'old:8443', 1, 'maintenance', 5, 6, 1)`); err != nil {
+		t.Fatalf("insert host error = %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("db.Close() error = %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if got, want := schemaVersion(t, s), len(migrations); got != want {
+		t.Errorf("user_version = %d, want %d", got, want)
+	}
+
+	got, err := s.GetHost(ctx, "host-old")
+	if err != nil {
+		t.Fatalf("GetHost() error = %v", err)
+	}
+	want := &poolmgrv1alpha1.Host{
+		Name:           "host-old",
+		Address:        "old:8443",
+		Cordoned:       true,
+		CordonedReason: "maintenance",
+		CordonedAt:     timestamppb.New(time.Unix(0, 5)),
+		UpdatedAt:      timestamppb.New(time.Unix(0, 6)),
+		Tls:            &poolmgrv1alpha1.HostTLS{Insecure: true},
+	}
+	if !proto.Equal(got, want) {
+		t.Errorf("GetHost() = %+v, want the pre-upgrade row, not draining, %+v", got, want)
+	}
+
+	if _, _, err := s.DrainHost(ctx, "host-old", ""); err != nil {
+		t.Fatalf("DrainHost() after upgrade error = %v", err)
+	}
+}
+
+func TestCreateHostStoresDrainFields(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	host := sampleHost("host-a")
+	host.Cordoned = true
+	host.Draining = true
+	host.DrainingAt = timestamppb.New(time.Unix(1_700_000_100, 0))
+	if err := s.CreateHost(ctx, host); err != nil {
+		t.Fatalf("CreateHost() error = %v", err)
+	}
+
+	got, err := s.GetHost(ctx, "host-a")
+	if err != nil {
+		t.Fatalf("GetHost() error = %v", err)
+	}
+	if !proto.Equal(got, host) {
+		t.Errorf("GetHost() = %+v, want %+v", got, host)
+	}
+}
+
+// seedDrainVMs stores a VM in every phase on host-a, plus an AVAILABLE VM on
+// host-b, and returns the uids DrainHost("host-a") must mark, in uid order.
+func seedDrainVMs(ctx context.Context, t *testing.T, s Store) []string {
+	t.Helper()
+
+	for _, name := range []string{"host-a", "host-b"} {
+		if err := s.CreateHost(ctx, sampleHost(name)); err != nil {
+			t.Fatalf("CreateHost(%q) error = %v", name, err)
+		}
+	}
+
+	var want []string
+	for phase, name := range poolmgrv1alpha1.VMPhase_name {
+		vm := sampleVMRecord("vm-"+name, "pool-a", "ns-1", poolmgrv1alpha1.VMPhase(phase))
+		switch vm.GetPhase() {
+		case poolmgrv1alpha1.VMPhase_LEASED, poolmgrv1alpha1.VMPhase_PRE_LEASE_HOOK_RUNNING, poolmgrv1alpha1.VMPhase_DELETING:
+			lease := "lease-" + name
+			vm.LeaseId = &lease
+		default:
+			want = append(want, vm.GetUid())
+		}
+		if err := s.CreateVM(ctx, vm); err != nil {
+			t.Fatalf("CreateVM(%q) error = %v", vm.GetUid(), err)
+		}
+	}
+
+	other := sampleVMRecord("vm-other-host", "pool-a", "ns-1", poolmgrv1alpha1.VMPhase_AVAILABLE)
+	other.FlintlockHost = "host-b"
+	if err := s.CreateVM(ctx, other); err != nil {
+		t.Fatalf("CreateVM(%q) error = %v", other.GetUid(), err)
+	}
+
+	slices.Sort(want)
+	return want
+}
+
+func vmUIDs(vms []*poolmgrv1alpha1.VMRecord) []string {
+	uids := make([]string, 0, len(vms))
+	for _, vm := range vms {
+		uids = append(uids, vm.GetUid())
+	}
+	return uids
+}
+
+func TestDrainHost(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	want := seedDrainVMs(ctx, t, s)
+
+	before := time.Now()
+	host, marked, err := s.DrainHost(ctx, "host-a", "scale-down")
+	if err != nil {
+		t.Fatalf("DrainHost() error = %v", err)
+	}
+
+	if !host.GetCordoned() || !host.GetDraining() || host.GetCordonedReason() != "scale-down" {
+		t.Errorf("DrainHost() host = %+v, want cordoned and draining with reason %q", host, "scale-down")
+	}
+	if host.GetCordonedAt().AsTime().Before(before) || host.GetDrainingAt().AsTime().Before(before) {
+		t.Errorf("DrainHost() cordoned_at = %v, draining_at = %v, want both stamped now", host.GetCordonedAt(), host.GetDrainingAt())
+	}
+
+	if got := vmUIDs(marked); !slices.Equal(got, want) {
+		t.Errorf("DrainHost() marked = %v, want %v", got, want)
+	}
+	for _, vm := range marked {
+		if vm.GetPhase() != poolmgrv1alpha1.VMPhase_DELETING || vm.LeaseId != nil {
+			t.Errorf("marked vm %q = %+v, want DELETING with no lease_id", vm.GetUid(), vm)
+		}
+	}
+
+	// The store agrees: every unleased VM on host-a is DELETING, and the
+	// leased ones and host-b's VM keep their phase.
+	for phase, name := range poolmgrv1alpha1.VMPhase_name {
+		vm, err := s.GetVM(ctx, "vm-"+name)
+		if err != nil {
+			t.Fatalf("GetVM(%q) error = %v", "vm-"+name, err)
+		}
+		wantPhase := poolmgrv1alpha1.VMPhase_DELETING
+		switch poolmgrv1alpha1.VMPhase(phase) {
+		case poolmgrv1alpha1.VMPhase_LEASED, poolmgrv1alpha1.VMPhase_PRE_LEASE_HOOK_RUNNING:
+			wantPhase = poolmgrv1alpha1.VMPhase(phase)
+			if vm.GetLeaseId() == "" {
+				t.Errorf("leased vm %q lost its lease_id", vm.GetUid())
+			}
+		}
+		if vm.GetPhase() != wantPhase {
+			t.Errorf("GetVM(%q) phase = %v, want %v", vm.GetUid(), vm.GetPhase(), wantPhase)
+		}
+	}
+	other, err := s.GetVM(ctx, "vm-other-host")
+	if err != nil {
+		t.Fatalf("GetVM(vm-other-host) error = %v", err)
+	}
+	if other.GetPhase() != poolmgrv1alpha1.VMPhase_AVAILABLE {
+		t.Errorf("vm on host-b phase = %v, want AVAILABLE", other.GetPhase())
+	}
+
+	// A drained host is cordoned, so ReservePlacement refuses it.
+	if err := s.ReservePlacement(ctx, "p-1", "host-a", "pool-a", "ns-1"); !errors.Is(err, ErrHostCordoned) {
+		t.Errorf("ReservePlacement() on drained host error = %v, want ErrHostCordoned", err)
+	}
+}
+
+func TestDrainHostIdempotent(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	seedDrainVMs(ctx, t, s)
+
+	first, _, err := s.DrainHost(ctx, "host-a", "scale-down")
+	if err != nil {
+		t.Fatalf("DrainHost() error = %v", err)
+	}
+
+	second, marked, err := s.DrainHost(ctx, "host-a", "")
+	if err != nil {
+		t.Fatalf("DrainHost() second call error = %v", err)
+	}
+	if len(marked) != 0 {
+		t.Errorf("DrainHost() second call marked %v, want nothing", vmUIDs(marked))
+	}
+	if second.GetCordonedReason() != "scale-down" {
+		t.Errorf("DrainHost() with no reason cordoned_reason = %q, want the earlier %q", second.GetCordonedReason(), "scale-down")
+	}
+	if !proto.Equal(second.GetCordonedAt(), first.GetCordonedAt()) || !proto.Equal(second.GetDrainingAt(), first.GetDrainingAt()) {
+		t.Errorf("DrainHost() second call cordoned_at = %v, draining_at = %v, want the first call's %v, %v",
+			second.GetCordonedAt(), second.GetDrainingAt(), first.GetCordonedAt(), first.GetDrainingAt())
+	}
+
+	third, _, err := s.DrainHost(ctx, "host-a", "new reason")
+	if err != nil {
+		t.Fatalf("DrainHost() third call error = %v", err)
+	}
+	if third.GetCordonedReason() != "new reason" {
+		t.Errorf("DrainHost() cordoned_reason = %q, want %q", third.GetCordonedReason(), "new reason")
+	}
+}
+
+func TestDrainHostKeepsEarlierCordonTime(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	if err := s.CreateHost(ctx, sampleHost("host-a")); err != nil {
+		t.Fatalf("CreateHost() error = %v", err)
+	}
+
+	cordoned, err := s.SetHostCordoned(ctx, "host-a", true, "maintenance")
+	if err != nil {
+		t.Fatalf("SetHostCordoned() error = %v", err)
+	}
+	drained, _, err := s.DrainHost(ctx, "host-a", "")
+	if err != nil {
+		t.Fatalf("DrainHost() error = %v", err)
+	}
+	if !proto.Equal(drained.GetCordonedAt(), cordoned.GetCordonedAt()) || drained.GetCordonedReason() != "maintenance" {
+		t.Errorf("DrainHost() = %+v, want the cordon's time and reason kept from %+v", drained, cordoned)
+	}
+}
+
+func TestDrainHostNotFound(t *testing.T) {
+	s := openTestStore(t)
+	if _, _, err := s.DrainHost(context.Background(), "missing", ""); !errors.Is(err, ErrNotFound) {
+		t.Errorf("DrainHost() error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestSetHostCordonedEndsDrainOnlyOnUncordon(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	if err := s.CreateHost(ctx, sampleHost("host-a")); err != nil {
+		t.Fatalf("CreateHost() error = %v", err)
+	}
+	if _, _, err := s.DrainHost(ctx, "host-a", ""); err != nil {
+		t.Fatalf("DrainHost() error = %v", err)
+	}
+
+	recordoned, err := s.SetHostCordoned(ctx, "host-a", true, "still down")
+	if err != nil {
+		t.Fatalf("SetHostCordoned(true) error = %v", err)
+	}
+	if !recordoned.GetDraining() || recordoned.GetDrainingAt() == nil {
+		t.Errorf("SetHostCordoned(true) = %+v, want the drain kept", recordoned)
+	}
+
+	uncordoned, err := s.SetHostCordoned(ctx, "host-a", false, "")
+	if err != nil {
+		t.Fatalf("SetHostCordoned(false) error = %v", err)
+	}
+	if uncordoned.GetCordoned() || uncordoned.GetDraining() || uncordoned.GetDrainingAt() != nil {
+		t.Errorf("SetHostCordoned(false) = %+v, want neither cordoned nor draining", uncordoned)
+	}
+
+	vm := sampleVMRecord("vm-1", "pool-a", "ns-1", poolmgrv1alpha1.VMPhase_AVAILABLE)
+	if err := s.CreateVM(ctx, vm); err != nil {
+		t.Fatalf("CreateVM() error = %v", err)
+	}
+	marked, err := s.MarkDrainingHostsVMsDeleting(ctx)
+	if err != nil {
+		t.Fatalf("MarkDrainingHostsVMsDeleting() error = %v", err)
+	}
+	if len(marked) != 0 {
+		t.Errorf("MarkDrainingHostsVMsDeleting() after uncordon marked %v, want nothing", vmUIDs(marked))
+	}
+}
+
+func TestMarkDrainingHostsVMsDeleting(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	want := seedDrainVMs(ctx, t, s)
+
+	// Nothing is draining yet.
+	marked, err := s.MarkDrainingHostsVMsDeleting(ctx)
+	if err != nil {
+		t.Fatalf("MarkDrainingHostsVMsDeleting() error = %v", err)
+	}
+	if len(marked) != 0 {
+		t.Fatalf("MarkDrainingHostsVMsDeleting() with no draining host marked %v, want nothing", vmUIDs(marked))
+	}
+
+	// Mark host-a draining without touching its VMs, as if they arrived
+	// after DrainHost: a provision that reserved its placement first.
+	if _, err := s.(*sqliteStore).db.ExecContext(ctx, `UPDATE hosts SET cordoned = 1, draining = 1 WHERE name = 'host-a'`); err != nil {
+		t.Fatalf("mark host-a draining error = %v", err)
+	}
+
+	marked, err = s.MarkDrainingHostsVMsDeleting(ctx)
+	if err != nil {
+		t.Fatalf("MarkDrainingHostsVMsDeleting() error = %v", err)
+	}
+	if got := vmUIDs(marked); !slices.Equal(got, want) {
+		t.Errorf("MarkDrainingHostsVMsDeleting() marked = %v, want %v", got, want)
+	}
+
+	other, err := s.GetVM(ctx, "vm-other-host")
+	if err != nil {
+		t.Fatalf("GetVM(vm-other-host) error = %v", err)
+	}
+	if other.GetPhase() != poolmgrv1alpha1.VMPhase_AVAILABLE {
+		t.Errorf("vm on host-b phase = %v, want AVAILABLE", other.GetPhase())
+	}
+
+	again, err := s.MarkDrainingHostsVMsDeleting(ctx)
+	if err != nil {
+		t.Fatalf("MarkDrainingHostsVMsDeleting() second call error = %v", err)
+	}
+	if len(again) != 0 {
+		t.Errorf("MarkDrainingHostsVMsDeleting() second call marked %v, want nothing", vmUIDs(again))
+	}
+}
+
+// TestDrainedVMCannotBecomeAvailable is the race a provision in flight on a
+// drained host runs into: its last UpdateVM must not move the VM out of
+// DELETING.
+func TestDrainedVMCannotBecomeAvailable(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	if err := s.CreateHost(ctx, sampleHost("host-a")); err != nil {
+		t.Fatalf("CreateHost() error = %v", err)
+	}
+	vm := sampleVMRecord("vm-1", "pool-a", "ns-1", poolmgrv1alpha1.VMPhase_CREATE_HOOK_RUNNING)
+	if err := s.CreateVM(ctx, vm); err != nil {
+		t.Fatalf("CreateVM() error = %v", err)
+	}
+
+	if _, _, err := s.DrainHost(ctx, "host-a", ""); err != nil {
+		t.Fatalf("DrainHost() error = %v", err)
+	}
+
+	vm.Phase = poolmgrv1alpha1.VMPhase_AVAILABLE
+	if err := s.UpdateVM(ctx, vm); !errors.Is(err, ErrVMDeleting) {
+		t.Errorf("UpdateVM() to AVAILABLE after drain error = %v, want ErrVMDeleting", err)
+	}
+	if _, err := s.ClaimAvailableVM(ctx, "pool-a", "ns-1"); !errors.Is(err, ErrNoAvailableVM) {
+		t.Errorf("ClaimAvailableVM() after drain error = %v, want ErrNoAvailableVM", err)
+	}
+}

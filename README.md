@@ -24,7 +24,7 @@ battery is made up of three binaries:
   - `PoolAdmin` — create, update, delete, and list pool definitions.
   - `Lease` — claim a VM from a pool, heartbeat it, and release it back.
   - `Events` — a server-streaming subscription for pool/VM/lease lifecycle events.
-  - `HostAdmin` — add, update, cordon, remove, and list the flintlock hosts VMs are placed on.
+  - `HostAdmin` — add, update, cordon, drain, remove, and list the flintlock hosts VMs are placed on.
 
   It's designed to reconcile a fleet of flintlock hosts against each pool's desired state, replenishing
   VMs using a per-pool strategy, and, once implemented, persist state (e.g., in an embedded SQLite database).
@@ -80,7 +80,8 @@ For TLS to the host, pass `--flintlock-ca-file` (and `--flintlock-cert-file`/`--
 for mTLS) instead of `--flintlock-insecure`. These are paths on the machine running `poolmgrd`,
 not on the machine running `poolmgrctl`. `host add` dials the host and checks its flintlock
 version before storing it; `--skip-validation` registers a host that isn't reachable yet. Use
-`host update`, `host cordon`, `host remove`, `host get`, and `host list` to manage hosts after that.
+`host update`, `host cordon`, `host drain`, `host remove`, `host get`, and `host list` to manage hosts
+after that. `host drain` cordons a host and deletes its VMs that are not leased.
 A pool spec can only name hosts that have been added.
 
 A config file that still has a `hosts` list (from releases before the `HostAdmin` API) fails to

@@ -16,6 +16,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/liquidmetal-dev/battery/internal/flintlockclient"
+	"github.com/liquidmetal-dev/battery/internal/reconciler"
 	"github.com/liquidmetal-dev/battery/internal/store"
 )
 
@@ -35,22 +36,25 @@ const hostCheckTimeout = 10 * time.Second
 var hostRefsMu sync.RWMutex
 
 // HostAdminServer implements poolmgrv1alpha1.HostAdminServer: the registry
-// of flintlock hosts and their cordon state. It keeps flint's connections
-// in step with the store's host rows.
+// of flintlock hosts and their cordon and drain state. It keeps flint's
+// connections in step with the store's host rows.
 type HostAdminServer struct {
 	poolmgrv1alpha1.UnimplementedHostAdminServer
 
-	store store.Store
-	flint *flintlockclient.Pool
+	store    store.Store
+	flint    *flintlockclient.Pool
+	notifier reconciler.DeletionNotifier
 
 	hostLocksMu sync.Mutex
 	hostLocks   map[string]*sync.Mutex
 }
 
 // NewHostAdminServer returns a HostAdminServer backed by st that adds,
-// replaces, and removes hosts' connections in flint.
-func NewHostAdminServer(st store.Store, flint *flintlockclient.Pool) *HostAdminServer {
-	return &HostAdminServer{store: st, flint: flint, hostLocks: make(map[string]*sync.Mutex)}
+// replaces, and removes hosts' connections in flint, and deletes a draining
+// host's VMs through flint. notifier, which may be nil, is told of each VM
+// DrainHost deletes, so its pool refills on another host straight away.
+func NewHostAdminServer(st store.Store, flint *flintlockclient.Pool, notifier reconciler.DeletionNotifier) *HostAdminServer {
+	return &HostAdminServer{store: st, flint: flint, notifier: notifier, hostLocks: make(map[string]*sync.Mutex)}
 }
 
 // lockHost serializes AddHost/UpdateHost/RemoveHost for the same host name,
@@ -91,9 +95,9 @@ func (s *HostAdminServer) CordonHost(ctx context.Context, req *poolmgrv1alpha1.C
 	return host, nil
 }
 
-// UncordonHost clears name's cordoned state, resuming placement. Uncordoning a
-// host that isn't cordoned is idempotent. Fails with FailedPrecondition if
-// name isn't a registered host.
+// UncordonHost clears name's cordoned state, resuming placement, and ends any
+// drain. Uncordoning a host that isn't cordoned is idempotent. Fails with
+// FailedPrecondition if name isn't a registered host.
 func (s *HostAdminServer) UncordonHost(ctx context.Context, req *poolmgrv1alpha1.UncordonHostRequest) (*poolmgrv1alpha1.Host, error) {
 	if req.GetName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "name is required")
@@ -106,6 +110,49 @@ func (s *HostAdminServer) UncordonHost(ctx context.Context, req *poolmgrv1alpha1
 		}
 		return nil, status.Errorf(codes.Internal, "uncordon host: %v", err)
 	}
+	return host, nil
+}
+
+// DrainHost cordons name, marks it draining, and deletes every VM on it that
+// is not leased: available, provisioning, quarantined and failed. The
+// cordon, the drain flag and the VMs' move to DELETING commit in one store
+// transaction (store.DrainHost). The deletes then run as DeletePool's do,
+// through reconciler.DeleteDrainedVMs: detached from the caller, bounded,
+// and left DELETING for the Sweeper if flintlock fails. DrainHost returns
+// once they have finished or failed.
+//
+// The drain persists until UncordonHost. On each tick the Sweeper deletes
+// any VM on the host that has since become unleased, such as a VM whose
+// placement was reserved before the cordon. Leased VMs end through release
+// or expiry; once the last one ends, vm_count reaches 0 and RemoveHost can
+// succeed. DrainHost is idempotent. It fails with NotFound for an unknown
+// host.
+func (s *HostAdminServer) DrainHost(ctx context.Context, req *poolmgrv1alpha1.DrainHostRequest) (*poolmgrv1alpha1.Host, error) {
+	name := req.GetName()
+
+	log := slog.Default().With("host", name)
+	log.InfoContext(ctx, "hostadmin: DrainHost requested", "reason", req.GetReason())
+
+	if name == "" {
+		return nil, status.Error(codes.InvalidArgument, "name is required")
+	}
+
+	host, vms, err := s.store.DrainHost(ctx, name, req.GetReason())
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		log.WarnContext(ctx, "hostadmin: DrainHost failed: host not found")
+		return nil, status.Errorf(codes.NotFound, "host %q not found", name)
+	case err != nil && ctx.Err() != nil:
+		log.WarnContext(ctx, "hostadmin: DrainHost abandoned by caller", "error", err)
+		return nil, status.FromContextError(ctx.Err()).Err()
+	case err != nil:
+		log.ErrorContext(ctx, "hostadmin: DrainHost: store write failed", "error", err)
+		return nil, status.Errorf(codes.Internal, "drain host: %v", err)
+	}
+
+	reconciler.DeleteDrainedVMs(ctx, s.store, s.flint, vms, s.notifier)
+
+	log.InfoContext(ctx, "hostadmin: host draining", "deleted_vm_count", len(vms))
 	return host, nil
 }
 
@@ -343,7 +390,7 @@ func hostInUseMessage(name string, inUse *store.HostInUseError) string {
 	if inUse.VMCount > 0 {
 		reasons = append(reasons, fmt.Sprintf("vm_count is %d", inUse.VMCount))
 	}
-	return fmt.Sprintf("host %q is still in use (%s): cordon it, drop it from each pool spec, and wait for vm_count to reach 0",
+	return fmt.Sprintf("host %q is still in use (%s): drain it, drop it from each pool spec, and wait for vm_count to reach 0",
 		name, strings.Join(reasons, "; "))
 }
 
