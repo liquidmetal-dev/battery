@@ -1153,6 +1153,102 @@ func (s *sqliteStore) ReservePlacement(ctx context.Context, id, host, poolName, 
 	return nil
 }
 
+func (s *sqliteStore) PlaceVM(ctx context.Context, id, poolName, poolNamespace string, hosts []string) (string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("store: begin place vm tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// The host check, the counts and the insert share one transaction on
+	// the store's single connection (see Open). Two PlaceVMs for one pool
+	// therefore run one after the other, and the second counts the first's
+	// placement. SetHostCordoned and DeleteHost are serialized the same way
+	// as for ReservePlacement.
+	eligible := make(map[string]bool, len(hosts))
+	rows, err := tx.QueryContext(ctx, `SELECT name FROM hosts WHERE cordoned = 0`)
+	if err != nil {
+		return "", fmt.Errorf("store: select eligible hosts: %w", err)
+	}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			_ = rows.Close()
+			return "", fmt.Errorf("store: scan eligible host: %w", err)
+		}
+		eligible[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return "", fmt.Errorf("store: iterate eligible hosts: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return "", fmt.Errorf("store: close eligible hosts: %w", err)
+	}
+
+	// A VM that is DELETING or FAILED is on its way out, so it does not
+	// count toward the spread. A placement is a VM whose create is still
+	// running, so it does.
+	counts := make(map[string]int)
+	rows, err = tx.QueryContext(ctx, `
+		SELECT flintlock_host, COUNT(*) FROM vms
+		WHERE pool_name = ? AND pool_namespace = ? AND phase NOT IN (?, ?)
+		GROUP BY flintlock_host
+		UNION ALL
+		SELECT host, COUNT(*) FROM placements
+		WHERE pool_name = ? AND pool_namespace = ?
+		GROUP BY host`,
+		poolName, poolNamespace,
+		int32(poolmgrv1alpha1.VMPhase_DELETING), int32(poolmgrv1alpha1.VMPhase_FAILED),
+		poolName, poolNamespace,
+	)
+	if err != nil {
+		return "", fmt.Errorf("store: count pool vms by host: %w", err)
+	}
+	for rows.Next() {
+		var (
+			host string
+			n    int
+		)
+		if err := rows.Scan(&host, &n); err != nil {
+			_ = rows.Close()
+			return "", fmt.Errorf("store: scan pool vm count: %w", err)
+		}
+		counts[host] += n
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return "", fmt.Errorf("store: iterate pool vm counts: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return "", fmt.Errorf("store: close pool vm counts: %w", err)
+	}
+
+	best, bestCount := "", 0
+	for _, h := range hosts {
+		if !eligible[h] {
+			continue
+		}
+		if c := counts[h]; best == "" || c < bestCount {
+			best, bestCount = h, c
+		}
+	}
+	if best == "" {
+		return "", ErrNoEligibleHost
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO placements (id, host, pool_name, pool_namespace, created_at)
+		VALUES (?, ?, ?, ?, ?)`,
+		id, best, poolName, poolNamespace, time.Now().UnixNano(),
+	); err != nil {
+		return "", fmt.Errorf("store: insert placement: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("store: commit place vm tx: %w", err)
+	}
+	return best, nil
+}
 func (s *sqliteStore) ReleasePlacement(ctx context.Context, id string) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM placements WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("store: release placement: %w", err)

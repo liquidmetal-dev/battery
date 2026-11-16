@@ -3,7 +3,9 @@ package reconciler_test
 import (
 	"context"
 	"errors"
+	"maps"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -406,15 +408,15 @@ func countVMsOnHost(t *testing.T, st store.Store, host string) int32 {
 	return got
 }
 
-// TestProvision_HostCordonedAfterPick_DoesNotCreateMicroVM is the race from
-// the review of PR #83: CordonHost lands after PickHost chose the host but before
-// the microvm exists. The placement reservation is checked atomically with
-// the cordon flag, so the provision must back off without touching flintlock
-// and report it as ErrNoEligibleHost (the quiet path in provisionN).
-func TestProvision_HostCordonedAfterPick_DoesNotCreateMicroVM(t *testing.T) {
+// TestProvision_HostCordonedBeforePlace_DoesNotCreateMicroVM: CordonHost lands
+// just before PlaceVM, the latest it can land and still stop the placement.
+// PlaceVM reads the cordon flag in the transaction that reserves the
+// placement, so the provision must back off without touching flintlock and
+// report it as ErrNoEligibleHost (the quiet path in provisionN).
+func TestProvision_HostCordonedBeforePlace_DoesNotCreateMicroVM(t *testing.T) {
 	vm := &fakeMicroVM{}
 	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
-	st := &failingStore{Store: openTestStoreWithHost(t, "host-a"), cordonHostBeforeReserve: "host-a"}
+	st := &failingStore{Store: openTestStoreWithHost(t, "host-a"), cordonHostBeforePlace: "host-a"}
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 1, []string{"host-a"})
 	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), nil)
@@ -423,8 +425,8 @@ func TestProvision_HostCordonedAfterPick_DoesNotCreateMicroVM(t *testing.T) {
 	if !errors.Is(err, reconciler.ErrNoEligibleHost) {
 		t.Fatalf("Provision() error = %v, want ErrNoEligibleHost", err)
 	}
-	if !errors.Is(err, store.ErrHostCordoned) {
-		t.Fatalf("Provision() error = %v, want it to also wrap store.ErrHostCordoned", err)
+	if !errors.Is(err, store.ErrNoEligibleHost) {
+		t.Fatalf("Provision() error = %v, want it to also wrap store.ErrNoEligibleHost", err)
 	}
 	if got := len(vm.createdSpecs()); got != 0 {
 		t.Fatalf("expected no CreateMicroVM calls on a host cordoned mid-provision, got %d", got)
@@ -555,7 +557,7 @@ func TestProvision_UnregisteredHost_NoEligibleHost(t *testing.T) {
 	}
 }
 
-// TestProvision_UnregisteredHostSkipped: PickHost passes over a pool host
+// TestProvision_UnregisteredHostSkipped: PlaceVM passes over a pool host
 // with no registry row even when it has the fewest VMs.
 func TestProvision_UnregisteredHostSkipped(t *testing.T) {
 	vm := &fakeMicroVM{}
@@ -575,14 +577,14 @@ func TestProvision_UnregisteredHostSkipped(t *testing.T) {
 	}
 }
 
-// TestProvision_HostRemovedAfterPick_DoesNotCreateMicroVM is the RemoveHost
-// counterpart of TestProvision_HostCordonedAfterPick_DoesNotCreateMicroVM:
-// the host's registry row is deleted after PickHost chose it, and
-// ReservePlacement must refuse rather than place a VM on it.
-func TestProvision_HostRemovedAfterPick_DoesNotCreateMicroVM(t *testing.T) {
+// TestProvision_HostRemovedBeforePlace_DoesNotCreateMicroVM is the RemoveHost
+// counterpart of TestProvision_HostCordonedBeforePlace_DoesNotCreateMicroVM:
+// the host's registry row is deleted just before PlaceVM, which must not pick
+// it.
+func TestProvision_HostRemovedBeforePlace_DoesNotCreateMicroVM(t *testing.T) {
 	vm := &fakeMicroVM{}
 	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
-	st := &failingStore{Store: openTestStoreWithHost(t, "host-a"), removeHostBeforeReserve: "host-a"}
+	st := &failingStore{Store: openTestStoreWithHost(t, "host-a"), removeHostBeforePlace: "host-a"}
 
 	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 1, []string{"host-a"})
 	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), nil)
@@ -591,13 +593,60 @@ func TestProvision_HostRemovedAfterPick_DoesNotCreateMicroVM(t *testing.T) {
 	if !errors.Is(err, reconciler.ErrNoEligibleHost) {
 		t.Fatalf("Provision() error = %v, want ErrNoEligibleHost", err)
 	}
-	if !errors.Is(err, store.ErrHostNotRegistered) {
-		t.Fatalf("Provision() error = %v, want it to also wrap store.ErrHostNotRegistered", err)
+	if !errors.Is(err, store.ErrNoEligibleHost) {
+		t.Fatalf("Provision() error = %v, want it to also wrap store.ErrNoEligibleHost", err)
 	}
 	if got := len(vm.createdSpecs()); got != 0 {
 		t.Fatalf("expected no CreateMicroVM calls on a host removed mid-provision, got %d", got)
 	}
 	if got := countVMsOnHost(t, st, "host-a"); got != 0 {
 		t.Fatalf("CountVMsByHost(host-a) = %d, want 0", got)
+	}
+}
+
+// TestProvision_ConcurrentBatchSpreadsAcrossHosts is #137. provisionN runs
+// a batch's provisions concurrently. Each create here blocks until every
+// provision in the batch has picked its host, so no VM row exists while
+// the hosts are picked: only the placements in flight tell them apart. The
+// batch must still spread evenly, not land on the first host.
+func TestProvision_ConcurrentBatchSpreadsAcrossHosts(t *testing.T) {
+	const n = 8
+	var (
+		arrived sync.WaitGroup
+		all     = make(chan struct{})
+	)
+	arrived.Add(n)
+	go func() { arrived.Wait(); close(all) }()
+	vm := &fakeMicroVM{onCreate: func() {
+		arrived.Done()
+		select {
+		case <-all:
+		case <-time.After(5 * time.Second):
+		}
+	}}
+	flint := startFakeFlintlockHosts(t, vm, alwaysReadyExec(), "host-a", "host-b")
+	st := openTestStore(t)
+	seedHost(t, st, "host-a")
+	seedHost(t, st, "host-b")
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, n, []string{"host-a", "host-b"})
+	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), nil)
+
+	errs := make(chan error, n)
+	for range n {
+		go func() { errs <- p.Provision(context.Background(), pool) }()
+	}
+	for range n {
+		if err := <-errs; err != nil {
+			t.Fatalf("Provision: %v", err)
+		}
+	}
+
+	got := map[string]int{}
+	for _, v := range onlyVMsInPool(t, st, "pool-a") {
+		got[v.GetFlintlockHost()]++
+	}
+	if want := map[string]int{"host-a": n / 2, "host-b": n / 2}; !maps.Equal(got, want) {
+		t.Fatalf("VMs per host = %v, want %v", got, want)
 	}
 }

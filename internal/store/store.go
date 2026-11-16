@@ -33,8 +33,12 @@ var ErrDuplicateRequestID = errors.New("store: duplicate lease request id")
 var ErrHostCordoned = errors.New("store: host is cordoned")
 
 // ErrHostNotRegistered is returned by ReservePlacement when the host has no
-// registry row, e.g. because RemoveHost deleted it after PickHost chose it.
+// registry row, e.g. because RemoveHost deleted it first.
 var ErrHostNotRegistered = errors.New("store: host not registered")
+
+// ErrNoEligibleHost is returned by PlaceVM when none of the hosts it was given
+// is registered and uncordoned.
+var ErrNoEligibleHost = errors.New("store: no eligible host")
 
 // ErrHostExists is returned by CreateHost when a host with the same name is
 // already registered.
@@ -168,6 +172,16 @@ type Store interface {
 	// MarkDrainingHostsVMsDeleting does for every draining host, in one transaction, what
 	// DrainHost does to the VMs of one host. It returns the VMs it marked, ordered by uid.
 	MarkDrainingHostsVMsDeleting(ctx context.Context) ([]*poolmgrv1alpha1.VMRecord, error)
+	// PlaceVM picks the host for a new VM of pool (poolName, poolNamespace) and reserves
+	// the placement under id, in one transaction. It considers each name in hosts that is
+	// registered and not cordoned, and picks the one with the fewest of the pool's VMs:
+	// its VM records in any phase but DELETING and FAILED, plus its placement reservations.
+	// A tie goes to the host that comes first in hosts. Because the placement is recorded
+	// in the same transaction, the next PlaceVM for the pool counts it, so concurrent
+	// provisions spread across the hosts. Returns ErrNoEligibleHost, and records nothing,
+	// if no host in hosts is eligible. The reservation counts toward CountVMsByHost until
+	// ReleasePlacement(id).
+	PlaceVM(ctx context.Context, id, poolName, poolNamespace string, hosts []string) (string, error)
 	// ReservePlacement records that a VM with the given id is about to be created on host
 	// for pool (poolName, poolNamespace), in the same transaction as a check that host is
 	// registered and not cordoned. Returns ErrHostNotRegistered or ErrHostCordoned if not,

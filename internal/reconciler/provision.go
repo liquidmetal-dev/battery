@@ -132,17 +132,6 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 
 	log := slog.Default().With("pool", pool.GetName(), "namespace", pool.GetNamespace())
 
-	ineligible, err := ineligibleHosts(ctx, p.store, pool)
-	if err != nil {
-		return fmt.Errorf("reconciler: provision: %w", err)
-	}
-
-	host, err := PickHost(ctx, p.store, pool, ineligible)
-	if err != nil {
-		return err
-	}
-	log = log.With("flintlock_host", host)
-
 	// The template is one shared spec instantiated for every VM in the
 	// pool, so no single id in it can be right for all of them: flintlockd
 	// rejects an empty one outright ("name is required"), and a fixed
@@ -156,21 +145,24 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 	// flintlockclient.MinFlintlockVersion) keys that path by uid alone.
 	id := fmt.Sprintf("%s-%s", pool.GetName(), uuid.NewString()[:8])
 
-	// Reserve the placement before anything else touches the host. The
-	// ineligible set above is a snapshot: CordonHost or RemoveHost can land
-	// any time after it, and without this the VM would still be created on
-	// a host the operator has just been told is safe to take down.
-	// ReservePlacement checks the host is registered and uncordoned and
-	// records the placement atomically, and the reservation counts toward
-	// the host's VM total until the vms row replaces it, so ListHosts never
-	// shows 0 while a create is underway and RemoveHost refuses meanwhile.
-	if err := p.store.ReservePlacement(ctx, id, host, pool.GetName(), pool.GetNamespace()); err != nil {
-		if errors.Is(err, store.ErrHostCordoned) || errors.Is(err, store.ErrHostNotRegistered) {
-			log.DebugContext(ctx, "reconciler: host cordoned or removed after being picked, skipping placement", "error", err)
-			return fmt.Errorf("%w: host %q became ineligible before placement: %w", ErrNoEligibleHost, host, err)
+	// Pick the host and reserve the placement before anything else touches
+	// the host. PlaceVM does both in one store transaction, so:
+	//   - the provisions of one batch, which run concurrently, each count
+	//     the placements before them and spread across the hosts (#137);
+	//   - CordonHost or RemoveHost either lands first, and the host is not
+	//     picked, or sees the reservation counted, so the operator is never
+	//     told a host is empty while a create is on its way to it.
+	// The reservation counts toward the host's VM total until the vms row
+	// replaces it, so ListHosts never shows 0 while a create is underway.
+	host, err := p.store.PlaceVM(ctx, id, pool.GetName(), pool.GetNamespace(), pool.GetFlintlockHosts())
+	if err != nil {
+		if errors.Is(err, store.ErrNoEligibleHost) {
+			return fmt.Errorf("%w: pool %s/%s: %w", ErrNoEligibleHost, pool.GetNamespace(), pool.GetName(), err)
 		}
-		return fmt.Errorf("reconciler: provision: reserve placement: %w", err)
+		return fmt.Errorf("reconciler: provision: place vm: %w", err)
 	}
+	log = log.With("flintlock_host", host)
+
 	// Released as soon as the vms row exists (below) or on any earlier
 	// failure. ctx is often already cancelled by the time a failure path
 	// runs (see ApplyHookFailurePolicy), so release on a detached context;
