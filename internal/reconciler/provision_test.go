@@ -11,6 +11,7 @@ import (
 
 	poolmgrv1alpha1 "github.com/liquidmetal-dev/battery/api/proto/poolmgr/v1alpha1"
 	microvmexecv1alpha1 "github.com/liquidmetal-dev/flintlock/api/services/microvmexec/v1alpha1"
+	flintlocktypes "github.com/liquidmetal-dev/flintlock/api/types"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -119,6 +120,33 @@ func TestProvision_AssignsAUniqueIDToEachVM(t *testing.T) {
 	}
 	if got := created[0].GetNamespace(); got != pool.GetNamespace() {
 		t.Fatalf("namespace = %q, want the pool's own %q", got, pool.GetNamespace())
+	}
+}
+
+// TestProvision_PassesTheTemplatesBalloon guards
+// https://github.com/liquidmetal-dev/battery/issues/161: a pool whose
+// template asks for a balloon with free page reporting gets it on every VM.
+func TestProvision_PassesTheTemplatesBalloon(t *testing.T) {
+	vm := &fakeMicroVM{pollsUntilCreated: 0}
+	exec := alwaysReadyExec()
+	flint := startFakeFlintlock(t, vm, exec)
+	st := openTestStore(t)
+	seedHost(t, st, "host-a")
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-a"})
+	pool.MicrovmTemplate.Balloon = &flintlocktypes.Balloon{FreePageReporting: true}
+	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), metrics.NewRegistry())
+
+	if err := p.Provision(context.Background(), pool); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+
+	created := vm.createdSpecs()
+	if len(created) != 1 {
+		t.Fatalf("expected 1 CreateMicroVM call, got %d", len(created))
+	}
+	if !created[0].GetBalloon().GetFreePageReporting() {
+		t.Fatalf("created spec balloon = %+v, want free_page_reporting", created[0].GetBalloon())
 	}
 }
 
