@@ -334,12 +334,11 @@ func (s *HostAdminServer) UpdateHost(ctx context.Context, req *poolmgrv1alpha1.U
 // CreatePool or UpdatePool from slipping a new reference in between.
 //
 // A reconciler that UpdatePool is replacing can still be running the old
-// spec for a moment after the new one is stored, and PickHost may choose
-// the removed host from it. That cannot place a VM there: the placement
-// reservation is taken in one transaction with a check that the host is
-// still registered, so either the reservation lands first and DeleteHost
-// refuses, or the delete lands first and ReservePlacement refuses with
-// store.ErrHostNotRegistered.
+// spec for a moment after the new one is stored, and offer the removed host
+// to store.PlaceVM. That cannot place a VM there: PlaceVM picks only among
+// registered hosts and takes the reservation in the same transaction, so
+// either the reservation lands first and DeleteHost refuses, or the delete
+// lands first and the host is not picked.
 func (s *HostAdminServer) RemoveHost(ctx context.Context, req *poolmgrv1alpha1.RemoveHostRequest) (*emptypb.Empty, error) {
 	name := req.GetName()
 

@@ -216,6 +216,14 @@ func (f *fakeMicroVMExec) ExecCommand(stream microvmexecv1alpha1.MicroVMExec_Exe
 // pool. Server and pool are cleaned up via t.Cleanup.
 func startFakeFlintlock(t *testing.T, vm *fakeMicroVM, exec *fakeMicroVMExec) *flintlockclient.Pool {
 	t.Helper()
+	return startFakeFlintlockHosts(t, vm, exec, "host-a")
+}
+
+// startFakeFlintlockHosts is startFakeFlintlock with one client pool entry
+// per name in hosts, all dialling the same fake server. The VM records'
+// flintlock_host fields, not the fake, then show where each VM was placed.
+func startFakeFlintlockHosts(t *testing.T, vm *fakeMicroVM, exec *fakeMicroVMExec, hosts ...string) *flintlockclient.Pool {
+	t.Helper()
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -230,9 +238,11 @@ func startFakeFlintlock(t *testing.T, vm *fakeMicroVM, exec *fakeMicroVMExec) *f
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 
-	pool, err := flintlockclient.New([]*poolmgrv1alpha1.Host{
-		{Name: "host-a", Address: lis.Addr().String(), Tls: &poolmgrv1alpha1.HostTLS{Insecure: true}},
-	})
+	specs := make([]*poolmgrv1alpha1.Host, 0, len(hosts))
+	for _, h := range hosts {
+		specs = append(specs, &poolmgrv1alpha1.Host{Name: h, Address: lis.Addr().String(), Tls: &poolmgrv1alpha1.HostTLS{Insecure: true}})
+	}
+	pool, err := flintlockclient.New(specs)
 	if err != nil {
 		t.Fatalf("flintlockclient.New: %v", err)
 	}

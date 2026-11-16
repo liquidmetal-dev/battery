@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -2566,5 +2567,178 @@ func TestDrainedVMCannotBecomeAvailable(t *testing.T) {
 	}
 	if _, err := s.ClaimAvailableVM(ctx, "pool-a", "ns-1"); !errors.Is(err, ErrNoAvailableVM) {
 		t.Errorf("ClaimAvailableVM() after drain error = %v, want ErrNoAvailableVM", err)
+	}
+}
+
+// placeTestStore returns a store with hosts registered and each VM in vms
+// recorded as given (uid, pool, host, phase).
+func placeTestStore(t *testing.T, hosts []string, vms ...*poolmgrv1alpha1.VMRecord) Store {
+	t.Helper()
+	s := openTestStore(t)
+	ctx := context.Background()
+	for _, h := range hosts {
+		if err := s.CreateHost(ctx, sampleHost(h)); err != nil {
+			t.Fatalf("CreateHost(%q) error = %v", h, err)
+		}
+	}
+	for _, vm := range vms {
+		if err := s.CreateVM(ctx, vm); err != nil {
+			t.Fatalf("CreateVM(%q) error = %v", vm.GetUid(), err)
+		}
+	}
+	return s
+}
+
+func placedVM(uid, pool, host string, phase poolmgrv1alpha1.VMPhase) *poolmgrv1alpha1.VMRecord {
+	vm := sampleVMRecord(uid, pool, "default", phase)
+	vm.FlintlockHost = host
+	return vm
+}
+
+// placeN calls PlaceVM n times for pool-a and returns how many placements
+// each host got.
+func placeN(t *testing.T, s Store, n int, hosts []string) map[string]int {
+	t.Helper()
+	got := map[string]int{}
+	for i := range n {
+		host, err := s.PlaceVM(context.Background(), fmt.Sprintf("placement-%d", i), "pool-a", "default", hosts)
+		if err != nil {
+			t.Fatalf("PlaceVM() #%d error = %v", i, err)
+		}
+		got[host]++
+	}
+	return got
+}
+
+// TestPlaceVM_CountsItsOwnPlacements is #137: placements still in flight
+// count toward the spread, so a batch on empty hosts is spread evenly
+// rather than all put on the first host.
+func TestPlaceVM_CountsItsOwnPlacements(t *testing.T) {
+	hosts := []string{"host-a", "host-b"}
+	s := placeTestStore(t, hosts)
+
+	got := placeN(t, s, 8, hosts)
+	if want := map[string]int{"host-a": 4, "host-b": 4}; !maps.Equal(got, want) {
+		t.Fatalf("placements = %v, want %v", got, want)
+	}
+}
+
+// TestPlaceVM_EvensOutUnevenHosts: a batch goes to the least loaded host
+// first, until the hosts are even, then alternates.
+func TestPlaceVM_EvensOutUnevenHosts(t *testing.T) {
+	hosts := []string{"host-a", "host-b"}
+	s := placeTestStore(t, hosts,
+		placedVM("vm-1", "pool-a", "host-a", poolmgrv1alpha1.VMPhase_AVAILABLE),
+		placedVM("vm-2", "pool-a", "host-b", poolmgrv1alpha1.VMPhase_AVAILABLE),
+		placedVM("vm-3", "pool-a", "host-b", poolmgrv1alpha1.VMPhase_LEASED),
+		placedVM("vm-4", "pool-a", "host-b", poolmgrv1alpha1.VMPhase_QUARANTINED),
+	)
+
+	got := placeN(t, s, 4, hosts)
+	if want := map[string]int{"host-a": 3, "host-b": 1}; !maps.Equal(got, want) {
+		t.Fatalf("placements = %v, want %v", got, want)
+	}
+}
+
+// TestPlaceVM_TieGoesToFirstHost: with equal counts, the host listed first
+// wins, so placement stays predictable.
+func TestPlaceVM_TieGoesToFirstHost(t *testing.T) {
+	s := placeTestStore(t, []string{"host-a", "host-b"})
+
+	host, err := s.PlaceVM(context.Background(), "placement-1", "pool-a", "default", []string{"host-b", "host-a"})
+	if err != nil {
+		t.Fatalf("PlaceVM() error = %v", err)
+	}
+	if host != "host-b" {
+		t.Fatalf("PlaceVM() = %q, want host-b (first in the list)", host)
+	}
+}
+
+// TestPlaceVM_IgnoresVMsOnTheirWayOut: DELETING and FAILED VMs do not
+// count, and neither do another pool's VMs and placements.
+func TestPlaceVM_IgnoresVMsOnTheirWayOut(t *testing.T) {
+	hosts := []string{"host-a", "host-b"}
+	s := placeTestStore(t, hosts,
+		placedVM("vm-1", "pool-a", "host-a", poolmgrv1alpha1.VMPhase_DELETING),
+		placedVM("vm-2", "pool-a", "host-a", poolmgrv1alpha1.VMPhase_FAILED),
+		placedVM("vm-3", "pool-b", "host-a", poolmgrv1alpha1.VMPhase_AVAILABLE),
+		placedVM("vm-4", "pool-a", "host-b", poolmgrv1alpha1.VMPhase_AVAILABLE),
+	)
+	if err := s.ReservePlacement(context.Background(), "other", "host-a", "pool-b", "default"); err != nil {
+		t.Fatalf("ReservePlacement() error = %v", err)
+	}
+
+	host, err := s.PlaceVM(context.Background(), "placement-1", "pool-a", "default", hosts)
+	if err != nil {
+		t.Fatalf("PlaceVM() error = %v", err)
+	}
+	if host != "host-a" {
+		t.Fatalf("PlaceVM() = %q, want host-a (no live pool-a VMs)", host)
+	}
+}
+
+// TestPlaceVM_SkipsCordonedAndUnregisteredHosts: a cordoned host and a
+// host with no registry row are never picked, even when they are empty.
+func TestPlaceVM_SkipsCordonedAndUnregisteredHosts(t *testing.T) {
+	s := placeTestStore(t, []string{"host-a", "host-b"},
+		placedVM("vm-1", "pool-a", "host-b", poolmgrv1alpha1.VMPhase_AVAILABLE),
+	)
+	ctx := context.Background()
+	if _, err := s.SetHostCordoned(ctx, "host-a", true, "maintenance"); err != nil {
+		t.Fatalf("SetHostCordoned() error = %v", err)
+	}
+
+	host, err := s.PlaceVM(ctx, "placement-1", "pool-a", "default", []string{"host-a", "host-gone", "host-b"})
+	if err != nil {
+		t.Fatalf("PlaceVM() error = %v", err)
+	}
+	if host != "host-b" {
+		t.Fatalf("PlaceVM() = %q, want host-b", host)
+	}
+}
+
+// TestPlaceVM_NoEligibleHost: with no eligible host, PlaceVM fails and
+// records nothing.
+func TestPlaceVM_NoEligibleHost(t *testing.T) {
+	s := placeTestStore(t, []string{"host-a"})
+	ctx := context.Background()
+	if _, err := s.SetHostCordoned(ctx, "host-a", true, "maintenance"); err != nil {
+		t.Fatalf("SetHostCordoned() error = %v", err)
+	}
+
+	for _, hosts := range [][]string{nil, {"host-a"}, {"host-a", "host-gone"}} {
+		if _, err := s.PlaceVM(ctx, "placement-1", "pool-a", "default", hosts); !errors.Is(err, ErrNoEligibleHost) {
+			t.Fatalf("PlaceVM(%v) error = %v, want ErrNoEligibleHost", hosts, err)
+		}
+	}
+	got, err := s.CountVMsByHost(ctx, "host-a")
+	if err != nil {
+		t.Fatalf("CountVMsByHost() error = %v", err)
+	}
+	if got != 0 {
+		t.Fatalf("CountVMsByHost(host-a) = %d, want 0 (nothing reserved)", got)
+	}
+}
+
+// TestPlaceVM_ReleaseFreesTheSlot: a released placement no longer counts,
+// and the placement counts toward CountVMsByHost until then.
+func TestPlaceVM_ReleaseFreesTheSlot(t *testing.T) {
+	hosts := []string{"host-a", "host-b"}
+	s := placeTestStore(t, hosts)
+	ctx := context.Background()
+
+	host, err := s.PlaceVM(ctx, "placement-1", "pool-a", "default", hosts)
+	if err != nil || host != "host-a" {
+		t.Fatalf("PlaceVM() = %q, %v; want host-a", host, err)
+	}
+	if got, _ := s.CountVMsByHost(ctx, "host-a"); got != 1 {
+		t.Fatalf("CountVMsByHost(host-a) = %d, want 1", got)
+	}
+	if err := s.ReleasePlacement(ctx, "placement-1"); err != nil {
+		t.Fatalf("ReleasePlacement() error = %v", err)
+	}
+	host, err = s.PlaceVM(ctx, "placement-2", "pool-a", "default", hosts)
+	if err != nil || host != "host-a" {
+		t.Fatalf("PlaceVM() after release = %q, %v; want host-a", host, err)
 	}
 }
