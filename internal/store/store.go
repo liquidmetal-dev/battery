@@ -174,13 +174,14 @@ type Store interface {
 	MarkDrainingHostsVMsDeleting(ctx context.Context) ([]*poolmgrv1alpha1.VMRecord, error)
 	// PlaceVM picks the host for a new VM of pool (poolName, poolNamespace) and reserves
 	// the placement under id, in one transaction. It considers each name in hosts that is
-	// registered and not cordoned, and picks the one with the fewest of the pool's VMs:
-	// its VM records in any phase but DELETING and FAILED, plus its placement reservations.
-	// A tie goes to the host that comes first in hosts. Because the placement is recorded
-	// in the same transaction, the next PlaceVM for the pool counts it, so concurrent
-	// provisions spread across the hosts. Returns ErrNoEligibleHost, and records nothing,
-	// if no host in hosts is eligible. The reservation counts toward CountVMsByHost until
-	// ReleasePlacement(id).
+	// registered and not cordoned, and picks the one with the least memory reserved: the
+	// sum, over the VM records of every pool in any phase but DELETING and FAILED and over
+	// every placement reservation, of the pool template's memory_in_mb (0 when unknown).
+	// A tie goes to the host with the fewest of the pool's own VMs and placements, then to
+	// the host that comes first in hosts. Because the placement is recorded in the same
+	// transaction, the next PlaceVM counts it, so concurrent provisions spread across the
+	// hosts. Returns ErrNoEligibleHost, and records nothing, if no host in hosts is
+	// eligible. The reservation counts toward CountVMsByHost until ReleasePlacement(id).
 	PlaceVM(ctx context.Context, id, poolName, poolNamespace string, hosts []string) (string, error)
 	// ReservePlacement records that a VM with the given id is about to be created on host
 	// for pool (poolName, poolNamespace), in the same transaction as a check that host is
