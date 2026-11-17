@@ -108,6 +108,11 @@ A claim can time out while the manager still commits the lease. To retry a claim
 the same `--request-id` (e.g. a UUID) on every attempt: while the lease exists, a repeat claim
 with that ID returns the same lease instead of claiming another VM.
 
+A pool spec with `"pause_when_available": true` pauses each VM once its `create_commands`
+pass, so a warm VM uses no host CPU while it waits. A claim resumes the VM before the
+`pre_lease_commands` run. The pool's flintlock hosts must support `PauseMicroVM`. See
+[the ADR](docs/adr/2026-11-17-pause-available-vms.md).
+
 ### Build and test
 
 ```sh

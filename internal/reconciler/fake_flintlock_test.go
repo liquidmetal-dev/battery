@@ -52,10 +52,15 @@ type fakeMicroVM struct {
 	// test can observe state while the provisioner is blocked in the call.
 	onCreate func()
 
+	// pauseErr, if set, is what PauseMicroVM returns instead of
+	// succeeding. Guarded by mu.
+	pauseErr error
+
 	mu       sync.Mutex
 	getCalls map[string]int
 	deleted  []string
 	created  []*flintlocktypes.MicroVMSpec
+	paused   []string
 }
 
 var fakeUIDCounter atomic.Int64
@@ -138,6 +143,28 @@ func (f *fakeMicroVM) DeleteMicroVM(ctx context.Context, req *microvmv1alpha1.De
 	}
 	f.deleted = append(f.deleted, req.GetUid())
 	return &emptypb.Empty{}, nil
+}
+
+func (f *fakeMicroVM) PauseMicroVM(_ context.Context, req *microvmv1alpha1.PauseMicroVMRequest) (*emptypb.Empty, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pauseErr != nil {
+		return nil, f.pauseErr
+	}
+	f.paused = append(f.paused, req.GetUid())
+	return &emptypb.Empty{}, nil
+}
+
+func (f *fakeMicroVM) ResumeMicroVM(context.Context, *microvmv1alpha1.ResumeMicroVMRequest) (*emptypb.Empty, error) {
+	return &emptypb.Empty{}, nil
+}
+
+func (f *fakeMicroVM) pausedUIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.paused))
+	copy(out, f.paused)
+	return out
 }
 
 func (f *fakeMicroVM) deletedUIDs() []string {

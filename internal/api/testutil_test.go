@@ -159,6 +159,48 @@ type fakeMicroVM struct {
 	// onDelete, if set, runs inside each DeleteMicroVM before it answers, so
 	// a test can change the store while a delete is in flight.
 	onDelete func(uid string)
+
+	// resumeErr, if set, is what ResumeMicroVM returns instead of
+	// succeeding. paused holds the uids the fake thinks are paused:
+	// PauseMicroVM adds one, ResumeMicroVM removes it. resumed records the
+	// uids ResumeMicroVM was called with.
+	resumeErr error
+	paused    map[string]bool
+	resumed   []string
+}
+
+func (f *fakeMicroVM) PauseMicroVM(_ context.Context, req *microvmv1alpha1.PauseMicroVMRequest) (*emptypb.Empty, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.paused == nil {
+		f.paused = make(map[string]bool)
+	}
+	f.paused[req.GetUid()] = true
+	return &emptypb.Empty{}, nil
+}
+
+func (f *fakeMicroVM) ResumeMicroVM(_ context.Context, req *microvmv1alpha1.ResumeMicroVMRequest) (*emptypb.Empty, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resumed = append(f.resumed, req.GetUid())
+	if f.resumeErr != nil {
+		return nil, f.resumeErr
+	}
+	delete(f.paused, req.GetUid())
+	return &emptypb.Empty{}, nil
+}
+
+// isPaused reports whether the fake thinks uid is paused.
+func (f *fakeMicroVM) isPaused(uid string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.paused[uid]
+}
+
+func (f *fakeMicroVM) resumedUIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.resumed...)
 }
 
 func (f *fakeMicroVM) GetMicroVM(_ context.Context, _ *microvmv1alpha1.GetMicroVMRequest) (*microvmv1alpha1.GetMicroVMResponse, error) {

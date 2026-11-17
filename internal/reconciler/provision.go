@@ -43,6 +43,10 @@ var ErrCreateFailed = errors.New("reconciler: microvm create failed")
 // or the guest-agent never becomes reachable.
 var ErrHookFailed = errors.New("reconciler: create hook failed")
 
+// ErrPauseFailed is returned when a pool has pause_when_available set and
+// flintlock does not pause the new microvm.
+var ErrPauseFailed = errors.New("reconciler: pause failed")
+
 // hookFailureCleanupTimeout bounds each step of ApplyHookFailurePolicy's
 // own cleanup work, run on a context detached from cancellation of its
 // caller's ctx - see ApplyHookFailurePolicy's comment for why. A var so
@@ -282,6 +286,22 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 		}
 	}
 	p.metrics.ObserveHookDuration(hookCreate, pool.GetName(), pool.GetNamespace(), time.Since(hookStart))
+
+	// Pause last, once nothing more needs the guest agent, so the VM waits
+	// in AVAILABLE without using host CPU. A failed pause is handled as a
+	// failed create hook: the VM is not what the pool asked for. The same
+	// write that marks the VM AVAILABLE records it as paused, so ClaimVM
+	// knows to resume it.
+	if pool.GetPauseWhenAvailable() {
+		log.InfoContext(ctx, "reconciler: pausing microvm")
+		if err := PauseVM(ctx, p.flint, vm, p.metrics); err != nil {
+			err = fmt.Errorf("%w: %w", ErrPauseFailed, err)
+			log.ErrorContext(ctx, "reconciler: pausing microvm failed", "error", err)
+			p.applyHookFailurePolicy(ctx, pool, vm)
+			return err
+		}
+		vm.Paused = true
+	}
 
 	if err := p.updatePhase(ctx, pool, vm, poolmgrv1alpha1.VMPhase_AVAILABLE); err != nil {
 		return err

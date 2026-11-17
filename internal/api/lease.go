@@ -315,6 +315,24 @@ func (s *LeaseServer) runPreLeaseHooks(ctx context.Context, pool *poolmgrv1alpha
 		return fmt.Errorf("update vm phase: %w", err)
 	}
 
+	// A VM paused while it waited in AVAILABLE must run again before the
+	// hooks, or the consumer, can reach its guest agent. The VM's own
+	// paused flag decides this, not pool.PauseWhenAvailable, so a VM paused
+	// before the option was turned off is still resumed. A failed resume
+	// is handled as a failed hook. vm.Paused is persisted by the write that
+	// follows: LeaseVM, or the hook failure policy.
+	//
+	// There is no guest agent readiness check after the resume: the guest
+	// agent ran before the pause, and a resume only starts the vCPUs again.
+	// A pre-lease hook that can't reach it fails, as it would on any VM.
+	if vm.GetPaused() {
+		if err := reconciler.ResumeVM(ctx, s.flint, vm, s.metrics); err != nil {
+			s.applyHookFailurePolicy(ctx, pool, vm)
+			return fmt.Errorf("resume vm: %w", err)
+		}
+		vm.Paused = false
+	}
+
 	execClient, err := s.flint.ExecClient(vm.GetFlintlockHost())
 	if err != nil {
 		s.applyHookFailurePolicy(ctx, pool, vm)

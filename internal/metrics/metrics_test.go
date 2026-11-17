@@ -97,3 +97,13 @@ func TestRecordReconcilerUnexpectedExit(t *testing.T) {
 	body := scrape(t, reg)
 	assertContains(t, body, `poolmgr_reconciler_unexpected_exit_total{pool_name="pool-a",pool_namespace="default"} 2`)
 }
+
+func TestObservePowerChangeDuration(t *testing.T) {
+	reg := metrics.NewRegistry()
+	reg.ObservePowerChangeDuration("pause", "pool-a", "default", 20*time.Millisecond)
+	reg.ObservePowerChangeDuration("resume", "pool-a", "default", 2*time.Millisecond)
+
+	body := scrape(t, reg)
+	assertContains(t, body, `poolmgr_vm_power_change_duration_seconds_count{change="pause",pool_name="pool-a",pool_namespace="default"} 1`)
+	assertContains(t, body, `poolmgr_vm_power_change_duration_seconds_bucket{change="resume",pool_name="pool-a",pool_namespace="default",le="0.0025"} 1`)
+}

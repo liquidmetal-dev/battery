@@ -27,6 +27,7 @@ type poolRow struct {
 	hookFailurePolicy          int32
 	heartbeatIntervalNs        int64
 	heartbeatExpiryThresholdNs int64
+	pauseWhenAvailable         bool
 }
 
 // requireDuration rejects a nil duration instead of letting AsDuration() silently return 0:
@@ -88,6 +89,7 @@ func poolToRow(p *poolmgrv1alpha1.PoolSpec) (poolRow, error) {
 		hookFailurePolicy:          int32(p.GetHookFailurePolicy()),
 		heartbeatIntervalNs:        heartbeatInterval.Nanoseconds(),
 		heartbeatExpiryThresholdNs: heartbeatExpiryThreshold.Nanoseconds(),
+		pauseWhenAvailable:         p.GetPauseWhenAvailable(),
 	}, nil
 }
 
@@ -127,6 +129,7 @@ func rowToPool(row poolRow) (*poolmgrv1alpha1.PoolSpec, error) {
 		HookFailurePolicy:        poolmgrv1alpha1.HookFailurePolicy(row.hookFailurePolicy),
 		HeartbeatInterval:        durationpb.New(nanoseconds(row.heartbeatIntervalNs)),
 		HeartbeatExpiryThreshold: durationpb.New(nanoseconds(row.heartbeatExpiryThresholdNs)),
+		PauseWhenAvailable:       row.pauseWhenAvailable,
 	}, nil
 }
 
@@ -151,6 +154,7 @@ type vmRow struct {
 	leaseID       sql.NullString
 	createdAt     int64
 	updatedAt     int64
+	paused        bool
 }
 
 func vmToRow(v *poolmgrv1alpha1.VMRecord) (vmRow, error) {
@@ -171,6 +175,7 @@ func vmToRow(v *poolmgrv1alpha1.VMRecord) (vmRow, error) {
 		phase:         int32(v.GetPhase()),
 		createdAt:     createdAt.UnixNano(),
 		updatedAt:     updatedAt.UnixNano(),
+		paused:        v.GetPaused(),
 	}
 	if v.LeaseId != nil {
 		row.leaseID = sql.NullString{String: *v.LeaseId, Valid: true}
@@ -187,6 +192,7 @@ func rowToVM(row vmRow) *poolmgrv1alpha1.VMRecord {
 		Phase:         poolmgrv1alpha1.VMPhase(row.phase),
 		CreatedAt:     timestamppb.New(time.Unix(0, row.createdAt)),
 		UpdatedAt:     timestamppb.New(time.Unix(0, row.updatedAt)),
+		Paused:        row.paused,
 	}
 	if row.leaseID.Valid {
 		leaseID := row.leaseID.String

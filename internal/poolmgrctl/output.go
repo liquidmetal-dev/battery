@@ -107,16 +107,17 @@ func printPoolJSON(w io.Writer, pool *poolmgrv1alpha1.Pool) error {
 
 func printPoolsTable(w io.Writer, pools []*poolmgrv1alpha1.Pool) error {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "NAME\tNAMESPACE\tSIZE\tAVAILABLE\tLEASED\tPROVISIONING\tQUARANTINED"); err != nil {
+	if _, err := fmt.Fprintln(tw, "NAME\tNAMESPACE\tSIZE\tAVAILABLE\tLEASED\tPROVISIONING\tQUARANTINED\tPAUSE_WHEN_AVAILABLE"); err != nil {
 		return err
 	}
 	for _, pool := range pools {
 		spec := pool.GetSpec()
 		status := pool.GetStatus()
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\t%d\n",
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\t%d\t%t\n",
 			spec.GetName(), spec.GetNamespace(), spec.GetSize(),
 			status.GetAvailableCount(), status.GetLeasedCount(),
-			status.GetProvisioningCount(), status.GetQuarantinedCount()); err != nil {
+			status.GetProvisioningCount(), status.GetQuarantinedCount(),
+			spec.GetPauseWhenAvailable()); err != nil {
 			return err
 		}
 	}

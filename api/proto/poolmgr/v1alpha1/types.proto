@@ -94,6 +94,16 @@ message PoolSpec {
   // HeartbeatExpiryThreshold is how long without a heartbeat before a lease is considered
   // expired.
   google.protobuf.Duration heartbeat_expiry_threshold = 11;
+
+  // PauseWhenAvailable pauses each VM in flintlock once its create_commands pass, so a warm
+  // VM that waits in AVAILABLE uses no host CPU. ClaimVM resumes the VM before it runs the
+  // pre_lease_commands. A failed pause or resume is handled as a failed hook, under
+  // hook_failure_policy. The pool's flintlock hosts must support PauseMicroVM and
+  // ResumeMicroVM.
+  //
+  // A change to it affects only the VMs provisioned after the change. A VM that is already
+  // paused stays paused until a claim resumes it, even if the option is turned off.
+  bool pause_when_available = 12;
 }
 
 // VMPhase is the lifecycle phase of a pool-managed VM.
@@ -123,6 +133,10 @@ message VMRecord {
   // PoolNamespace is the namespace of the pool identified by pool_name (together they form
   // the pool's PoolRef identity).
   string pool_namespace = 8;
+  // Paused is true while battery has paused the microvm in flintlock and not resumed it.
+  // ClaimVM resumes a VM by this field, not by its pool's pause_when_available, so a VM
+  // paused before the option was turned off is still resumed.
+  bool paused = 9;
 }
 
 // LeaseRecord is the pool manager's record of an outstanding claim on a VM. Named

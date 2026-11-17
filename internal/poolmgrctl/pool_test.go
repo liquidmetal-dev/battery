@@ -384,3 +384,18 @@ func TestPoolDelete_ForceFlag(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadPoolSpec_PauseWhenAvailable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pool.json")
+	if err := os.WriteFile(path, []byte(`{"name": "web", "namespace": "default", "pause_when_available": true}`), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	spec, err := loadPoolSpec(path)
+	if err != nil {
+		t.Fatalf("loadPoolSpec() error = %v", err)
+	}
+	if !spec.GetPauseWhenAvailable() {
+		t.Errorf("loadPoolSpec() pause_when_available = false, want true")
+	}
+}

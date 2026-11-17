@@ -425,3 +425,25 @@ func TestPrintHostStatusesTable_UnknownVersion(t *testing.T) {
 		t.Errorf("printHostStatuses() table output = %q, want a VERSION of \"-\" for an unchecked host", buf.String())
 	}
 }
+
+func TestPrintPoolsTable_PauseWhenAvailable(t *testing.T) {
+	paused := samplePoolForOutput("pool-a", "default")
+	paused.Spec.PauseWhenAvailable = true
+	pools := []*poolmgrv1alpha1.Pool{paused, samplePoolForOutput("pool-b", "default")}
+
+	var buf bytes.Buffer
+	if err := printPools(&buf, pools, OutputTable); err != nil {
+		t.Fatalf("printPools() error = %v", err)
+	}
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("printPools() = %d lines, want 3, got:\n%s", len(lines), buf.String())
+	}
+	if !strings.HasSuffix(strings.TrimSpace(lines[0]), "PAUSE_WHEN_AVAILABLE") {
+		t.Errorf("header = %q, want it to end with PAUSE_WHEN_AVAILABLE", lines[0])
+	}
+	if !strings.HasSuffix(strings.TrimSpace(lines[1]), "true") || !strings.HasSuffix(strings.TrimSpace(lines[2]), "false") {
+		t.Errorf("rows = %q, %q, want pool-a true and pool-b false", lines[1], lines[2])
+	}
+}
