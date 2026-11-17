@@ -81,6 +81,18 @@ func (f *FakeMicroVM) DeleteMicroVM(context.Context, *microvmv1alpha1.DeleteMicr
 	return &emptypb.Empty{}, nil
 }
 
+// PauseMicroVM implements the flintlock MicroVM PauseMicroVM RPC. It always
+// succeeds, as flintlock does for a created microvm.
+func (f *FakeMicroVM) PauseMicroVM(context.Context, *microvmv1alpha1.PauseMicroVMRequest) (*emptypb.Empty, error) {
+	return &emptypb.Empty{}, nil
+}
+
+// ResumeMicroVM implements the flintlock MicroVM ResumeMicroVM RPC. It always
+// succeeds, as flintlock does for a created or paused microvm.
+func (f *FakeMicroVM) ResumeMicroVM(context.Context, *microvmv1alpha1.ResumeMicroVMRequest) (*emptypb.Empty, error) {
+	return &emptypb.Empty{}, nil
+}
+
 // ServerInfo implements the flintlock MicroVM ServerInfo RPC, reporting the
 // minimum flintlock version the pool manager will provision on.
 func (f *FakeMicroVM) ServerInfo(context.Context, *emptypb.Empty) (*microvmv1alpha1.ServerInfoResponse, error) {

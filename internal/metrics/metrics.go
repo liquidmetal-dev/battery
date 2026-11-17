@@ -21,6 +21,7 @@ type metricSet struct {
 	hookFailuresTotal              *prometheus.CounterVec
 	leaseDuration                  *prometheus.HistogramVec
 	reconcilerUnexpectedExitsTotal *prometheus.CounterVec
+	powerChangeDuration            *prometheus.HistogramVec
 }
 
 func newMetricSet(reg *prometheus.Registry) *metricSet {
@@ -53,6 +54,13 @@ func newMetricSet(reg *prometheus.Registry) *metricSet {
 			Name: "poolmgr_reconciler_unexpected_exit_total",
 			Help: "Total number of times a pool's Reconciler.Run returned with an error other than context.Canceled, labeled by pool_name/pool_namespace. Expected to stay at 0 - see internal/poolmanager.",
 		}, []string{"pool_name", "pool_namespace"}),
+		powerChangeDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name: "poolmgr_vm_power_change_duration_seconds",
+			Help: "Duration of a successful flintlock PauseMicroVM or ResumeMicroVM call, labeled by change (pause|resume) and pool_name/pool_namespace.",
+			// A resume is on the claim path and should take milliseconds, so
+			// the buckets start at 1ms.
+			Buckets: []float64{.001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5},
+		}, []string{"change", "pool_name", "pool_namespace"}),
 	}
 
 	reg.MustRegister(
@@ -63,6 +71,7 @@ func newMetricSet(reg *prometheus.Registry) *metricSet {
 		m.hookFailuresTotal,
 		m.leaseDuration,
 		m.reconcilerUnexpectedExitsTotal,
+		m.powerChangeDuration,
 	)
 
 	return m
@@ -112,4 +121,11 @@ func (r *Registry) ObserveLeaseDuration(poolName, poolNamespace string, d time.D
 // retried (see internal/poolmanager.Manager.StartReconciler).
 func (r *Registry) RecordReconcilerUnexpectedExit(poolName, poolNamespace string) {
 	r.metrics.reconcilerUnexpectedExitsTotal.WithLabelValues(poolName, poolNamespace).Inc()
+}
+
+// ObservePowerChangeDuration records d as an observation of
+// poolmgr_vm_power_change_duration_seconds for change ("pause" or "resume")
+// and poolName/poolNamespace.
+func (r *Registry) ObservePowerChangeDuration(change, poolName, poolNamespace string, d time.Duration) {
+	r.metrics.powerChangeDuration.WithLabelValues(change, poolName, poolNamespace).Observe(d.Seconds())
 }
