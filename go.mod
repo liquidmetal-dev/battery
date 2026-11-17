@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/google/uuid v1.6.0
 	github.com/grpc-ecosystem/go-grpc-prometheus v1.2.0
-	github.com/liquidmetal-dev/flintlock/api v0.0.0-20261116225821-b4e8c19cb81d
+	github.com/liquidmetal-dev/flintlock/api v0.0.0-20261117105938-a8472c836d95
 	github.com/prometheus/client_golang v1.24.1
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
