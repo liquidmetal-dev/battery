@@ -2654,16 +2654,75 @@ func TestPlaceVM_TieGoesToFirstHost(t *testing.T) {
 	}
 }
 
-// TestPlaceVM_IgnoresVMsOnTheirWayOut: DELETING and FAILED VMs do not
-// count, and neither do another pool's VMs and placements.
+// TestPlaceVM_IgnoresVMsOnTheirWayOut: DELETING and FAILED VMs reserve no
+// memory, so they do not count.
 func TestPlaceVM_IgnoresVMsOnTheirWayOut(t *testing.T) {
 	hosts := []string{"host-a", "host-b"}
 	s := placeTestStore(t, hosts,
 		placedVM("vm-1", "pool-a", "host-a", poolmgrv1alpha1.VMPhase_DELETING),
 		placedVM("vm-2", "pool-a", "host-a", poolmgrv1alpha1.VMPhase_FAILED),
-		placedVM("vm-3", "pool-b", "host-a", poolmgrv1alpha1.VMPhase_AVAILABLE),
-		placedVM("vm-4", "pool-a", "host-b", poolmgrv1alpha1.VMPhase_AVAILABLE),
+		placedVM("vm-3", "pool-a", "host-b", poolmgrv1alpha1.VMPhase_AVAILABLE),
 	)
+	createPoolWithMemory(t, s, "pool-a", 1024)
+
+	host, err := s.PlaceVM(context.Background(), "placement-1", "pool-a", "default", hosts)
+	if err != nil {
+		t.Fatalf("PlaceVM() error = %v", err)
+	}
+	if host != "host-a" {
+		t.Fatalf("PlaceVM() = %q, want host-a (no live VMs)", host)
+	}
+}
+
+// createPoolWithMemory records pool name in namespace default with a template
+// of memoryMB.
+func createPoolWithMemory(t *testing.T, s Store, name string, memoryMB int32) {
+	t.Helper()
+	spec := samplePoolSpec(name)
+	spec.MicrovmTemplate.MemoryInMb = memoryMB
+	if err := s.CreatePool(context.Background(), spec); err != nil {
+		t.Fatalf("CreatePool(%q) error = %v", name, err)
+	}
+}
+
+// TestPlaceVM_CountsOtherPoolsMemory is #163: another pool's VMs count, at
+// their template's memory. host-a has one 8 GiB VM of pool-b; host-b has two
+// 1 GiB VMs of pool-a. host-b has less memory reserved, so it wins, though it
+// has more of pool-a's VMs.
+func TestPlaceVM_CountsOtherPoolsMemory(t *testing.T) {
+	hosts := []string{"host-a", "host-b"}
+	s := placeTestStore(t, hosts,
+		placedVM("vm-1", "pool-b", "host-a", poolmgrv1alpha1.VMPhase_LEASED),
+		placedVM("vm-2", "pool-a", "host-b", poolmgrv1alpha1.VMPhase_AVAILABLE),
+		placedVM("vm-3", "pool-a", "host-b", poolmgrv1alpha1.VMPhase_AVAILABLE),
+	)
+	createPoolWithMemory(t, s, "pool-a", 1024)
+	createPoolWithMemory(t, s, "pool-b", 8192)
+
+	got := placeN(t, s, 6, hosts)
+	// host-b grows from 2048 to 8192 MiB before host-a gets one: 6 on
+	// host-b, then a tie at 8192 goes to host-a with fewer pool-a VMs.
+	if want := map[string]int{"host-b": 6}; !maps.Equal(got, want) {
+		t.Fatalf("placements = %v, want %v", got, want)
+	}
+	host, err := s.PlaceVM(context.Background(), "placement-tie", "pool-a", "default", hosts)
+	if err != nil {
+		t.Fatalf("PlaceVM() error = %v", err)
+	}
+	if host != "host-a" {
+		t.Fatalf("PlaceVM() at equal memory = %q, want host-a (fewer pool-a VMs)", host)
+	}
+}
+
+// TestPlaceVM_CountsOtherPoolsPlacements: a placement of another pool, whose
+// create is still running, reserves its template's memory too.
+func TestPlaceVM_CountsOtherPoolsPlacements(t *testing.T) {
+	hosts := []string{"host-a", "host-b"}
+	s := placeTestStore(t, hosts,
+		placedVM("vm-1", "pool-a", "host-b", poolmgrv1alpha1.VMPhase_AVAILABLE),
+	)
+	createPoolWithMemory(t, s, "pool-a", 1024)
+	createPoolWithMemory(t, s, "pool-b", 4096)
 	if err := s.ReservePlacement(context.Background(), "other", "host-a", "pool-b", "default"); err != nil {
 		t.Fatalf("ReservePlacement() error = %v", err)
 	}
@@ -2672,8 +2731,28 @@ func TestPlaceVM_IgnoresVMsOnTheirWayOut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PlaceVM() error = %v", err)
 	}
+	if host != "host-b" {
+		t.Fatalf("PlaceVM() = %q, want host-b (1024 MiB reserved against 4096)", host)
+	}
+}
+
+// TestPlaceVM_UnknownMemoryCountsAsNone: a VM whose pool record is gone, or
+// whose template has no memory_in_mb, reserves nothing, so the pool's own
+// count decides.
+func TestPlaceVM_UnknownMemoryCountsAsNone(t *testing.T) {
+	hosts := []string{"host-a", "host-b"}
+	s := placeTestStore(t, hosts,
+		placedVM("vm-1", "gone", "host-a", poolmgrv1alpha1.VMPhase_AVAILABLE),
+		placedVM("vm-2", "pool-a", "host-b", poolmgrv1alpha1.VMPhase_AVAILABLE),
+	)
+	createPoolWithMemory(t, s, "pool-a", 0)
+
+	host, err := s.PlaceVM(context.Background(), "placement-1", "pool-a", "default", hosts)
+	if err != nil {
+		t.Fatalf("PlaceVM() error = %v", err)
+	}
 	if host != "host-a" {
-		t.Fatalf("PlaceVM() = %q, want host-a (no live pool-a VMs)", host)
+		t.Fatalf("PlaceVM() = %q, want host-a (no pool-a VMs, no memory known)", host)
 	}
 }
 

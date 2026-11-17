@@ -1187,50 +1187,66 @@ func (s *sqliteStore) PlaceVM(ctx context.Context, id, poolName, poolNamespace s
 	}
 
 	// A VM that is DELETING or FAILED is on its way out, so it does not
-	// count toward the spread. A placement is a VM whose create is still
-	// running, so it does.
-	counts := make(map[string]int)
+	// count. A placement is a VM whose create is still running, so it does.
+	// Each counts at its pool template's memory_in_mb, read from the stored
+	// protojson (memoryInMb), and 0 if the pool or the field is gone. VMs of
+	// every pool count toward the memory; own counts only this pool's.
+	type load struct{ memory, own int64 }
+	loads := make(map[string]load)
 	rows, err = tx.QueryContext(ctx, `
-		SELECT flintlock_host, COUNT(*) FROM vms
-		WHERE pool_name = ? AND pool_namespace = ? AND phase NOT IN (?, ?)
-		GROUP BY flintlock_host
-		UNION ALL
-		SELECT host, COUNT(*) FROM placements
-		WHERE pool_name = ? AND pool_namespace = ?
+		SELECT host, SUM(memory), SUM(own) FROM (
+			SELECT v.flintlock_host AS host,
+				COALESCE(json_extract(p.microvm_template, '$.memoryInMb'), 0) AS memory,
+				(v.pool_name = ? AND v.pool_namespace = ?) AS own
+			FROM vms v
+			LEFT JOIN pools p ON p.name = v.pool_name AND p.namespace = v.pool_namespace
+			WHERE v.phase NOT IN (?, ?)
+			UNION ALL
+			SELECT pl.host,
+				COALESCE(json_extract(p.microvm_template, '$.memoryInMb'), 0),
+				(pl.pool_name = ? AND pl.pool_namespace = ?)
+			FROM placements pl
+			LEFT JOIN pools p ON p.name = pl.pool_name AND p.namespace = pl.pool_namespace
+		)
 		GROUP BY host`,
 		poolName, poolNamespace,
 		int32(poolmgrv1alpha1.VMPhase_DELETING), int32(poolmgrv1alpha1.VMPhase_FAILED),
 		poolName, poolNamespace,
 	)
 	if err != nil {
-		return "", fmt.Errorf("store: count pool vms by host: %w", err)
+		return "", fmt.Errorf("store: sum vm memory by host: %w", err)
 	}
 	for rows.Next() {
 		var (
 			host string
-			n    int
+			l    load
 		)
-		if err := rows.Scan(&host, &n); err != nil {
+		if err := rows.Scan(&host, &l.memory, &l.own); err != nil {
 			_ = rows.Close()
-			return "", fmt.Errorf("store: scan pool vm count: %w", err)
+			return "", fmt.Errorf("store: scan host load: %w", err)
 		}
-		counts[host] += n
+		loads[host] = l
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return "", fmt.Errorf("store: iterate pool vm counts: %w", err)
+		return "", fmt.Errorf("store: iterate host loads: %w", err)
 	}
 	if err := rows.Close(); err != nil {
-		return "", fmt.Errorf("store: close pool vm counts: %w", err)
+		return "", fmt.Errorf("store: close host loads: %w", err)
 	}
 
-	best, bestCount := "", 0
+	// The least memory reserved wins; a tie goes to the fewest of the pool's
+	// own VMs, so a pool still spreads over hosts with equal memory, and then
+	// to the first host in hosts.
+	best := ""
+	var bestLoad load
 	for _, h := range hosts {
 		if !eligible[h] {
 			continue
 		}
-		if c := counts[h]; best == "" || c < bestCount {
-			best, bestCount = h, c
+		l := loads[h]
+		if best == "" || l.memory < bestLoad.memory || (l.memory == bestLoad.memory && l.own < bestLoad.own) {
+			best, bestLoad = h, l
 		}
 	}
 	if best == "" {
