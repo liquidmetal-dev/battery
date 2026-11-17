@@ -150,6 +150,74 @@ func TestProvision_PassesTheTemplatesBalloon(t *testing.T) {
 	}
 }
 
+// TestProvision_OldFlintlockDropsTheBalloon is Richard's review of #162: a
+// flintlockd from before flintlock#1415 accepts a spec with a balloon and
+// drops the field, so the VM would boot with no balloon. Provision deletes
+// that VM and fails, refuses the host without creating anything while it
+// reports the same version, and provisions again once it is upgraded.
+func TestProvision_OldFlintlockDropsTheBalloon(t *testing.T) {
+	vm := &fakeMicroVM{pollsUntilCreated: 0, serverVersion: "v0.16.0", dropBalloon: true}
+	exec := alwaysReadyExec()
+	flint := startFakeFlintlock(t, vm, exec)
+	st := openTestStore(t)
+	seedHost(t, st, "host-a")
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-a"})
+	pool.MicrovmTemplate.Balloon = &flintlocktypes.Balloon{FreePageReporting: true}
+	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), metrics.NewRegistry())
+
+	err := p.Provision(context.Background(), pool)
+	if !errors.Is(err, flintlockclient.ErrBalloonUnsupported) {
+		t.Fatalf("Provision on a flintlockd that drops the balloon: err = %v, want ErrBalloonUnsupported", err)
+	}
+	created := vm.createdSpecs()
+	if len(created) != 1 {
+		t.Fatalf("expected 1 CreateMicroVM call, got %d", len(created))
+	}
+	if got := vm.deletedUIDs(); len(got) != 1 || got[0] != created[0].GetUid() {
+		t.Fatalf("deleted = %v, want the VM that has no balloon, %q", got, created[0].GetUid())
+	}
+	for _, rec := range onlyVMsInPool(t, st, "pool-a") {
+		if rec.GetPhase() != poolmgrv1alpha1.VMPhase_DELETING {
+			t.Fatalf("VM %s is %v, want it gone or DELETING", rec.GetUid(), rec.GetPhase())
+		}
+	}
+
+	err = p.Provision(context.Background(), pool)
+	if !errors.Is(err, flintlockclient.ErrBalloonUnsupported) {
+		t.Fatalf("second Provision: err = %v, want ErrBalloonUnsupported", err)
+	}
+	if got := len(vm.createdSpecs()); got != 1 {
+		t.Fatalf("expected no CreateMicroVM on a host known to drop the balloon, got %d calls", got)
+	}
+
+	vm.mu.Lock()
+	vm.serverVersion, vm.dropBalloon = "v0.17.0", false
+	vm.mu.Unlock()
+	if err := p.Provision(context.Background(), pool); err != nil {
+		t.Fatalf("Provision after the upgrade: %v", err)
+	}
+	if got := vm.createdSpecs(); len(got) != 2 || !got[1].GetBalloon().GetFreePageReporting() {
+		t.Fatalf("expected a second CreateMicroVM with the balloon, got %d calls", len(got))
+	}
+}
+
+// TestProvision_OldFlintlockWithoutBalloon: a pool whose template has no
+// balloon provisions on a flintlockd that would drop one.
+func TestProvision_OldFlintlockWithoutBalloon(t *testing.T) {
+	vm := &fakeMicroVM{pollsUntilCreated: 0, serverVersion: "v0.16.0", dropBalloon: true}
+	flint := startFakeFlintlock(t, vm, alwaysReadyExec())
+	st := openTestStore(t)
+	seedHost(t, st, "host-a")
+
+	pool := samplePool("pool-a", poolmgrv1alpha1.ReplenishmentStrategyType_MIN_SIZE_THRESHOLD, 3, []string{"host-a"})
+	p := reconciler.NewProvisioner(st, flint, fastProvisionConfig(), metrics.NewRegistry())
+
+	if err := p.Provision(context.Background(), pool); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+}
+
 // TestProvision_RejectsOldFlintlock guards against
 // https://github.com/liquidmetal-dev/battery/issues/94: flintlockd before
 // v0.15.2 can put the guest-agent socket at a path too long to dial, so

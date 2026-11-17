@@ -45,8 +45,12 @@ type fakeMicroVM struct {
 	hangDeletesRemaining int
 
 	// serverVersion is what ServerInfo reports; empty means
-	// flintlockclient.MinFlintlockVersion.
+	// flintlockclient.MinFlintlockVersion. Guarded by mu.
 	serverVersion string
+
+	// dropBalloon makes CreateMicroVM leave the balloon out of the spec it
+	// returns, as a flintlockd from before flintlock#1415 does. Guarded by mu.
+	dropBalloon bool
 
 	// onCreate, if set, runs inside CreateMicroVM before it returns, so a
 	// test can observe state while the provisioner is blocked in the call.
@@ -61,7 +65,9 @@ type fakeMicroVM struct {
 var fakeUIDCounter atomic.Int64
 
 func (f *fakeMicroVM) ServerInfo(context.Context, *emptypb.Empty) (*microvmv1alpha1.ServerInfoResponse, error) {
+	f.mu.Lock()
 	version := f.serverVersion
+	f.mu.Unlock()
 	if version == "" {
 		version = flintlockclient.MinFlintlockVersion
 	}
@@ -84,9 +90,18 @@ func (f *fakeMicroVM) CreateMicroVM(_ context.Context, req *microvmv1alpha1.Crea
 		f.onCreate()
 	}
 
+	f.mu.Lock()
+	drop := f.dropBalloon
+	f.mu.Unlock()
+	respSpec := spec
+	if drop {
+		respSpec, _ = proto.Clone(spec).(*flintlocktypes.MicroVMSpec)
+		respSpec.Balloon = nil
+	}
+
 	return &microvmv1alpha1.CreateMicroVMResponse{
 		Microvm: &flintlocktypes.MicroVM{
-			Spec:   spec,
+			Spec:   respSpec,
 			Status: &flintlocktypes.MicroVMStatus{State: flintlocktypes.MicroVMStatus_PENDING},
 		},
 	}, nil

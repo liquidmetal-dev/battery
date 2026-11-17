@@ -197,6 +197,16 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 		spec.Namespace = pool.GetNamespace()
 	}
 
+	// A host whose flintlockd dropped the balloon before is refused until it
+	// reports another version, so it doesn't create and delete a VM on every
+	// tick (#161).
+	if spec.GetBalloon() != nil {
+		if err := p.flint.CheckBalloon(ctx, host); err != nil {
+			log.ErrorContext(ctx, "reconciler: refusing to provision a balloon on flintlock host", "error", err)
+			return fmt.Errorf("reconciler: provision: %w", err)
+		}
+	}
+
 	log.InfoContext(ctx, "reconciler: creating microvm")
 	createResp, err := client.CreateMicroVM(ctx, &microvmv1alpha1.CreateMicroVMRequest{Microvm: spec})
 	if err != nil {
@@ -219,6 +229,18 @@ func (p *Provisioner) Provision(ctx context.Context, pool *poolmgrv1alpha1.PoolS
 		Phase:         poolmgrv1alpha1.VMPhase_PROVISIONING,
 		CreatedAt:     now,
 		UpdatedAt:     now,
+	}
+	// flintlockd echoes the spec it stored. One from before
+	// liquidmetal-dev/flintlock#1415 drops the balloon, and the VM would boot
+	// without one, so delete it and fail the provision (#161).
+	if spec.GetBalloon() != nil && createResp.GetMicrovm().GetSpec().GetBalloon() == nil {
+		p.flint.MarkBalloonUnsupported(host)
+		version, _ := p.flint.FlintlockVersion(host)
+		err := fmt.Errorf("reconciler: provision: %w: host %q runs flintlock %q, which dropped MicroVMSpec.balloon",
+			flintlockclient.ErrBalloonUnsupported, host, version)
+		log.ErrorContext(ctx, "reconciler: flintlock host dropped the balloon, deleting the microvm", "error", err)
+		deleteOrphan(ctx, p.store, p.flint, vm, log)
+		return err
 	}
 	if err := p.store.CreateVM(ctx, vm); err != nil {
 		// No VMRecord was persisted, so there's nothing to quarantine and
