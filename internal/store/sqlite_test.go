@@ -90,6 +90,29 @@ func TestCreateAndGetPool(t *testing.T) {
 	}
 }
 
+// TestCreateAndGetPool_KeepsTheTemplatesBalloon guards
+// https://github.com/liquidmetal-dev/battery/issues/161: the template is
+// stored as protojson, so a field the flintlock API module doesn't know is
+// lost, and the pool's VMs never return the memory they free.
+func TestCreateAndGetPool_KeepsTheTemplatesBalloon(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	want := samplePoolSpec("pool-a")
+	want.MicrovmTemplate.Balloon = &flintlocktypes.Balloon{FreePageReporting: true}
+	if err := s.CreatePool(ctx, want); err != nil {
+		t.Fatalf("CreatePool() error = %v", err)
+	}
+
+	got, err := s.GetPool(ctx, "pool-a", "default")
+	if err != nil {
+		t.Fatalf("GetPool() error = %v", err)
+	}
+	if !got.GetMicrovmTemplate().GetBalloon().GetFreePageReporting() {
+		t.Errorf("GetPool() microvm template balloon = %+v, want free_page_reporting", got.GetMicrovmTemplate().GetBalloon())
+	}
+}
+
 func TestCreatePoolNilDuration(t *testing.T) {
 	tests := []struct {
 		name   string

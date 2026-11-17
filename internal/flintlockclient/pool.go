@@ -50,6 +50,10 @@ type Conn struct {
 	versionMu sync.Mutex
 	version   string
 	versionOK bool
+	// balloonUnsupported is the version this host ran when its flintlockd
+	// dropped a balloon from a CreateMicroVM (see MarkBalloonUnsupported);
+	// empty if it never has. Guarded by versionMu.
+	balloonUnsupported string
 }
 
 // Dial validates host and builds a Conn for it. grpc.NewClient doesn't
